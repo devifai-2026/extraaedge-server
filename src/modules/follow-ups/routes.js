@@ -1,0 +1,208 @@
+import express from 'express';
+import { z } from 'zod';
+import { authRequired } from '../../middleware/auth.js';
+import { tenantRequired } from '../../middleware/tenant.js';
+import { validate } from '../../middleware/validate.js';
+import { optimisticLock } from '../../middleware/optimisticLock.js';
+import { tenantQuery, tenantTx } from '../../db/tenant.js';
+import { notFound, forbidden, validationError } from '../../lib/errors.js';
+import { isValidRRule } from '../../lib/rrule.js';
+import { publish } from '../../lib/queue.js';
+import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+
+const router = express.Router();
+router.use(authRequired, tenantRequired);
+
+const createSchema = z.object({
+  lead_id: z.string().uuid(),
+  next_action_datetime: z.coerce.date(),
+  comment: z.string().optional(),
+  stage_id: z.string().uuid().optional(),
+  sub_stage_id: z.string().uuid().optional(),
+  recurrence_rule: z.string().optional(),
+  recurrence_end: z.coerce.date().optional(),
+});
+const updateSchema = createSchema.partial().omit({ lead_id: true });
+const listQuery = z.object({
+  date: z.string().optional(),
+  date_from: z.string().optional(),
+  date_to: z.string().optional(),
+  user_id: z.string().uuid().optional(),
+  lead_id: z.string().uuid().optional(),
+  status: z.enum(['planned', 'done', 'missed', 'cancelled']).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+const idParam = z.object({ id: z.string().uuid() });
+
+router.get('/', validate({ query: listQuery }), async (req, res, next) => {
+  try {
+    const conds = ['f.deleted_at IS NULL'];
+    const params = [];
+    if (req.query.date) { params.push(req.query.date); conds.push(`DATE(f.next_action_datetime AT TIME ZONE $${params.length + 1}) = $${params.length}`); params.push(req.tenant.timezone ?? 'Asia/Kolkata'); }
+    if (req.query.date_from) { params.push(req.query.date_from); conds.push(`f.next_action_datetime >= $${params.length}::timestamptz`); }
+    if (req.query.date_to) { params.push(req.query.date_to); conds.push(`f.next_action_datetime <= $${params.length}::timestamptz`); }
+    if (req.query.user_id) { params.push(req.query.user_id); conds.push(`f.created_by = $${params.length}`); }
+    if (req.query.lead_id) { params.push(req.query.lead_id); conds.push(`f.lead_id = $${params.length}`); }
+    if (req.query.status) { params.push(req.query.status); conds.push(`f.status = $${params.length}`); }
+    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+      params.push(req.user.id);
+      conds.push(`(f.created_by = $${params.length} OR EXISTS (SELECT 1 FROM leads l WHERE l.id = f.lead_id AND l.assigned_to = $${params.length}))`);
+    }
+    const where = `WHERE ${conds.join(' AND ')}`;
+    const offset = (req.query.page - 1) * req.query.limit;
+    params.push(req.query.limit, offset);
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT f.*, l.name AS lead_name, l.phone AS lead_phone, l.stage_id AS lead_stage_id,
+              u.name AS creator_name
+         FROM lead_followups f
+         JOIN leads l ON l.id = f.lead_id
+         LEFT JOIN users u ON u.id = f.created_by
+         ${where}
+         ORDER BY f.next_action_datetime ASC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.get('/my', async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT f.*, l.name AS lead_name, l.phone AS lead_phone
+         FROM lead_followups f
+         JOIN leads l ON l.id = f.lead_id
+        WHERE f.deleted_at IS NULL AND f.status = 'planned'
+          AND (f.created_by = $1 OR l.assigned_to = $1)
+        ORDER BY f.next_action_datetime ASC LIMIT 200`,
+      [req.user.id],
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.get('/overdue', async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT f.*, l.name AS lead_name
+         FROM lead_followups f JOIN leads l ON l.id = f.lead_id
+        WHERE f.deleted_at IS NULL AND f.status = 'planned' AND f.next_action_datetime < now()
+          AND (f.created_by = $1 OR l.assigned_to = $1)
+        ORDER BY f.next_action_datetime ASC`,
+      [req.user.id],
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.post('/', validate({ body: createSchema }), async (req, res, next) => {
+  try {
+    if (req.body.recurrence_rule && !isValidRRule(req.body.recurrence_rule)) {
+      throw validationError([{ path: 'recurrence_rule', message: 'invalid RRULE string' }]);
+    }
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `INSERT INTO lead_followups (lead_id, next_action_datetime, comment, stage_id, sub_stage_id, created_by, recurrence_rule, recurrence_end, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'planned') RETURNING *`,
+      [req.body.lead_id, req.body.next_action_datetime, req.body.comment ?? null, req.body.stage_id ?? null, req.body.sub_stage_id ?? null, req.user.id, req.body.recurrence_rule ?? null, req.body.recurrence_end ?? null],
+    );
+    await tenantQuery(
+      req.tenant,
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1,$2,'follow_up_scheduled',$3,$4::jsonb)`,
+      [req.body.lead_id, req.user.id, 'Follow-up scheduled', JSON.stringify({ at: req.body.next_action_datetime })],
+    );
+    await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.FOLLOWUP_SCHEDULED, {
+      type: EVENT_TYPES.FOLLOWUP_SCHEDULED,
+      tenantId: req.tenant.id,
+      occurredAt: new Date().toISOString(),
+      actorUserId: req.user.id,
+      entityType: 'follow_up',
+      entityId: rows[0].id,
+      payload: { lead_id: req.body.lead_id, next_action_datetime: req.body.next_action_datetime },
+    });
+    res.status(201).json({ data: rows[0], meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.put(
+  '/:id',
+  validate({ params: idParam, body: updateSchema }),
+  optimisticLock(async (req) => {
+    const { rows } = await tenantQuery(req.tenant, `SELECT updated_at FROM lead_followups WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
+    return rows[0]?.updated_at ?? null;
+  }),
+  async (req, res, next) => {
+    try {
+      if (req.body.recurrence_rule && !isValidRRule(req.body.recurrence_rule)) {
+        throw validationError([{ path: 'recurrence_rule', message: 'invalid RRULE' }]);
+      }
+      const { rows: existing } = await tenantQuery(req.tenant, `SELECT created_by FROM lead_followups WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
+      if (!existing[0]) throw notFound('Follow-up not found');
+      if (existing[0].created_by !== req.user.id && req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) throw forbidden('Not your follow-up');
+      const fields = []; const params = []; let i = 1;
+      for (const [k, v] of Object.entries(req.body)) {
+        if (v === undefined) continue;
+        fields.push(`${k} = $${i}`); params.push(v); i += 1;
+      }
+      params.push(req.params.id);
+      const { rows } = await tenantQuery(req.tenant, `UPDATE lead_followups SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`, params);
+      res.json({ data: rows[0], meta: { requestId: req.id } });
+    } catch (err) { next(err); }
+  },
+);
+
+router.post('/:id/complete', validate({ params: idParam }), async (req, res, next) => {
+  try {
+    const result = await tenantTx(req.tenant, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE lead_followups
+            SET status = 'done', completed_at = now(), completed_by = $2
+          WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+        [req.params.id, req.user.id],
+      );
+      if (!rows[0]) throw notFound('Follow-up not found');
+      await client.query(
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary) VALUES ($1,$2,'follow_up_completed',$3)`,
+        [rows[0].lead_id, req.user.id, 'Follow-up completed'],
+      );
+      return rows[0];
+    });
+    await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.FOLLOWUP_COMPLETED, {
+      type: EVENT_TYPES.FOLLOWUP_COMPLETED,
+      tenantId: req.tenant.id,
+      occurredAt: new Date().toISOString(),
+      actorUserId: req.user.id,
+      entityType: 'follow_up',
+      entityId: result.id,
+      payload: { lead_id: result.lead_id },
+    });
+    res.json({ data: result, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/reschedule', validate({ params: idParam, body: z.object({ next_action_datetime: z.coerce.date() }) }), async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `UPDATE lead_followups SET next_action_datetime = $2, status = 'planned', reminder_sent_at = NULL
+        WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+      [req.params.id, req.body.next_action_datetime],
+    );
+    if (!rows[0]) throw notFound('Follow-up not found');
+    res.json({ data: rows[0], meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.delete('/:id', validate({ params: idParam }), async (req, res, next) => {
+  try {
+    await tenantQuery(req.tenant, `UPDATE lead_followups SET deleted_at = now(), status = 'cancelled' WHERE id = $1`, [req.params.id]);
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+export default router;

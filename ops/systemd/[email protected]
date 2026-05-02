@@ -1,0 +1,18 @@
+[Unit]
+Description=ExtraaEdge Worker — %i
+After=network.target redis-server.service
+
+[Service]
+Type=simple
+User=extraaedge
+WorkingDirectory=/opt/extraaedge
+EnvironmentFile=/etc/extraaedge/.env
+ExecStart=/usr/bin/node src/workers/%i.js
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/extraaedge/worker-%i.log
+StandardError=append:/var/log/extraaedge/worker-%i.log
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

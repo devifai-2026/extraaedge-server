@@ -1,0 +1,18 @@
+[Unit]
+Description=ExtraaEdge Backend API
+After=network.target postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=extraaedge
+WorkingDirectory=/opt/extraaedge
+EnvironmentFile=/etc/extraaedge/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/extraaedge/api.log
+StandardError=append:/var/log/extraaedge/api.log
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
