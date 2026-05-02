@@ -34,6 +34,21 @@ export const touchLogin = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE users SET last_login_at = now() WHERE id = $1`, [id]);
 };
 
+// Audit a login / logout / expired event so admins can chart per-day login counts.
+export const logLoginEvent = async (tenant, { user_id, kind, session_id, ip, user_agent }) => {
+  try {
+    await tenantQuery(
+      tenant,
+      `INSERT INTO user_login_events (user_id, kind, session_id, ip, user_agent)
+         VALUES ($1, $2, $3, $4, $5)`,
+      [user_id, kind, session_id ?? null, ip ?? null, user_agent ?? null],
+    );
+  } catch (err) {
+    // Audit table is best-effort — never fail the login flow over it.
+    // (Intentional swallow.)
+  }
+};
+
 export const updatePasswordHash = async (tenant, id, password_hash) => {
   await tenantQuery(tenant, `UPDATE users SET password_hash = $2 WHERE id = $1`, [id, password_hash]);
 };

@@ -4,6 +4,9 @@ import express from 'express';
 import authRouter from './modules/auth/routes.js';
 import platformTenantsRouter from './modules/tenants/routes.js';
 import platformUsersRouter from './modules/platform-users/routes.js';
+import platformPlansRouter from './modules/plans/routes.js';
+import platformAuditRouter from './modules/platform-audit/routes.js';
+import platformTicketsRouter from './modules/platform-tickets/routes.js';
 import impersonationRouter from './modules/impersonation/routes.js';
 import customRolesRouter from './modules/custom-roles/routes.js';
 import usersRouter from './modules/users/routes.js';
@@ -26,7 +29,6 @@ import fieldPermissionsRouter from './modules/field-permissions/routes.js';
 import duplicatesRouter from './modules/duplicates/routes.js';
 import savedFiltersRouter from './modules/saved-filters/routes.js';
 import followUpsRouter from './modules/follow-ups/routes.js';
-import userAvailabilityRouter from './modules/user-availability/routes.js';
 import quickAddRouter from './modules/quick-add/routes.js';
 import bulkIngestionRouter from './modules/bulk-ingestion/routes.js';
 import rawDataRouter from './modules/raw-data/routes.js';
@@ -56,7 +58,7 @@ import reportsRouter from './modules/reports/routes.js';
 import workSessionsRouter from './modules/work-sessions/routes.js';
 
 // ---- Pending modules (wired as these passes complete) ----
-// Pass 7: follow-ups, user-availability, quick-add
+// Pass 7: follow-ups, quick-add
 // Pass 8: bulk-ingestion, raw-data, failed-leads
 // Pass 9: communications (email/sms/whatsapp), scheduled-sends
 // Pass 10: calls, payments, subscriptions
@@ -74,6 +76,9 @@ export const mountRoutes = (app) => {
   // Platform (product_owner / support_admin)
   api.use('/platform/tenants', platformTenantsRouter);
   api.use('/platform/users', platformUsersRouter);
+  api.use('/platform/plans', platformPlansRouter);
+  api.use('/platform/audit-log', platformAuditRouter);
+  api.use('/platform/tickets', platformTicketsRouter);
   api.use('/platform/impersonate', impersonationRouter);
 
   // Tenant — identity & access
@@ -104,7 +109,6 @@ export const mountRoutes = (app) => {
   api.use('/duplicates', duplicatesRouter);
   api.use('/saved-filters', savedFiltersRouter);
   api.use('/follow-ups', followUpsRouter);
-  api.use('/availability', userAvailabilityRouter);
   api.use('/quick-add', quickAddRouter);
   api.use('/bulk/leads', bulkIngestionRouter);
   api.use('/raw-data', rawDataRouter);

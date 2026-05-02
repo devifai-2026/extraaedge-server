@@ -17,6 +17,7 @@ const ensureSystemDb = async () => {
     database: 'postgres',
     user: env.TENANT_DB_SUPERUSER,
     password: env.TENANT_DB_SUPERUSER_PASSWORD,
+    ssl: env.TENANT_DB_SSL ? { rejectUnauthorized: false } : false,
   });
   await admin.connect();
   try {
@@ -38,15 +39,18 @@ const run = (cmd, args) => {
   if (r.status !== 0) throw new Error(`${cmd} ${args.join(' ')} failed`);
 };
 
+const PRODUCT_OWNER_EMAIL = 'owner' + '@' + 'extraaedge.local';
+const DEMO_ADMIN_EMAIL = 'admin' + '@' + 'demo.local';
+
 const main = async () => {
   logger.info('Creating system DB if missing…');
   await ensureSystemDb();
   logger.info('Running system migrations…');
-  run('node', ['scripts/run-migrations.js', '--target', 'system']);
+  run('node', ['scripts/run-migrations.js', '--target=system']);
   logger.info('Bootstrapping product_owner (demo credentials)…');
-  run('node', ['scripts/create-product-owner.js', '--name=Product Owner', '[email protected]', '--password=ChangeMe123!']);
+  run('node', ['scripts/create-product-owner.js', '--name=ProductOwner', `--email=${PRODUCT_OWNER_EMAIL}`, '--password=ChangeMe123!']);
   logger.info('Provisioning demo tenant…');
-  run('node', ['scripts/provision-tenant.js', '--name=Demo Institute', '--slug=demo', '--admin-name=Demo Admin', '[email protected]', '--admin-password=ChangeMe123!']);
+  run('node', ['scripts/provision-tenant.js', '--name=DemoInstitute', '--slug=demo', '--admin-name=DemoAdmin', `--admin-email=${DEMO_ADMIN_EMAIL}`, '--admin-password=ChangeMe123!']);
   logger.info('Setup complete. Start with: npm run dev');
 };
 

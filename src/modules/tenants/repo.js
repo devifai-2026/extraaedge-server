@@ -136,7 +136,11 @@ export const list = async ({ q, status, page, limit }) => {
 };
 
 export const softDelete = async (id) => {
-  await sysQuery(`UPDATE tenants SET deleted_at = now(), status = 'cancelled' WHERE id = $1`, [id]);
+  const { rows } = await sysQuery(
+    `UPDATE tenants SET deleted_at = now(), status = 'cancelled' WHERE id = $1 AND deleted_at IS NULL RETURNING id, slug`,
+    [id],
+  );
+  return rows[0] ?? null;
 };
 
 export const runInSystemTx = sysTx;

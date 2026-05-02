@@ -8,10 +8,18 @@ export const createUserSchema = z.object({
   role: z.enum(['super_admin', 'sales_manager', 'counsellor']),
   role_id: z.string().uuid().optional(),
   manager_id: z.string().uuid().optional(),
+  // Multi-manager reporting (1:N). First entry is also stored as `manager_id`
+  // (primary manager) so legacy lead-scope logic keeps working.
+  manager_ids: z.array(z.string().uuid()).optional(),
   team_id: z.string().uuid().optional(),
+  designation: z.string().optional(),
   track_work_time: z.boolean().optional(),
   session_timeout_minutes: z.coerce.number().int().min(5).max(120).optional(),
   permissions_json: z.record(z.string(), z.any()).optional(),
+  // Account active flag — used by the User Profiles "Account Status" toggle.
+  // On create this almost always stays at the DB default `true`; on update
+  // it's the deactivate / reactivate switch.
+  is_active: z.boolean().optional(),
 });
 
 export const updateUserSchema = createUserSchema.partial().omit({ password: true });

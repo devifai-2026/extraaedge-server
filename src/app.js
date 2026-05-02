@@ -15,6 +15,10 @@ export const buildApp = () => {
 
   app.disable('x-powered-by');
   app.set('trust proxy', true);
+  // Disable ETag generation. Our list endpoints intentionally show fresh data
+  // (lead assignments, scores, flags), and 304-Not-Modified responses against
+  // a stale browser ETag were silently serving stale rows.
+  app.set('etag', false);
 
   app.use(requestId);
   app.use(

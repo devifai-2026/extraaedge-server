@@ -6,13 +6,11 @@
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import pgMigrate from 'node-pg-migrate';
+import migrationRunner from 'node-pg-migrate';
 import { env } from '../src/config/env.js';
 import { sysQuery, closeSystemPool } from '../src/db/system.js';
 import { decrypt } from '../src/lib/crypto.js';
 import { logger } from '../src/lib/logger.js';
-
-const { default: migrationRunner } = pgMigrate;
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 
 const parseArgs = () => {
@@ -28,7 +26,7 @@ const migrateSystem = async () => {
       database: env.SYSTEM_DB_NAME,
       user: env.SYSTEM_DB_USER,
       password: env.SYSTEM_DB_PASSWORD,
-      ssl: env.SYSTEM_DB_SSL,
+      ssl: env.SYSTEM_DB_SSL ? { rejectUnauthorized: false } : false,
     },
     dir: path.resolve(thisDir, '../src/db/migrations/system'),
     migrationsTable: 'pgmigrations',
@@ -46,7 +44,7 @@ const migrateOneTenant = async (tenant) => {
       database: tenant.db_name,
       user: tenant.db_user,
       password: decrypt(tenant.db_password_encrypted),
-      ssl: env.TENANT_DB_SSL,
+      ssl: env.TENANT_DB_SSL ? { rejectUnauthorized: false } : false,
     },
     dir: path.resolve(thisDir, '../src/db/migrations/tenant'),
     migrationsTable: 'pgmigrations',

@@ -20,8 +20,6 @@ const ruleSchema = z.object({
   target_users: z.array(z.string().uuid()).optional(),
   target_team_id: z.string().uuid().optional(),
   fallback_user_id: z.string().uuid().optional(),
-  respect_working_hours: z.boolean().default(true),
-  skip_unavailable: z.boolean().default(true),
   is_active: z.boolean().default(true),
 });
 const idParam = z.object({ id: z.string().uuid() });
@@ -38,21 +36,41 @@ router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES
   } catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: ruleSchema }), async (req, res, next) => {
-  try {
-    const { rows } = await tenantQuery(
-      req.tenant,
-      `INSERT INTO assignment_rules (name, priority, condition_json, strategy, target_users, target_team_id, fallback_user_id, respect_working_hours, skip_unavailable, is_active)
-       VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [req.body.name, req.body.priority, JSON.stringify(req.body.condition_json), req.body.strategy, req.body.target_users ?? null, req.body.target_team_id ?? null, req.body.fallback_user_id ?? null, req.body.respect_working_hours, req.body.skip_unavailable, req.body.is_active],
-    );
-    await tenantQuery(req.tenant, `INSERT INTO assignment_rule_state (rule_id) VALUES ($1) ON CONFLICT DO NOTHING`, [rows[0].id]);
-    res.status(201).json({ data: rows[0], meta: { requestId: req.id } });
-  } catch (err) { next(err); }
+// Create + delete are intentionally disabled. Each tenant has exactly 6 fixed
+// rule templates (one per strategy) seeded on provisioning. Admins choose
+// which one is active and can tweak its targets/condition. We return 405 with
+// a friendly hint so direct API consumers know why.
+router.post('/', (_req, res) => {
+  res.status(405).json({
+    error: {
+      code: 'METHOD_NOT_ALLOWED',
+      message: 'Each tenant has 6 fixed rule templates. Edit one of them instead of creating a new rule.',
+    },
+  });
+});
+router.delete('/:id', (_req, res) => {
+  res.status(405).json({
+    error: {
+      code: 'METHOD_NOT_ALLOWED',
+      message: 'Rule templates cannot be deleted. Toggle is_active=false to disable a rule.',
+    },
+  });
 });
 
+// Edit a rule. Enforces "at most 1 active rule per tenant" — flipping
+// is_active=true on one rule auto-deactivates every other rule.
 router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: ruleSchema.partial() }), async (req, res, next) => {
   try {
+    if (req.body.is_active === true) {
+      // Deactivate every other rule in this tenant before activating this one.
+      // Single-tx via two queries is fine — the rule-processor only reads
+      // the active subset and tolerates a sub-millisecond gap.
+      await tenantQuery(
+        req.tenant,
+        `UPDATE assignment_rules SET is_active = false WHERE id <> $1 AND deleted_at IS NULL`,
+        [req.params.id],
+      );
+    }
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
       if (v === undefined) continue;
@@ -63,11 +81,6 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ para
     const { rows } = await tenantQuery(req.tenant, `UPDATE assignment_rules SET ${fields.join(', ')} WHERE id = $${i} AND deleted_at IS NULL RETURNING *`, params);
     res.json({ data: rows[0], meta: { requestId: req.id } });
   } catch (err) { next(err); }
-});
-
-router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
-  try { await tenantQuery(req.tenant, `UPDATE assignment_rules SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
-  catch (err) { next(err); }
 });
 
 // Test a rule against a specific lead (dry run)

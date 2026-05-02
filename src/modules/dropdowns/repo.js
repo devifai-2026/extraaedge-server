@@ -1,18 +1,73 @@
 import { tenantQuery } from '../../db/tenant.js';
 
+// Per-type table metadata.
+//   table:        the bare DB table (used by INSERT / UPDATE / soft-delete / reorder).
+//   alias:        SELECT-time alias when we need to JOIN. INSERT/UPDATE never use it.
+//   selectCols:   columns returned to the client. Already prefixed with the alias.
+//   bareCols:     same column list without aliases (used by INSERT…RETURNING).
+//   joins:        extra JOIN clauses for SELECT only. Empty string if none.
+//
+// `bareCols` doubles as the "shape" detector for `hasOrderIndex` etc.
 const TABLE_MAP = {
-  stages: { table: 'lead_stages', cols: 'id, name, code, order_index, color, is_terminal, is_active' },
-  'sub-stages': { table: 'lead_sub_stages', cols: 'id, name, stage_id, is_default, order_index, is_active' },
-  channels: { table: 'lead_channels', cols: 'id, name, order_index, is_active' },
-  sources: { table: 'lead_sources_dict', cols: 'id, name, order_index, is_active' },
-  campaigns: { table: 'lead_campaigns_dict', cols: 'id, name, order_index, is_active' },
-  mediums: { table: 'lead_mediums', cols: 'id, name, order_index, is_active' },
-  countries: { table: 'countries', cols: 'id, name, iso, is_active' },
-  states: { table: 'states', cols: 'id, name, country_id, is_active' },
-  genders: { table: 'genders', cols: 'id, name, is_active' },
-  degrees: { table: 'degrees', cols: 'id, name, level, is_active' },
-  specializations: { table: 'specializations', cols: 'id, name, is_active' },
-  universities: { table: 'universities', cols: 'id, name, country_id, is_active' },
+  stages: {
+    table: 'lead_stages',
+    bareCols: 'id, name, code, order_index, color, is_terminal, is_success, is_active, score, updated_at',
+  },
+  'sub-stages': {
+    table: 'lead_sub_stages',
+    alias: 'ss',
+    bareCols: 'id, name, stage_id, is_default, order_index, is_active, score, updated_at',
+    selectCols:
+      'ss.id, ss.name, ss.stage_id, ss.is_default, ss.order_index, ss.is_active, ss.score, ss.updated_at,' +
+      ' parent.name AS stage_name, parent.code AS stage_code',
+    joins: 'LEFT JOIN lead_stages parent ON parent.id = ss.stage_id',
+  },
+  channels: { table: 'lead_channels', bareCols: 'id, name, order_index, is_active' },
+  sources: { table: 'lead_sources_dict', bareCols: 'id, name, order_index, is_active' },
+  campaigns: { table: 'lead_campaigns_dict', bareCols: 'id, name, order_index, is_active' },
+  mediums: { table: 'lead_mediums', bareCols: 'id, name, order_index, is_active' },
+  countries: { table: 'countries', bareCols: 'id, name, iso, is_active' },
+  // Surface country name on every row so the FE table doesn't show bare UUIDs.
+  states: {
+    table: 'states',
+    alias: 'st',
+    bareCols: 'id, name, country_id, is_active',
+    selectCols: 'st.id, st.name, st.country_id, st.is_active, c.name AS country_name, c.iso AS country_iso',
+    joins: 'LEFT JOIN countries c ON c.id = st.country_id',
+  },
+  genders: { table: 'genders', bareCols: 'id, name, is_active' },
+  degrees: { table: 'degrees', bareCols: 'id, name, level, is_active' },
+  specializations: { table: 'specializations', bareCols: 'id, name, is_active' },
+  universities: {
+    table: 'universities',
+    alias: 'u',
+    bareCols: 'id, name, country_id, is_active',
+    selectCols: 'u.id, u.name, u.country_id, u.is_active, c.name AS country_name, c.iso AS country_iso',
+    joins: 'LEFT JOIN countries c ON c.id = u.country_id',
+  },
+};
+
+const hasOrderIndex = (info) => info && info.bareCols.includes('order_index');
+
+// Pick the right column list / FROM / WHERE prefix for SELECT statements.
+const selectShape = (info) => {
+  if (info.alias) {
+    return {
+      cols: info.selectCols || info.bareCols,
+      from: `${info.table} ${info.alias} ${info.joins || ''}`,
+      // qualify deleted_at + name + order_index by the alias so JOINed rows don't collide
+      deletedAt: `${info.alias}.deleted_at`,
+      name: `${info.alias}.name`,
+      orderIndex: `${info.alias}.order_index`,
+    };
+  }
+  return {
+    cols: info.bareCols,
+    from: info.table,
+    deletedAt: 'deleted_at',
+    name: 'name',
+    orderIndex: 'order_index',
+  };
 };
 
 export const getTableForType = (type) => TABLE_MAP[type];
@@ -20,9 +75,13 @@ export const getTableForType = (type) => TABLE_MAP[type];
 export const listByType = async (tenant, type) => {
   const info = TABLE_MAP[type];
   if (!info) return [];
+  const s = selectShape(info);
+  const orderBy = hasOrderIndex(info)
+    ? `ORDER BY COALESCE(${s.orderIndex}, 0), ${s.name}`
+    : `ORDER BY ${s.name}`;
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT ${info.cols} FROM ${info.table} WHERE deleted_at IS NULL ORDER BY COALESCE(order_index, 0), name`,
+    `SELECT ${s.cols} FROM ${s.from} WHERE ${s.deletedAt} IS NULL ${orderBy}`,
   );
   return rows;
 };
@@ -42,7 +101,7 @@ export const insert = async (tenant, type, input) => {
   }
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO ${info.table} (${columns.join(',')}) VALUES (${placeholders.join(',')}) RETURNING ${info.cols}`,
+    `INSERT INTO ${info.table} (${columns.join(',')}) VALUES (${placeholders.join(',')}) RETURNING ${info.bareCols}`,
     values,
   );
   return rows[0];
@@ -62,7 +121,7 @@ export const update = async (tenant, type, id, updates) => {
   values.push(id);
   const { rows } = await tenantQuery(
     tenant,
-    `UPDATE ${info.table} SET ${fields.join(', ')} WHERE id = $${i} AND deleted_at IS NULL RETURNING ${info.cols}`,
+    `UPDATE ${info.table} SET ${fields.join(', ')} WHERE id = $${i} AND deleted_at IS NULL RETURNING ${info.bareCols}`,
     values,
   );
   return rows[0] ?? null;
@@ -75,7 +134,7 @@ export const remove = async (tenant, type, id) => {
 
 export const reorder = async (tenant, type, orderList) => {
   const info = TABLE_MAP[type];
-  if (!info.cols.includes('order_index')) return;
+  if (!hasOrderIndex(info)) return;
   for (const o of orderList) {
     // eslint-disable-next-line no-await-in-loop
     await tenantQuery(tenant, `UPDATE ${info.table} SET order_index = $2 WHERE id = $1`, [o.id, o.order_index]);

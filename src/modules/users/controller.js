@@ -51,3 +51,34 @@ export const myTeam = async (req, res, next) => {
   try { res.json({ data: await service.myTeam(req.tenant, req.user.id), meta: { requestId: req.id } }); }
   catch (err) { next(err); }
 };
+
+export const userLeads = async (req, res, next) => {
+  try {
+    const status = req.query.status === 'past' ? 'past' : 'current';
+    const data = await service.userLeads(req.tenant, req.params.id, { status, limit: Number(req.query.limit) || 100 });
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const userWorkSessions = async (req, res, next) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 180);
+    const data = await service.userWorkSessions(req.tenant, req.params.id, { days });
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const userLoginEvents = async (req, res, next) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 180);
+    const data = await service.userLoginEvents(req.tenant, req.params.id, { days });
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const orgTree = async (req, res, next) => {
+  try {
+    const data = await service.orgTree(req.tenant, req.user);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};

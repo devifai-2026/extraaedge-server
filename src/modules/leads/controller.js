@@ -7,6 +7,27 @@ export const list = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const stageCounts = async (req, res, next) => {
+  try {
+    const data = await service.stageCounts(req.tenant, req.user);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const autoAssignUnassigned = async (req, res, next) => {
+  try {
+    const data = await service.autoAssignUnassigned(req.tenant);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const bulkAssign = async (req, res, next) => {
+  try {
+    const result = await service.bulkAssign(req.tenant, req.user, req.body);
+    res.json({ data: result, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const get = async (req, res, next) => {
   try { res.json({ data: await service.getLead(req.tenant, req.user, req.params.id), meta: { requestId: req.id } }); }
   catch (err) { next(err); }

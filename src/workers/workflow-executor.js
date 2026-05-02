@@ -69,8 +69,31 @@ registerWorker(QUEUE_NAMES.WORKFLOW, async ({ data }) => {
           switch (action.type) {
             case 'assign': {
               if (lead && action.user_id) {
-                await tenantQuery(tenant, `UPDATE leads SET assigned_to = $2 WHERE id = $1`, [lead.id, action.user_id]);
-                await tenantQuery(tenant, `INSERT INTO lead_assignments (lead_id, assigned_to, assigned_by, assignment_type, is_active, status) VALUES ($1,$2,NULL,'auto_assign',true,'open')`, [lead.id, action.user_id]);
+                // Snap manager_id from the new owner so leadlist + LeadCard
+                // hierarchy stay coherent. Also drop a timeline row so the
+                // workflow's effect is auditable. Mirrors rule-processor.js.
+                const { rows: mgrRows } = await tenantQuery(
+                  tenant,
+                  `SELECT manager_id FROM users WHERE id = $1`,
+                  [action.user_id],
+                );
+                const newManagerId = mgrRows[0]?.manager_id ?? null;
+                await tenantQuery(
+                  tenant,
+                  `UPDATE leads SET assigned_to = $2, manager_id = $3, last_activity_at = now() WHERE id = $1`,
+                  [lead.id, action.user_id, newManagerId],
+                );
+                await tenantQuery(
+                  tenant,
+                  `INSERT INTO lead_assignments (lead_id, assigned_to, assigned_by, assignment_type, is_active, status) VALUES ($1,$2,NULL,'auto_assign',true,'open')`,
+                  [lead.id, action.user_id],
+                );
+                await tenantQuery(
+                  tenant,
+                  `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+                   VALUES ($1, NULL, 'auto_assign', 'Assigned by workflow', $2::jsonb)`,
+                  [lead.id, JSON.stringify({ assigned_to: action.user_id, workflow_run_id: data.run_id })],
+                );
               }
               break;
             }

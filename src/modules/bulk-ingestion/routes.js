@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const router = express.Router();
-router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER));
+// All authenticated tenant users (including counsellors) may upload leads.
+router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
 
 // Serve the canonical CSV template. Institutes download this and fill it in.
 router.get('/template', async (_req, res, next) => {

@@ -24,11 +24,16 @@ export const itemCreateSchema = z.object({
   order_index: z.number().int().optional(),
   color: z.string().optional(),
   is_terminal: z.boolean().optional(),
+  // True when reaching this stage means the lead is "converted" (e.g. Enrolled).
+  is_success: z.boolean().optional(),
+  is_active: z.boolean().optional(),
   stage_id: z.string().uuid().optional(),
   is_default: z.boolean().optional(),
   country_id: z.string().uuid().optional(),
   level: z.string().optional(),
   iso: z.string().optional(),
+  // Numeric weight added to lead_score when a lead enters this stage/sub-stage.
+  score: z.coerce.number().int().optional(),
 });
 
 export const itemUpdateSchema = itemCreateSchema.partial();

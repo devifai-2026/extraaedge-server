@@ -4,7 +4,12 @@ const COLS = `
   u.id, u.email, u.phone, u.name, u.avatar_r2_key, u.role, u.role_id,
   u.manager_id, u.team_id, u.is_active, u.last_login_at,
   u.session_timeout_minutes, u.track_work_time, u.permissions_json,
-  u.created_at, u.updated_at, r.name AS role_name, r.scope AS role_scope
+  u.designation,
+  u.created_at, u.updated_at, r.name AS role_name, r.scope AS role_scope,
+  COALESCE(
+    (SELECT array_agg(um.manager_id) FROM user_managers um WHERE um.user_id = u.id),
+    ARRAY[]::uuid[]
+  ) AS manager_ids
 `;
 
 export const list = async (tenant, { q, role, team_id, manager_id, is_active, page, limit }) => {
@@ -59,9 +64,9 @@ export const findByEmail = async (tenant, email) => {
 export const insert = async (tenant, input, password_hash) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO users (name, email, phone, password_hash, role, role_id, manager_id, team_id, track_work_time, session_timeout_minutes, permissions_json, is_active)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, COALESCE($9, true), COALESCE($10, 15), $11, true)
-     RETURNING id, email, phone, name, avatar_r2_key, role, role_id, manager_id, team_id, is_active, session_timeout_minutes, track_work_time, permissions_json, created_at, updated_at`,
+    `INSERT INTO users (name, email, phone, password_hash, role, role_id, manager_id, team_id, track_work_time, session_timeout_minutes, permissions_json, designation, is_active)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, COALESCE($9, true), COALESCE($10, 15), $11, $12, true)
+     RETURNING id, email, phone, name, avatar_r2_key, role, role_id, manager_id, team_id, is_active, session_timeout_minutes, track_work_time, permissions_json, designation, created_at, updated_at`,
     [
       input.name,
       input.email,
@@ -74,9 +79,33 @@ export const insert = async (tenant, input, password_hash) => {
       input.track_work_time ?? null,
       input.session_timeout_minutes ?? null,
       input.permissions_json ?? null,
+      input.designation ?? null,
     ],
   );
   return rows[0];
+};
+
+// Replace-all the user's reporting managers in user_managers join table.
+export const setManagers = async (tenant, user_id, manager_ids) => {
+  await tenantQuery(tenant, `DELETE FROM user_managers WHERE user_id = $1`, [user_id]);
+  for (const mid of (manager_ids || [])) {
+    if (!mid || mid === user_id) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await tenantQuery(
+      tenant,
+      `INSERT INTO user_managers (user_id, manager_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [user_id, mid],
+    );
+  }
+};
+
+export const getManagerIds = async (tenant, user_id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT manager_id FROM user_managers WHERE user_id = $1 ORDER BY created_at`,
+    [user_id],
+  );
+  return rows.map((r) => r.manager_id);
 };
 
 export const update = async (tenant, id, updates) => {
@@ -135,6 +164,91 @@ export const teamUsers = async (tenant, ids) => {
       WHERE u.id = ANY($1::uuid[]) AND u.deleted_at IS NULL
       ORDER BY u.role DESC, u.name`,
     [ids],
+  );
+  return rows;
+};
+
+// ---------- Per-user views (used by /users/:id/* endpoints) ----------
+
+// status=current → leads currently owned. status=past → leads previously
+// assigned but moved on (read from lead_assignments where is_active=false).
+export const userLeads = async (tenant, userId, { status, limit = 100 }) => {
+  if (status === 'past') {
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT DISTINCT ON (l.id)
+              l.id, l.name, l.email, l.phone, l.created_at, l.updated_at, l.lead_score,
+              s.name AS stage_name, ss.name AS sub_stage_name,
+              p.name AS program_name,
+              cur.name AS current_owner_name,
+              la.created_at AS assigned_at,
+              la.reason AS assignment_reason
+         FROM lead_assignments la
+         JOIN leads l   ON l.id  = la.lead_id AND l.deleted_at IS NULL
+         LEFT JOIN lead_stages     s   ON s.id  = l.stage_id
+         LEFT JOIN lead_sub_stages ss  ON ss.id = l.sub_stage_id
+         LEFT JOIN programs        p   ON p.id  = l.program_id
+         LEFT JOIN users           cur ON cur.id = l.assigned_to
+        WHERE la.assigned_to = $1
+          AND la.is_active = false
+          AND l.assigned_to IS DISTINCT FROM $1
+        ORDER BY l.id, la.created_at DESC
+        LIMIT $2`,
+      [userId, limit],
+    );
+    return rows;
+  }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.id, l.name, l.email, l.phone, l.created_at, l.updated_at, l.lead_score,
+            s.name AS stage_name, ss.name AS sub_stage_name,
+            p.name AS program_name
+       FROM leads l
+       LEFT JOIN lead_stages     s   ON s.id  = l.stage_id
+       LEFT JOIN lead_sub_stages ss  ON ss.id = l.sub_stage_id
+       LEFT JOIN programs        p   ON p.id  = l.program_id
+      WHERE l.assigned_to = $1 AND l.deleted_at IS NULL
+      ORDER BY l.updated_at DESC
+      LIMIT $2`,
+    [userId, limit],
+  );
+  return rows;
+};
+
+// Recent work sessions for the time-sheet table on the user-profile page.
+// We compute per-row active_seconds on the way out so the FE can render it.
+export const userWorkSessions = async (tenant, userId, { days = 30 } = {}) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, status, started_at, ended_at, paused_seconds, active_minutes,
+            restart_of_day, last_paused_at
+       FROM work_sessions
+      WHERE user_id = $1 AND started_at > now() - ($2::int * interval '1 day')
+      ORDER BY started_at DESC`,
+    [userId, days],
+  );
+  return rows.map((r) => {
+    const start = new Date(r.started_at).getTime();
+    const end = r.ended_at ? new Date(r.ended_at).getTime() : Date.now();
+    let paused = (r.paused_seconds || 0) * 1000;
+    if (r.status === 'paused' && r.last_paused_at) {
+      paused += Date.now() - new Date(r.last_paused_at).getTime();
+    }
+    const active_seconds = Math.max(0, Math.floor((end - start - paused) / 1000));
+    return { ...r, active_seconds };
+  });
+};
+
+
+export const userLoginEvents = async (tenant, userId, { days = 30 } = {}) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT created_at, kind, ip, user_agent, session_id
+       FROM user_login_events
+      WHERE user_id = $1 AND created_at > now() - ($2::int * interval '1 day')
+      ORDER BY created_at DESC
+      LIMIT 200`,
+    [userId, days],
   );
   return rows;
 };

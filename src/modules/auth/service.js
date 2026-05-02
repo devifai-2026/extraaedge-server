@@ -131,6 +131,8 @@ const loginTenantUser = async ({ email, password, tenant_slug, ip, user_agent })
   const refreshExpiry = new Date(Date.now() + REFRESH_TTL_SECONDS() * 1000);
   const session = await repo.createSession(tenant, { user_id: user.id, ip, user_agent, expires_at: refreshExpiry });
   await repo.touchLogin(tenant, user.id);
+  // Append-only login audit (used by per-day login counts on the dashboard).
+  await repo.logLoginEvent(tenant, { user_id: user.id, kind: 'login', session_id: session.id, ip, user_agent });
 
   const allowedTabs = buildAllowedTabs(user.tab_permissions);
   const claims = {
@@ -265,6 +267,7 @@ export const logout = async ({ user }) => {
   if (user.tenantSlug) {
     const tenant = await resolveTenantBySlug(user.tenantSlug);
     await repo.revokeSession(tenant, user.sessionId);
+    await repo.logLoginEvent(tenant, { user_id: user.id, kind: 'logout', session_id: user.sessionId });
   } else {
     await platformSvc.revokeSession(user.sessionId);
   }

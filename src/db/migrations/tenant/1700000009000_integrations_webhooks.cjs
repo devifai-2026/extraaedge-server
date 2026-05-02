@@ -134,7 +134,7 @@ exports.up = (pgm) => {
       verified_at timestamptz,
       created_at timestamptz NOT NULL DEFAULT now()
     );
-    CREATE INDEX ON otp_verifications (address, purpose) WHERE verified_at IS NULL AND expires_at > now();
+    CREATE INDEX ON otp_verifications (address, purpose, expires_at) WHERE verified_at IS NULL;
   `);
 };
 

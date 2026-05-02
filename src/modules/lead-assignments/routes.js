@@ -45,6 +45,18 @@ router.post(
   async (req, res, next) => {
     try {
       const { lead_id, assigned_to, assignment_type, reason } = req.body;
+
+      // Sales-manager scope: the new owner must be inside this manager's team
+      // hierarchy. Admins can reassign to any active counsellor.
+      if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+        const { teamHierarchy } = await import('../users/repo.js');
+        const teamIds = await teamHierarchy(req.tenant, req.user.id);
+        if (!teamIds.includes(assigned_to)) {
+          const { forbidden } = await import('../../lib/errors.js');
+          throw forbidden('You can only reassign to counsellors in your team');
+        }
+      }
+
       const result = await tenantTx(req.tenant, async (client) => {
         const { rows: leadRows } = await client.query(`SELECT assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`, [lead_id]);
         if (!leadRows[0]) throw notFound('Lead not found');
@@ -55,7 +67,15 @@ router.post(
            VALUES ($1,$2,$3,$4,$5,$6,true,'open') RETURNING *`,
           [lead_id, from_user_id, assigned_to, req.user.id, assignment_type, reason ?? null],
         );
-        await client.query(`UPDATE leads SET assigned_to = $2, last_activity_at = now() WHERE id = $1`, [lead_id, assigned_to]);
+        // Snap manager_id to the new counsellor's primary manager so the
+        // hierarchy chip on the LeadCard reflects reality. Same logic that
+        // bulkAssign uses.
+        const { rows: mgrRow } = await client.query(`SELECT manager_id FROM users WHERE id = $1`, [assigned_to]);
+        const newManagerId = mgrRow[0]?.manager_id ?? null;
+        await client.query(
+          `UPDATE leads SET assigned_to = $2, manager_id = $3, last_activity_at = now() WHERE id = $1`,
+          [lead_id, assigned_to, newManagerId],
+        );
         await client.query(
           `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
            VALUES ($1,$2,$3,$4,$5::jsonb)`,
@@ -72,6 +92,17 @@ router.post(
         entityId: lead_id,
         payload: { assigned_to, assignment_type },
       });
+      // Real-time: notify the new counsellor + their managers + admins,
+      // AND the previous counsellor (so they see "lead moved away from you").
+      const { notifyLeadChange } = await import('../../lib/socket.js');
+      notifyLeadChange({
+        tenant: req.tenant,
+        lead: { id: lead_id, assigned_to },
+        type: 'lead.reassigned',
+        actor_id: req.user.id,
+        previous_owner_id: result.from_user_id ?? null,
+        payload: { from_user_id: result.from_user_id, assignment_type, reason: reason ?? null },
+      }).catch(() => {});
       res.status(201).json({ data: result, meta: { requestId: req.id } });
     } catch (err) { next(err); }
   },

@@ -9,7 +9,8 @@ import { recordPlatformAudit } from '../../services/platform-audit.js';
 const buildDbIdentity = (slug) => {
   const db_name = `tenant_${slug.replace(/-/g, '_')}`;
   const db_user = `tuser_${slug.replace(/-/g, '_')}`;
-  const db_password = randomToken(24);
+  // Cloud SQL requires upper+lower+digit+symbol — append guarantees regardless of randomToken's charset.
+  const db_password = `Aa1!${randomToken(24)}`;
   return { db_name, db_user, db_password };
 };
 
@@ -92,5 +93,16 @@ export const resumeTenant = async (id, platform_user_id, ip, user_agent) => {
   if (!row) throw notFound('Tenant not found');
   invalidateTenantCache(row.slug);
   await recordPlatformAudit({ platform_user_id, action: 'tenant.resumed', entity_type: 'tenant', entity_id: id, tenant_id: id, ip, user_agent });
+  return row;
+};
+
+// Soft-delete: marks deleted_at, sets status='suspended'. The tenant_<slug>
+// database is intentionally NOT dropped — we keep it for audit / recovery.
+// A separate hard-delete flow can be added later if/when admins need it.
+export const deleteTenant = async (id, platform_user_id, ip, user_agent) => {
+  const row = await repo.softDelete(id);
+  if (!row) throw notFound('Tenant not found');
+  invalidateTenantCache(row.slug);
+  await recordPlatformAudit({ platform_user_id, action: 'tenant.deleted', entity_type: 'tenant', entity_id: id, tenant_id: id, ip, user_agent });
   return row;
 };

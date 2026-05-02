@@ -8,10 +8,17 @@ import { leadCreateSchema } from '../leads/schema.js';
 const router = express.Router();
 router.use(authRequired, tenantRequired);
 
-// Quick add: same as POST /leads but with on_duplicate='warn' by default (so FE can prompt).
+// Quick add: same as POST /leads but
+//   - on_duplicate='warn' by default (so FE can prompt)
+//   - skip_auto_assign=true so the lead lands in the Unassigned bucket
+//     (admin/manager assigns manually from the dashboard).
 router.post('/', validate({ body: leadCreateSchema }), async (req, res, next) => {
   try {
-    const lead = await createLead(req.tenant, req.user, req.body, { on_duplicate: 'warn', force: false });
+    const lead = await createLead(req.tenant, req.user, req.body, {
+      on_duplicate: 'warn',
+      force: false,
+      skip_auto_assign: true,
+    });
     res.status(201).json({ data: lead, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });

@@ -9,6 +9,7 @@ import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { isValidRRule } from '../../lib/rrule.js';
 import { publish } from '../../lib/queue.js';
 import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { teamHierarchy } from '../users/repo.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -27,11 +28,14 @@ const listQuery = z.object({
   date: z.string().optional(),
   date_from: z.string().optional(),
   date_to: z.string().optional(),
-  user_id: z.string().uuid().optional(),
+  user_id: z.string().uuid().optional(),                 // creator
+  assigned_user_id: z.string().uuid().optional(),        // current owner of the lead
   lead_id: z.string().uuid().optional(),
+  q: z.string().optional(),                              // search by lead name / phone / email
   status: z.enum(['planned', 'done', 'missed', 'cancelled']).optional(),
+  stage_id: z.string().uuid().optional(),
   page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  limit: z.coerce.number().int().min(1).max(500).default(50),
 });
 const idParam = z.object({ id: z.string().uuid() });
 
@@ -39,29 +43,101 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
   try {
     const conds = ['f.deleted_at IS NULL'];
     const params = [];
-    if (req.query.date) { params.push(req.query.date); conds.push(`DATE(f.next_action_datetime AT TIME ZONE $${params.length + 1}) = $${params.length}`); params.push(req.tenant.timezone ?? 'Asia/Kolkata'); }
+    if (req.query.date) {
+      params.push(req.query.date);
+      params.push(req.tenant.timezone ?? 'Asia/Kolkata');
+      conds.push(`DATE(f.next_action_datetime AT TIME ZONE $${params.length}) = $${params.length - 1}`);
+    }
     if (req.query.date_from) { params.push(req.query.date_from); conds.push(`f.next_action_datetime >= $${params.length}::timestamptz`); }
-    if (req.query.date_to) { params.push(req.query.date_to); conds.push(`f.next_action_datetime <= $${params.length}::timestamptz`); }
-    if (req.query.user_id) { params.push(req.query.user_id); conds.push(`f.created_by = $${params.length}`); }
-    if (req.query.lead_id) { params.push(req.query.lead_id); conds.push(`f.lead_id = $${params.length}`); }
-    if (req.query.status) { params.push(req.query.status); conds.push(`f.status = $${params.length}`); }
+    if (req.query.date_to)   { params.push(req.query.date_to);   conds.push(`f.next_action_datetime <= $${params.length}::timestamptz`); }
+    if (req.query.user_id)          { params.push(req.query.user_id);          conds.push(`f.created_by = $${params.length}`); }
+    if (req.query.assigned_user_id) { params.push(req.query.assigned_user_id); conds.push(`l.assigned_to = $${params.length}`); }
+    if (req.query.lead_id)          { params.push(req.query.lead_id);          conds.push(`f.lead_id = $${params.length}`); }
+    if (req.query.status)           { params.push(req.query.status);           conds.push(`f.status = $${params.length}`); }
+    if (req.query.stage_id)         { params.push(req.query.stage_id);         conds.push(`l.stage_id = $${params.length}`); }
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`);
+      conds.push(`(l.name ILIKE $${params.length} OR l.phone ILIKE $${params.length} OR l.email::text ILIKE $${params.length})`);
+    }
     if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
       params.push(req.user.id);
-      conds.push(`(f.created_by = $${params.length} OR EXISTS (SELECT 1 FROM leads l WHERE l.id = f.lead_id AND l.assigned_to = $${params.length}))`);
+      conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
+    } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+      // Manager sees follow-ups for any lead currently owned by their team
+      // (recursive manager_id chain) plus follow-ups they themselves created.
+      const team = await teamHierarchy(req.tenant, req.user.id);
+      params.push(team);
+      params.push(req.user.id);
+      conds.push(`(l.assigned_to = ANY($${params.length - 1}::uuid[]) OR f.created_by = $${params.length})`);
     }
     const where = `WHERE ${conds.join(' AND ')}`;
     const offset = (req.query.page - 1) * req.query.limit;
     params.push(req.query.limit, offset);
     const { rows } = await tenantQuery(
       req.tenant,
-      `SELECT f.*, l.name AS lead_name, l.phone AS lead_phone, l.stage_id AS lead_stage_id,
-              u.name AS creator_name
+      `SELECT f.*,
+              l.name  AS lead_name,
+              l.phone AS lead_phone,
+              l.email AS lead_email,
+              l.stage_id AS lead_stage_id,
+              s.name  AS lead_stage_name,
+              ss.name AS lead_sub_stage_name,
+              p.name  AS lead_program_name,
+              l.assigned_to AS lead_assigned_to,
+              au.name AS lead_assigned_to_name,
+              u.name  AS creator_name
          FROM lead_followups f
-         JOIN leads l ON l.id = f.lead_id
-         LEFT JOIN users u ON u.id = f.created_by
+         JOIN leads l            ON l.id  = f.lead_id
+         LEFT JOIN lead_stages     s   ON s.id  = l.stage_id
+         LEFT JOIN lead_sub_stages ss  ON ss.id = l.sub_stage_id
+         LEFT JOIN programs        p   ON p.id  = l.program_id
+         LEFT JOIN users           u   ON u.id  = f.created_by
+         LEFT JOIN users           au  ON au.id = l.assigned_to
          ${where}
          ORDER BY f.next_action_datetime ASC
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// Per-day follow-up counts for the calendar dot indicators. Same scope rules
+// as /follow-ups (counsellor=own, manager=team via leads.assigned_to, admin=all).
+router.get('/calendar', async (req, res, next) => {
+  try {
+    const date_from = req.query.date_from;
+    const date_to   = req.query.date_to;
+    const conds = ['f.deleted_at IS NULL'];
+    const params = [];
+    if (date_from) { params.push(date_from); conds.push(`f.next_action_datetime >= $${params.length}::timestamptz`); }
+    if (date_to)   { params.push(date_to);   conds.push(`f.next_action_datetime <= $${params.length}::timestamptz`); }
+    if (req.query.assigned_user_id) { params.push(req.query.assigned_user_id); conds.push(`l.assigned_to = $${params.length}`); }
+    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+      params.push(req.user.id);
+      conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
+    } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+      const team = await teamHierarchy(req.tenant, req.user.id);
+      params.push(team);
+      params.push(req.user.id);
+      conds.push(`(l.assigned_to = ANY($${params.length - 1}::uuid[]) OR f.created_by = $${params.length})`);
+    }
+    params.push(req.tenant.timezone ?? 'Asia/Kolkata');
+    const tzIdx = params.length;
+    const where = `WHERE ${conds.join(' AND ')}`;
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT to_char((f.next_action_datetime AT TIME ZONE $${tzIdx})::date, 'YYYY-MM-DD') AS day,
+              count(*) FILTER (WHERE f.status = 'planned')::int   AS planned,
+              count(*) FILTER (WHERE f.status = 'done')::int      AS done,
+              count(*) FILTER (WHERE f.status = 'missed')::int    AS missed,
+              count(*) FILTER (WHERE f.status = 'cancelled')::int AS cancelled,
+              count(*)::int AS total
+         FROM lead_followups f
+         JOIN leads l ON l.id = f.lead_id
+         ${where}
+         GROUP BY 1
+         ORDER BY 1`,
       params,
     );
     res.json({ data: rows, meta: { requestId: req.id } });

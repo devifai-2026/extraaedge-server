@@ -3,6 +3,8 @@ import * as usersRepo from '../users/repo.js';
 import { duplicateDetected, notFound, forbidden } from '../../lib/errors.js';
 import { publish } from '../../lib/queue.js';
 import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { notifyLeadChange, notifyAdmins } from '../../lib/socket.js';
+import { applyAssignment, recalcScore } from '../../workers/rule-processor.js';
 import { tenantQuery } from '../../db/tenant.js';
 
 const emit = (tenant, type, payload) =>
@@ -24,6 +26,66 @@ export const listLeads = async (tenant, actor, query) => {
   return repo.list(tenant, query, scope);
 };
 
+export const stageCounts = async (tenant, actor) => {
+  const scope = await computeScope(tenant, actor);
+  return repo.stageCounts(tenant, scope);
+};
+
+// Bulk auto-assign: runs the active assignment rule against every unassigned
+// lead in the tenant. Used by the LeadList "Auto-assign unassigned" button.
+// Returns { found, assigned, skipped } so the UI can show a toast.
+export const autoAssignUnassigned = async (tenant) => {
+  const { rows: leads } = await tenantQuery(
+    tenant,
+    `SELECT * FROM leads
+      WHERE assigned_to IS NULL AND deleted_at IS NULL
+      ORDER BY created_at`,
+  );
+  let assigned = 0;
+  let skipped = 0;
+  for (const lead of leads) {
+    try {
+      const r = await applyAssignment(tenant, lead);
+      if (r) assigned += 1;
+      else skipped += 1;
+    } catch {
+      skipped += 1;
+    }
+  }
+  return { found: leads.length, assigned, skipped };
+};
+
+export const bulkAssign = async (tenant, actor, { lead_ids, filter, assigned_to, reason }) => {
+  const scope = await computeScope(tenant, actor);
+  const result = await repo.bulkAssign(tenant, {
+    lead_ids: lead_ids ?? null,
+    filter: filter ?? null,
+    assigned_to,
+    assigned_by: actor?.id ?? null,
+    reason,
+    scope,
+  });
+  for (const id of result.ids) {
+    emit(tenant, EVENT_TYPES.LEAD_UPDATED, {
+      actorUserId: actor?.id ?? null,
+      entityType: 'lead',
+      entityId: id,
+      payload: { changes: ['assigned_to'], assigned_to, reason: reason ?? null },
+    });
+    // Real-time push: counsellor receives "lead reassigned to you", their managers
+    // and admins also see it. The actor (manager/admin doing the reassign) is
+    // excluded from the user-room emit by actor_id but always sees admin-room copies.
+    notifyLeadChange({
+      tenant,
+      lead: { id, assigned_to, name: result.names?.[id] },
+      type: 'lead.reassigned',
+      actor_id: actor?.id,
+      payload: { assigned_to, reason: reason ?? null, count: result.affected },
+    }).catch(() => {});
+  }
+  return result;
+};
+
 export const getLead = async (tenant, actor, id) => {
   const row = await repo.findByIdWithRelations(tenant, id);
   if (!row) throw notFound('Lead not found');
@@ -35,7 +97,7 @@ export const getLead = async (tenant, actor, id) => {
   return row;
 };
 
-export const createLead = async (tenant, actor, input, { on_duplicate = 'block', force = false } = {}) => {
+export const createLead = async (tenant, actor, input, { on_duplicate = 'block', force = false, skip_auto_assign = false } = {}) => {
   if (!force) {
     const dups = await repo.findDuplicates(tenant, {
       phone: input.phone,
@@ -50,13 +112,37 @@ export const createLead = async (tenant, actor, input, { on_duplicate = 'block',
       // create_new: fall through, caller explicitly accepted
     }
   }
-  const lead = await repo.insertLead(tenant, input, actor?.id);
-  emit(tenant, EVENT_TYPES.LEAD_CREATED, {
-    actorUserId: actor?.id ?? null,
-    entityType: 'lead',
-    entityId: lead.id,
-    payload: { lead },
-  });
+  let lead = await repo.insertLead(tenant, input, actor?.id);
+  // Quick-add leaves the lead unassigned by skipping the round-robin worker.
+  // Admins / managers manually pick an owner from the dashboard's "Unassigned"
+  // bucket (filter `assigned_to=null` on /leads).
+  if (!skip_auto_assign) {
+    // Run round-robin synchronously when no owner was supplied so the API
+    // response already reflects the assignment. The FE refetches the list
+    // right after create and was racing the in-process queue otherwise.
+    if (!input.assigned_to) {
+      try {
+        await applyAssignment(tenant, lead);
+      } catch {
+        // assignment is best-effort — don't block create on rule errors
+      }
+    }
+    // Score the lead synchronously so the create response and the FE refetch
+    // both see the rule-derived score. The async LEAD_CREATED worker no
+    // longer touches lead_score for this same reason.
+    await recalcScore(tenant, lead.id).catch(() => {});
+    lead = (await repo.findById(tenant, lead.id)) ?? lead;
+    emit(tenant, EVENT_TYPES.LEAD_CREATED, {
+      actorUserId: actor?.id ?? null,
+      entityType: 'lead',
+      entityId: lead.id,
+      payload: { lead },
+    });
+  }
+  // Real-time push: who's affected depends on the assignment state.
+  //   - assigned at create time (manual single create) → counsellor + their managers
+  //   - unassigned (quick add)                          → admins only
+  notifyLeadChange({ tenant, lead, type: 'lead.created', actor_id: actor?.id }).catch(() => {});
   return lead;
 };
 
@@ -77,21 +163,69 @@ export const updateLead = async (tenant, actor, id, updates) => {
   return lead;
 };
 
+// Hard-delete the lead and every dependent row (handled by FK CASCADEs).
+// Super-admin only — enforced at the route layer.
 export const deleteLead = async (tenant, actor, id) => {
   const existing = await repo.findById(tenant, id);
   if (!existing) throw notFound('Lead not found');
-  await repo.softDelete(tenant, id);
+  await repo.hardDelete(tenant, id);
+  emit(tenant, EVENT_TYPES.LEAD_DELETED ?? 'lead.deleted', {
+    actorUserId: actor?.id ?? null,
+    entityType: 'lead',
+    entityId: id,
+    payload: { name: existing.name },
+  });
 };
 
 export const changeStage = async (tenant, actor, id, stageChange) => {
-  const updated = await repo.changeStage(tenant, id, stageChange, actor?.id);
-  if (!updated) throw notFound('Lead not found');
+  const result = await repo.changeStage(tenant, id, stageChange, actor?.id);
+  if (!result) throw notFound('Lead not found');
+  // Recompute the score authoritatively so the new stage's `score` column +
+  // any matching lead_score_config rules are reflected immediately. The repo
+  // intentionally no longer touches lead_score; this is the single source of
+  // truth.
+  await recalcScore(tenant, id).catch(() => {});
+  // If the stage change carried a next-action datetime (e.g. lead moved to
+  // a "Followup" stage), drop a lead_followups row so it surfaces in the
+  // Follow-up Manager for the assigned counsellor. The follow-ups module
+  // owns its own list/scope queries; we just write the row here.
+  if (stageChange.next_action_datetime) {
+    await tenantQuery(
+      tenant,
+      `INSERT INTO lead_followups (lead_id, next_action_datetime, comment, stage_id, sub_stage_id, created_by, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'planned')`,
+      [
+        id,
+        stageChange.next_action_datetime,
+        stageChange.remarks ?? null,
+        stageChange.stage_id,
+        stageChange.sub_stage_id ?? null,
+        actor?.id ?? null,
+      ],
+    );
+    await tenantQuery(
+      tenant,
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1, $2, 'followup_scheduled', 'Follow-up scheduled', $3::jsonb)`,
+      [id, actor?.id ?? null, JSON.stringify({ at: stageChange.next_action_datetime })],
+    );
+  }
+  const updated = (await repo.findById(tenant, id)) ?? result;
   emit(tenant, EVENT_TYPES.LEAD_STAGE_CHANGED, {
     actorUserId: actor?.id ?? null,
     entityType: 'lead',
     entityId: id,
     payload: { stage_id: stageChange.stage_id, sub_stage_id: stageChange.sub_stage_id },
   });
+  // Real-time: managers + admins of the assigned counsellor see the stage change.
+  // The actor (counsellor) is excluded inside notifyLeadChange via actor_id.
+  notifyLeadChange({
+    tenant,
+    lead: updated,
+    type: 'lead.stage_changed',
+    actor_id: actor?.id,
+    payload: { stage_id: stageChange.stage_id, sub_stage_id: stageChange.sub_stage_id },
+  }).catch(() => {});
   return updated;
 };
 
@@ -102,33 +236,53 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
   if (before) { params.push(before); beforeClause = `AND created_at < $2::timestamptz`; }
   const { rows } = await tenantQuery(
     tenant,
-    `(
-       SELECT id, 'activity' AS kind, type AS subtype, summary AS body, metadata_json, created_at, user_id
-         FROM lead_activities
-        WHERE lead_id = $1 ${beforeClause}
+    `WITH events AS (
+       (
+         SELECT id, 'activity' AS kind, type AS subtype, summary AS body, metadata_json, created_at, user_id
+           FROM lead_activities
+          WHERE lead_id = $1 ${beforeClause}
+       )
+       UNION ALL
+       (
+         SELECT id, 'note' AS kind, visibility AS subtype, body, attachments AS metadata_json, created_at, user_id
+           FROM lead_notes WHERE lead_id = $1 AND deleted_at IS NULL ${beforeClause}
+       )
+       UNION ALL
+       (
+         SELECT id, 'message' AS kind, channel AS subtype,
+                COALESCE(error, status) AS body,
+                jsonb_build_object('provider_message_id', provider_message_id, 'template_id', template_id, 'status', status) AS metadata_json,
+                COALESCE(sent_at, scheduled_for, delivered_at) AS created_at, user_id
+           FROM message_log WHERE lead_id = $1 ${beforeClause.replace('created_at', 'COALESCE(sent_at, scheduled_for, delivered_at)')}
+       )
+       UNION ALL
+       (
+         SELECT id, 'call' AS kind, direction AS subtype, remarks AS body,
+                jsonb_build_object('status', status, 'duration_seconds', duration_seconds, 'disposition_code', disposition_code, 'recording_r2_key', recording_r2_key) AS metadata_json,
+                COALESCE(ended_at, started_at, created_at) AS created_at, user_id
+           FROM calls WHERE lead_id = $1 AND deleted_at IS NULL ${beforeClause.replace('created_at', 'COALESCE(ended_at, started_at, created_at)')}
+       )
      )
-     UNION ALL
-     (
-       SELECT id, 'note' AS kind, visibility AS subtype, body, attachments AS metadata_json, created_at, user_id
-         FROM lead_notes WHERE lead_id = $1 AND deleted_at IS NULL ${beforeClause}
-     )
-     UNION ALL
-     (
-       SELECT id, 'message' AS kind, channel AS subtype,
-              COALESCE(error, status) AS body,
-              jsonb_build_object('provider_message_id', provider_message_id, 'template_id', template_id, 'status', status) AS metadata_json,
-              COALESCE(sent_at, scheduled_for, delivered_at) AS created_at, user_id
-         FROM message_log WHERE lead_id = $1 ${beforeClause.replace('created_at', 'COALESCE(sent_at, scheduled_for, delivered_at)')}
-     )
-     UNION ALL
-     (
-       SELECT id, 'call' AS kind, direction AS subtype, remarks AS body,
-              jsonb_build_object('status', status, 'duration_seconds', duration_seconds, 'disposition_code', disposition_code, 'recording_r2_key', recording_r2_key) AS metadata_json,
-              COALESCE(ended_at, started_at, created_at) AS created_at, user_id
-         FROM calls WHERE lead_id = $1 AND deleted_at IS NULL ${beforeClause.replace('created_at', 'COALESCE(ended_at, started_at, created_at)')}
-     )
-     ORDER BY created_at DESC
-     LIMIT ${Number(limit)}`,
+     SELECT e.*,
+            u.name AS user_name,
+            -- Resolve stage / sub-stage names so the UI can show "New → Followup"
+            -- instead of bare UUIDs.
+            sf.name  AS from_stage_name,
+            st.name  AS to_stage_name,
+            ssf.name AS from_sub_stage_name,
+            sst.name AS to_sub_stage_name
+       FROM events e
+       LEFT JOIN users u  ON u.id  = e.user_id
+       LEFT JOIN lead_stages     sf  ON e.kind = 'activity' AND e.subtype = 'stage_changed'
+                                    AND sf.id  = (e.metadata_json->>'from')::uuid
+       LEFT JOIN lead_stages     st  ON e.kind = 'activity' AND e.subtype = 'stage_changed'
+                                    AND st.id  = (e.metadata_json->>'to')::uuid
+       LEFT JOIN lead_sub_stages ssf ON e.kind = 'activity' AND e.subtype = 'stage_changed'
+                                    AND ssf.id = (e.metadata_json->>'from_sub')::uuid
+       LEFT JOIN lead_sub_stages sst ON e.kind = 'activity' AND e.subtype = 'stage_changed'
+                                    AND sst.id = (e.metadata_json->>'to_sub')::uuid
+      ORDER BY created_at DESC
+      LIMIT ${Number(limit)}`,
     params,
   );
   return rows;

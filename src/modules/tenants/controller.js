@@ -42,3 +42,10 @@ export const resume = async (req, res, next) => {
     res.json({ data: row, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
+
+export const remove = async (req, res, next) => {
+  try {
+    await service.deleteTenant(req.params.id, req.user.id, req.ip, req.headers['user-agent']);
+    res.status(204).end();
+  } catch (err) { next(err); }
+};

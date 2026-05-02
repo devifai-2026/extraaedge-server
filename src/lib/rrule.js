@@ -1,6 +1,7 @@
-import { RRule, rrulestr } from 'rrule';
+import pkg from 'rrule';
+const { RRule, rrulestr } = pkg;
 
-// RFC 5545 helpers. Recurrence for lead_followups and user_availability.
+// RFC 5545 helpers. Recurrence for lead_followups.
 export const parseRRule = (rruleString, dtstart) => {
   if (!rruleString) return null;
   return rrulestr(rruleString, { dtstart: dtstart ? new Date(dtstart) : undefined });

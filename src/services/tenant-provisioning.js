@@ -1,13 +1,12 @@
 import pg from 'pg';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import pgMigrate from 'node-pg-migrate';
+import migrationRunner from 'node-pg-migrate';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { DEFAULT_BUSINESS_HOURS, DEFAULT_TAB_KEYS, CALL_DISPOSITIONS } from '../config/constants.js';
 
 const { Client } = pg;
-const { default: migrationRunner } = pgMigrate;
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 const tenantMigrationsDir = path.resolve(thisDir, '../db/migrations/tenant');
@@ -33,6 +32,8 @@ const createDatabaseAndRole = async ({ db_name, db_user, db_password }) => {
     } else {
       await admin.query(`ALTER ROLE "${db_user}" WITH PASSWORD '${db_password.replace(/'/g, "''")}'`);
     }
+    // Cloud SQL: superuser must be a member of the owner role to CREATE DATABASE OWNER.
+    await admin.query(`GRANT "${db_user}" TO CURRENT_USER`);
     const dbExists = await admin.query(`SELECT 1 FROM pg_database WHERE datname = $1`, [db_name]);
     if (dbExists.rowCount === 0) {
       await admin.query(`CREATE DATABASE "${db_name}" OWNER "${db_user}" ENCODING 'UTF8'`);
@@ -50,7 +51,7 @@ const applyMigrations = async ({ db_name, db_user, db_password }) => {
       database: db_name,
       user: db_user,
       password: db_password,
-      ssl: env.TENANT_DB_SSL,
+      ssl: env.TENANT_DB_SSL ? { rejectUnauthorized: false } : false,
     },
     dir: tenantMigrationsDir,
     migrationsTable: 'pgmigrations',
@@ -79,7 +80,8 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       { name: 'sales_manager', description: 'Manages a team of counsellors', scope: 'sales_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration').map((t) => [t, 'full'])) },
       { name: 'counsellor', description: 'Handles assigned leads', scope: 'counsellor', is_system: true, tab_permissions: {
         dashboard: 'full', leads: 'full', raw_data: 'read_only', failed_leads: 'read_only',
-        followups: 'full', whatsapp: 'full', 'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
+        followups: 'full', whatsapp: 'full', bulk_upload: 'full',
+        'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
       } },
     ];
     const roleIds = {};
@@ -158,6 +160,32 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
        VALUES ($1,$2,$3,$4,$5,'super_admin',true,false,15)`,
       [first_admin.email, first_admin.phone ?? null, first_admin.name, first_admin.password_hash, roleIds.super_admin],
     );
+
+    // Seed every tenant with one rule per strategy. Only `round_robin` is
+    // active by default; admins activate whichever fits their org from
+    // Settings → Assignment Rules. Backend enforces max 1 active rule per
+    // tenant via the assignment-rules service.
+    const seedRules = [
+      { name: 'Round Robin',        strategy: 'round_robin',      priority: 100, is_active: true  },
+      { name: 'Load Balanced',      strategy: 'load_balanced',    priority: 200, is_active: false },
+      { name: 'By Program',         strategy: 'by_program',       priority: 300, is_active: false },
+      { name: 'By Geography',       strategy: 'by_geography',     priority: 400, is_active: false },
+      { name: 'Specific User',      strategy: 'specific_user',    priority: 500, is_active: false },
+      { name: 'Team Round Robin',   strategy: 'team_round_robin', priority: 600, is_active: false },
+    ];
+    for (const r of seedRules) {
+      const { rows } = await client.query(
+        `INSERT INTO assignment_rules (name, priority, condition_json, strategy, is_active)
+         VALUES ($1, $2, '{}'::jsonb, $3, $4)
+         RETURNING id`,
+        [r.name, r.priority, r.strategy, r.is_active],
+      );
+      await client.query(
+        `INSERT INTO assignment_rule_state (rule_id, last_assigned_user_id, total_assignments)
+         VALUES ($1, NULL, 0) ON CONFLICT (rule_id) DO NOTHING`,
+        [rows[0].id],
+      );
+    }
 
     await client.query('COMMIT');
   } catch (err) {

@@ -58,6 +58,15 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
   );
   const lead = rows[0];
 
+  // If the lead was created directly into a success stage (e.g. backfill), stamp converted_at.
+  if (lead.stage_id) {
+    const { rows: stageRows } = await client.query(`SELECT is_success FROM lead_stages WHERE id = $1`, [lead.stage_id]);
+    if (stageRows[0]?.is_success && !lead.converted_at) {
+      await client.query(`UPDATE leads SET converted_at = now() WHERE id = $1`, [lead.id]);
+      lead.converted_at = new Date();
+    }
+  }
+
   // Family
   if (input.family) {
     const famCols = ['lead_id'];
@@ -102,8 +111,22 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     }
   }
 
-  // Lead assignment history row if assigned
+  // Lead assignment history row if assigned. Also snap manager_id from the
+  // assignee's primary manager so the LeadCard hierarchy chip + manager
+  // leadlist filter are correct from the moment the row exists. The same
+  // snapping happens on auto-assign (rule-processor) and manual reassign
+  // (lead-assignments routes); keeping it here closes the create path.
   if (input.assigned_to) {
+    const { rows: mgrRows } = await client.query(
+      `SELECT manager_id FROM users WHERE id = $1`,
+      [input.assigned_to],
+    );
+    const newManagerId = mgrRows[0]?.manager_id ?? null;
+    await client.query(
+      `UPDATE leads SET manager_id = $2 WHERE id = $1`,
+      [lead.id, newManagerId],
+    );
+    lead.manager_id = newManagerId;
     await client.query(
       `INSERT INTO lead_assignments (lead_id, assigned_to, assigned_by, assignment_type, is_active, status)
        VALUES ($1,$2,$3,'assign',true,'open')`,
@@ -118,6 +141,17 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     [lead.id, created_by ?? null, JSON.stringify({ source: 'api' })],
   );
 
+  // If the form pre-assigned an owner, the timeline should also show an
+  // 'assign' event so the "Counselor Activity" filter on the lead drawer
+  // sees it (mirrors the auto_assign row dropped by the worker).
+  if (input.assigned_to) {
+    await client.query(
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1,$2,'assign','Assigned on creation',$3::jsonb)`,
+      [lead.id, created_by ?? null, JSON.stringify({ assigned_to: input.assigned_to })],
+    );
+  }
+
   return lead;
 });
 
@@ -131,7 +165,20 @@ export const findByIdWithRelations = async (tenant, id) => {
   if (!base) return null;
   const [family, sources, tagsRes, customValuesRes] = await Promise.all([
     tenantQuery(tenant, `SELECT * FROM lead_family WHERE lead_id = $1`, [id]),
-    tenantQuery(tenant, `SELECT * FROM lead_source_attributions WHERE lead_id = $1 ORDER BY is_primary DESC, captured_at`, [id]),
+    tenantQuery(tenant, `
+      SELECT lsa.*,
+             ch.name AS channel_name,
+             sd.name AS source_name,
+             cd.name AS campaign_name,
+             md.name AS medium_name
+        FROM lead_source_attributions lsa
+        LEFT JOIN lead_channels       ch ON ch.id = lsa.channel_id
+        LEFT JOIN lead_sources_dict   sd ON sd.id = lsa.source_id
+        LEFT JOIN lead_campaigns_dict cd ON cd.id = lsa.campaign_id
+        LEFT JOIN lead_mediums        md ON md.id = lsa.medium_id
+       WHERE lead_id = $1
+       ORDER BY is_primary DESC, captured_at
+    `, [id]),
     tenantQuery(tenant, `SELECT t.id, t.name, t.color FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id WHERE lt.lead_id = $1 AND t.deleted_at IS NULL`, [id]),
     tenantQuery(tenant, `
       SELECT d.key, d.label, d.field_type, v.value
@@ -166,6 +213,16 @@ export const updateLead = async (tenant, id, updates) => tenantTx(tenant, async 
     fields.push(`last_activity_at = now()`);
     params.push(id);
     await client.query(`UPDATE leads SET ${fields.join(', ')} WHERE id = $${i} AND deleted_at IS NULL`, params);
+  }
+
+  // If stage_id changed via this update, mirror the converted_at flip.
+  if (scalar.stage_id !== undefined) {
+    const r = await client.query(`SELECT is_success FROM lead_stages WHERE id = $1`, [scalar.stage_id]);
+    if (r.rows[0]?.is_success) {
+      await client.query(`UPDATE leads SET converted_at = COALESCE(converted_at, now()) WHERE id = $1`, [id]);
+    } else {
+      await client.query(`UPDATE leads SET converted_at = NULL WHERE id = $1`, [id]);
+    }
   }
 
   if (family) {
@@ -222,18 +279,58 @@ export const softDelete = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE leads SET deleted_at = now() WHERE id = $1`, [id]);
 };
 
+// Hard-delete: physically remove the lead row. Foreign-key cascades clean up
+// lead_family / lead_source_attributions / lead_custom_values / lead_tags /
+// lead_followups / lead_notes / lead_assignments / lead_activities / calls /
+// message_log etc. All restricted to super_admin at the route layer.
+export const hardDelete = async (tenant, id) => tenantTx(tenant, async (client) => {
+  await client.query(`DELETE FROM leads WHERE id = $1`, [id]);
+});
+
 export const changeStage = async (tenant, id, { stage_id, sub_stage_id, remarks }, user_id) => tenantTx(tenant, async (client) => {
   const { rows: oldRows } = await client.query(`SELECT stage_id, sub_stage_id FROM leads WHERE id = $1 AND deleted_at IS NULL`, [id]);
   const old = oldRows[0];
   if (!old) return null;
+
+  // Resolve the success-flag of both old and new stages so we can flip
+  // converted_at on/off when the lead crosses a "success" boundary.
+  const isSuccess = async (sId) => {
+    if (!sId) return false;
+    const r = await client.query(`SELECT is_success FROM lead_stages WHERE id = $1`, [sId]);
+    return r.rows[0]?.is_success === true;
+  };
+  const wasSuccess = await isSuccess(old.stage_id);
+  const willBeSuccess = await isSuccess(stage_id);
+  // Only touch converted_at on transitions:
+  //   not-success → success  : stamp now
+  //   success → not-success  : clear (lead came back from "Enrolled")
+  //   anything else          : leave alone
+  let convertedAtSql = '';
+  if (!wasSuccess && willBeSuccess) convertedAtSql = ', converted_at = now()';
+  else if (wasSuccess && !willBeSuccess) convertedAtSql = ', converted_at = NULL';
+
+  // lead_score is recomputed authoritatively by recalcScore() in the service
+  // layer right after this transaction commits — that picks up the new
+  // stage/sub-stage scores plus any matching lead_score_config rules in one
+  // pass. Don't try to nudge it here.
   await client.query(
-    `UPDATE leads SET stage_id = $2, sub_stage_id = $3, remarks = COALESCE($4, remarks), last_activity_at = now() WHERE id = $1`,
+    `UPDATE leads
+        SET stage_id        = $2,
+            sub_stage_id    = $3,
+            remarks         = COALESCE($4, remarks),
+            last_activity_at = now()
+            ${convertedAtSql}
+      WHERE id = $1`,
     [id, stage_id, sub_stage_id ?? null, remarks ?? null],
   );
   await client.query(
     `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
      VALUES ($1,$2,'stage_changed',$3,$4::jsonb)`,
-    [id, user_id ?? null, `Stage changed`, JSON.stringify({ from: old.stage_id, to: stage_id, from_sub: old.sub_stage_id, to_sub: sub_stage_id ?? null })],
+    [id, user_id ?? null, `Stage changed`, JSON.stringify({
+      from: old.stage_id, to: stage_id,
+      from_sub: old.sub_stage_id, to_sub: sub_stage_id ?? null,
+      converted: !wasSuccess && willBeSuccess ? true : (wasSuccess && !willBeSuccess ? false : null),
+    })],
   );
   const { rows } = await client.query(`SELECT ${LEAD_COLUMNS} FROM leads WHERE id = $1`, [id]);
   return rows[0];
@@ -255,7 +352,18 @@ const sortClause = (sort) => {
   }
 };
 
-export const list = async (tenant, { q, stage_id, sub_stage_id, program_id, assigned_to, team_id, tag_id, date_from, date_to, sort, page, limit }, scope) => {
+export const list = async (tenant, opts, scope) => {
+  const {
+    q, stage_id, sub_stage_id, program_id, assigned_to, team_id, tag_id,
+    country_id, state_id, city,
+    channel_id, source_id, campaign_id, medium_id,
+    email, phone, whatsapp_number,
+    is_touched,
+    lead_age_from, lead_age_to,
+    lead_score_from, lead_score_to,
+    followup_from, followup_to,
+    date_from, date_to, sort, page, limit, flag,
+  } = opts;
   const conds = ['l.deleted_at IS NULL'];
   const params = [];
   if (stage_id) { params.push(stage_id); conds.push(`l.stage_id = $${params.length}`); }
@@ -263,11 +371,59 @@ export const list = async (tenant, { q, stage_id, sub_stage_id, program_id, assi
   if (program_id) { params.push(program_id); conds.push(`l.program_id = $${params.length}`); }
   if (assigned_to) { params.push(assigned_to); conds.push(`l.assigned_to = $${params.length}`); }
   if (team_id) { params.push(team_id); conds.push(`l.team_id = $${params.length}`); }
+  if (country_id) { params.push(country_id); conds.push(`l.country_id = $${params.length}`); }
+  if (state_id) { params.push(state_id); conds.push(`l.state_id = $${params.length}`); }
+  if (city) { params.push(`%${city}%`); conds.push(`l.city ILIKE $${params.length}`); }
+  if (email) { params.push(`%${email}%`); conds.push(`l.email::text ILIKE $${params.length}`); }
+  if (phone) { params.push(`%${phone}%`); conds.push(`l.phone ILIKE $${params.length}`); }
+  if (whatsapp_number) { params.push(`%${whatsapp_number}%`); conds.push(`l.whatsapp_number ILIKE $${params.length}`); }
   if (date_from) { params.push(date_from); conds.push(`l.created_at >= $${params.length}::timestamptz`); }
   if (date_to) { params.push(date_to); conds.push(`l.created_at <= $${params.length}::timestamptz`); }
+  if (lead_age_from != null) { params.push(lead_age_from); conds.push(`EXTRACT(EPOCH FROM (now() - l.created_at)) / 86400 >= $${params.length}`); }
+  if (lead_age_to != null) { params.push(lead_age_to); conds.push(`EXTRACT(EPOCH FROM (now() - l.created_at)) / 86400 <= $${params.length}`); }
+  if (lead_score_from != null) { params.push(lead_score_from); conds.push(`l.lead_score >= $${params.length}`); }
+  if (lead_score_to != null) { params.push(lead_score_to); conds.push(`l.lead_score <= $${params.length}`); }
   if (q) {
     params.push(`%${q}%`);
     conds.push(`(l.name ILIKE $${params.length} OR l.email::text ILIKE $${params.length} OR l.phone ILIKE $${params.length})`);
+  }
+  if (channel_id || source_id || campaign_id || medium_id) {
+    const subConds = [];
+    if (channel_id) { params.push(channel_id); subConds.push(`channel_id = $${params.length}`); }
+    if (source_id) { params.push(source_id); subConds.push(`source_id = $${params.length}`); }
+    if (campaign_id) { params.push(campaign_id); subConds.push(`campaign_id = $${params.length}`); }
+    if (medium_id) { params.push(medium_id); subConds.push(`medium_id = $${params.length}`); }
+    conds.push(`EXISTS (SELECT 1 FROM lead_source_attributions lsa WHERE lsa.lead_id = l.id AND ${subConds.join(' AND ')})`);
+  }
+  if (followup_from || followup_to) {
+    const subConds = ['lf.lead_id = l.id', 'lf.deleted_at IS NULL', "lf.status = 'planned'"];
+    if (followup_from) { params.push(followup_from); subConds.push(`lf.next_action_datetime >= $${params.length}::timestamptz`); }
+    if (followup_to) { params.push(followup_to); subConds.push(`lf.next_action_datetime <= $${params.length}::timestamptz`); }
+    conds.push(`EXISTS (SELECT 1 FROM lead_followups lf WHERE ${subConds.join(' AND ')})`);
+  }
+  if (is_touched === true) {
+    conds.push(`EXISTS (
+      SELECT 1 FROM lead_activities a WHERE a.lead_id = l.id
+        AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
+    )`);
+  }
+  if (is_touched === false) {
+    conds.push(`l.assigned_to IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM lead_activities a WHERE a.lead_id = l.id
+        AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
+    )`);
+  }
+  if (flag === 'unassigned') {
+    conds.push(`l.assigned_to IS NULL`);
+  }
+  if (flag === 'fresh') {
+    conds.push(`l.created_at >= now() - interval '24 hours'`);
+  }
+  if (flag === 'untouched') {
+    conds.push(`l.assigned_to IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM lead_activities a WHERE a.lead_id = l.id
+        AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
+    )`);
   }
   if (scope && scope.user_ids) {
     params.push(scope.user_ids);
@@ -287,8 +443,58 @@ export const list = async (tenant, { q, stage_id, sub_stage_id, program_id, assi
       tenant,
       `SELECT l.id, l.name, l.email, l.phone, l.whatsapp_number, l.stage_id, l.sub_stage_id,
               l.program_id, l.assigned_to, l.team_id, l.lead_score, l.engagement_score,
-              l.is_cold, l.created_at, l.updated_at, l.last_activity_at
+              l.is_cold, l.created_at, l.updated_at, l.last_activity_at,
+              s.name  AS stage_name,
+              ss.name AS sub_stage_name,
+              p.name  AS program_name,
+              c.name  AS country_name,
+              st.name AS state_name,
+              l.district, l.city,
+              u.name   AS assigned_to_name,
+              u.role   AS assigned_to_role,
+              mgr.name AS manager_name,
+              mgr.role AS manager_role,
+              -- One level up from the direct manager (e.g. counsellor → manager → super admin).
+              gmgr.name AS grand_manager_name,
+              gmgr.role AS grand_manager_role,
+              cb.name  AS created_by_name,
+              cb.role  AS created_by_role,
+              prev.name AS previous_owner_name,
+              EXTRACT(EPOCH FROM (now() - l.created_at))::int / 86400 AS lead_age_days,
+              -- Untouched: assigned but no human action yet (notes / calls / messages /
+              -- stage-change beyond initial assign). Looks at lead_activities for
+              -- types other than 'lead_created' / 'assigned' / 'reassign'.
+              (l.assigned_to IS NOT NULL AND NOT EXISTS (
+                 SELECT 1 FROM lead_activities a
+                  WHERE a.lead_id = l.id
+                    AND a.type NOT IN ('lead_created', 'assigned', 'reassign', 'auto_assign', 'refer')
+              )) AS is_untouched,
+              -- Fresh: created within last 24h (regardless of assignment)
+              (l.created_at >= now() - interval '24 hours') AS is_fresh,
+              (l.converted_at IS NOT NULL) AS is_converted,
+              l.converted_at,
+              COALESCE((SELECT count(*)::int FROM calls cc
+                          WHERE cc.lead_id = l.id AND cc.direction = 'inbound'
+                            AND cc.status IN ('missed','no_answer','failed')
+                            AND cc.deleted_at IS NULL), 0) AS missed_calls_count,
+              COALESCE((SELECT count(*)::int FROM message_reply mr
+                          WHERE mr.lead_id = l.id AND mr.is_read = false), 0) AS unread_messages_count
          FROM leads l ${tagJoin}
+         LEFT JOIN lead_stages     s   ON s.id  = l.stage_id
+         LEFT JOIN lead_sub_stages ss  ON ss.id = l.sub_stage_id
+         LEFT JOIN programs        p   ON p.id  = l.program_id
+         LEFT JOIN countries       c   ON c.id  = l.country_id
+         LEFT JOIN states          st  ON st.id = l.state_id
+         LEFT JOIN users           u    ON u.id    = l.assigned_to
+         LEFT JOIN users           mgr  ON mgr.id  = l.manager_id
+         LEFT JOIN users           gmgr ON gmgr.id = mgr.manager_id
+         LEFT JOIN users           cb  ON cb.id  = l.created_by
+         LEFT JOIN LATERAL (
+           SELECT u2.name FROM lead_assignments la
+             JOIN users u2 ON u2.id = la.assigned_to
+            WHERE la.lead_id = l.id AND la.assigned_to <> COALESCE(l.assigned_to, '00000000-0000-0000-0000-000000000000'::uuid)
+            ORDER BY la.created_at DESC LIMIT 1
+         ) prev ON true
          ${where}
          ORDER BY ${sortClause(sort)}
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -298,3 +504,110 @@ export const list = async (tenant, { q, stage_id, sub_stage_id, program_id, assi
   ]);
   return { rows, total: countRows[0].total };
 };
+
+// Stage counts — scoped same way as list. Returns one row per stage incl. unstaged.
+export const stageCounts = async (tenant, scope) => {
+  const params = [];
+  const conds = ['l.deleted_at IS NULL'];
+  if (scope && scope.user_ids) {
+    params.push(scope.user_ids);
+    conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
+  }
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT s.id AS stage_id, s.name AS stage_name, s.order_index,
+            COUNT(l.id)::int AS count
+       FROM lead_stages s
+       LEFT JOIN leads l ON l.stage_id = s.id AND l.deleted_at IS NULL
+            ${scope && scope.user_ids ? `AND l.assigned_to = ANY($1::uuid[])` : ''}
+      WHERE s.is_active = true
+      GROUP BY s.id, s.name, s.order_index
+      ORDER BY COALESCE(s.order_index, 0), s.name`,
+    params,
+  );
+  const totalRow = await tenantQuery(tenant, `SELECT COUNT(*)::int AS total FROM leads l ${where}`, params);
+  const untouchedRow = await tenantQuery(
+    tenant,
+    `SELECT COUNT(*)::int AS total FROM leads l ${where}
+       AND l.assigned_to IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM lead_activities a
+          WHERE a.lead_id = l.id
+            AND a.type NOT IN ('lead_created', 'assigned', 'reassign', 'auto_assign', 'refer')
+       )`,
+    params,
+  );
+  const freshRow = await tenantQuery(
+    tenant,
+    `SELECT COUNT(*)::int AS total FROM leads l ${where} AND l.created_at >= now() - interval '24 hours'`,
+    params,
+  );
+  const unassignedRow = await tenantQuery(
+    tenant,
+    `SELECT COUNT(*)::int AS total FROM leads l ${where} AND l.assigned_to IS NULL`,
+    params,
+  );
+  return {
+    all: totalRow.rows[0].total,
+    fresh: freshRow.rows[0].total,
+    untouched: untouchedRow.rows[0].total,
+    unassigned: unassignedRow.rows[0].total,
+    stages: rows,
+  };
+};
+
+// Bulk assign: either explicit lead_ids OR all leads matching a filter.
+// Side effect: any lead without a stage_id is auto-moved into the first active
+// stage (lowest order_index). This matches the "Fresh → Untouched → Working"
+// lifecycle and prevents leads from sitting in "no stage" once they have an owner.
+export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, reason, filter, scope }) => tenantTx(tenant, async (client) => {
+  let ids = lead_ids ?? null;
+  if (!ids) {
+    const conds = ['deleted_at IS NULL'];
+    const params = [];
+    if (filter?.stage_id) { params.push(filter.stage_id); conds.push(`stage_id = $${params.length}`); }
+    if (filter?.sub_stage_id) { params.push(filter.sub_stage_id); conds.push(`sub_stage_id = $${params.length}`); }
+    if (filter?.program_id) { params.push(filter.program_id); conds.push(`program_id = $${params.length}`); }
+    if (filter?.assigned_to) { params.push(filter.assigned_to); conds.push(`assigned_to = $${params.length}`); }
+    if (filter?.team_id) { params.push(filter.team_id); conds.push(`team_id = $${params.length}`); }
+    if (filter?.q) { params.push(`%${filter.q}%`); conds.push(`(name ILIKE $${params.length} OR email::text ILIKE $${params.length} OR phone ILIKE $${params.length})`); }
+    if (scope && scope.user_ids) { params.push(scope.user_ids); conds.push(`assigned_to = ANY($${params.length}::uuid[])`); }
+    const r = await client.query(`SELECT id FROM leads WHERE ${conds.join(' AND ')}`, params);
+    ids = r.rows.map((x) => x.id);
+  }
+  if (!ids.length) return { affected: 0, ids: [] };
+
+  // Resolve the first active stage once (used to fill in null-stage leads).
+  const firstStageRes = await client.query(`SELECT id FROM lead_stages WHERE is_active = true ORDER BY order_index ASC, name ASC LIMIT 1`);
+  const firstStageId = firstStageRes.rows[0]?.id ?? null;
+
+  // Resolve the assignee's manager (if they're a counsellor under one).
+  const mgrRes = await client.query(`SELECT manager_id FROM users WHERE id = $1`, [assigned_to]);
+  const newManagerId = mgrRes.rows[0]?.manager_id ?? null;
+
+  await client.query(
+    `UPDATE leads
+        SET assigned_to     = $1,
+            manager_id      = $4,
+            stage_id        = COALESCE(stage_id, $3),
+            updated_at      = now(),
+            last_activity_at = now()
+      WHERE id = ANY($2::uuid[]) AND deleted_at IS NULL`,
+    [assigned_to, ids, firstStageId, newManagerId],
+  );
+  await client.query(`UPDATE lead_assignments SET is_active = false WHERE lead_id = ANY($1::uuid[])`, [ids]);
+  for (const id of ids) {
+    await client.query(
+      `INSERT INTO lead_assignments (lead_id, assigned_to, assigned_by, assignment_type, reason, is_active, status)
+       VALUES ($1,$2,$3,'reassign',$4,true,'open')`,
+      [id, assigned_to, assigned_by ?? null, reason ?? null],
+    );
+    await client.query(
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1,$2,'assigned',$3,$4::jsonb)`,
+      [id, assigned_by ?? null, 'Lead reassigned', JSON.stringify({ assigned_to, reason: reason ?? null })],
+    );
+  }
+  return { affected: ids.length, ids };
+});

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const leadCreateSchema = z.object({
+const leadBaseSchema = z.object({
   // Personal
   name: z.string().optional(),
   first_name: z.string().optional(),
@@ -78,10 +78,14 @@ export const leadCreateSchema = z.object({
     medium_id: z.string().uuid().optional(),
     is_primary: z.boolean().optional(),
   })).optional(),
-}).refine((v) => v.email || v.phone || v.whatsapp_number || v.name,
-  { message: 'At least one of name/email/phone/whatsapp_number is required' });
+});
 
-export const leadUpdateSchema = leadCreateSchema.partial();
+export const leadCreateSchema = leadBaseSchema.refine(
+  (v) => v.email || v.phone || v.whatsapp_number || v.name,
+  { message: 'At least one of name/email/phone/whatsapp_number is required' },
+);
+
+export const leadUpdateSchema = leadBaseSchema.partial();
 
 export const listQuery = z.object({
   q: z.string().optional(),
@@ -90,7 +94,30 @@ export const listQuery = z.object({
   program_id: z.string().uuid().optional(),
   assigned_to: z.string().uuid().optional(),
   team_id: z.string().uuid().optional(),
+  country_id: z.string().uuid().optional(),
+  state_id: z.string().uuid().optional(),
+  city: z.string().optional(),
+  channel_id: z.string().uuid().optional(),
+  source_id: z.string().uuid().optional(),
+  campaign_id: z.string().uuid().optional(),
+  medium_id: z.string().uuid().optional(),
+  email: z.string().optional(),
+  phone: z.string().optional(),
+  whatsapp_number: z.string().optional(),
+  // Accept 'true' / 'false' strings from query string and coerce explicitly.
+  is_touched: z.preprocess((v) => {
+    if (v === 'true' || v === true) return true;
+    if (v === 'false' || v === false) return false;
+    return undefined;
+  }, z.boolean().optional()),
+  lead_age_from: z.coerce.number().int().min(0).optional(),
+  lead_age_to: z.coerce.number().int().min(0).optional(),
+  lead_score_from: z.coerce.number().optional(),
+  lead_score_to: z.coerce.number().optional(),
+  followup_from: z.string().optional(),
+  followup_to: z.string().optional(),
   tab: z.string().optional(),
+  flag: z.enum(['fresh', 'untouched', 'unassigned']).optional(),
   tag_id: z.string().uuid().optional(),
   date_from: z.string().optional(),
   date_to: z.string().optional(),
@@ -110,6 +137,16 @@ export const stageChangeSchema = z.object({
   stage_id: z.string().uuid(),
   sub_stage_id: z.string().uuid().optional(),
   remarks: z.string().optional(),
+  // Optional follow-up scheduling — when present, the service creates a
+  // lead_followups row so the lead surfaces in the Follow-up Manager. Used
+  // primarily for "Followup" stages but works on any stage transition.
+  // Refuse past-dated values so we don't end up with already-overdue rows
+  // bypassing the FE validation.
+  next_action_datetime: z.coerce.date()
+    .refine((d) => d.getTime() > Date.now() - 60_000, {
+      message: 'next_action_datetime must be in the future',
+    })
+    .optional(),
 });
 
 export const noteSchema = z.object({
@@ -133,4 +170,20 @@ export const bulkActionSchema = z.object({
   lead_ids: z.array(z.string().uuid()).min(1).max(5000),
   action: z.enum(['reassign', 'change_stage', 'delete', 'add_tag', 'remove_tag']),
   params: z.record(z.string(), z.any()).default({}),
+});
+
+export const bulkAssignSchema = z.object({
+  lead_ids: z.array(z.string().uuid()).optional(),
+  filter: z.object({
+    q: z.string().optional(),
+    stage_id: z.string().uuid().optional(),
+    sub_stage_id: z.string().uuid().optional(),
+    program_id: z.string().uuid().optional(),
+    assigned_to: z.string().uuid().optional(),
+    team_id: z.string().uuid().optional(),
+  }).optional(),
+  assigned_to: z.string().uuid(),
+  reason: z.string().optional(),
+}).refine((v) => (v.lead_ids && v.lead_ids.length > 0) || v.filter, {
+  message: 'Either lead_ids or filter must be provided',
 });

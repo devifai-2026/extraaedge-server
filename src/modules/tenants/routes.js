@@ -40,4 +40,13 @@ router.post('/:id/resume',
   validate({ params: tenantIdParam }),
   controller.resume);
 
+// Soft-delete the tenant. Marks deleted_at + sets status='suspended' so the
+// tenant immediately stops being usable. The underlying tenant_<slug> database
+// is kept for now (recovery / audit). Hard-delete would need a separate flow
+// with a strong confirmation since it drops a whole DB.
+router.delete('/:id',
+  requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER),
+  validate({ params: tenantIdParam }),
+  controller.remove);
+
 export default router;
