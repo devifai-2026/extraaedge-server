@@ -37,14 +37,16 @@ router.get('/lead/:leadId', validate({ params: z.object({ leadId: z.string().uui
   } catch (err) { next(err); }
 });
 
-// (Re)assign a lead
+// (Re)assign a lead. All three tenant roles can call this; the per-role
+// scope below decides who can reassign which lead to whom.
 router.post(
   '/',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER),
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR),
   validate({ body: assignSchema }),
   async (req, res, next) => {
     try {
       const { lead_id, assigned_to, assignment_type, reason } = req.body;
+      const { forbidden } = await import('../../lib/errors.js');
 
       // Sales-manager scope: the new owner must be inside this manager's team
       // hierarchy. Admins can reassign to any active counsellor.
@@ -52,8 +54,48 @@ router.post(
         const { teamHierarchy } = await import('../users/repo.js');
         const teamIds = await teamHierarchy(req.tenant, req.user.id);
         if (!teamIds.includes(assigned_to)) {
-          const { forbidden } = await import('../../lib/errors.js');
           throw forbidden('You can only reassign to counsellors in your team');
+        }
+      }
+
+      // Counsellor scope: can only reassign leads they currently own, and
+      // only to a teammate (someone who shares one of their managers via
+      // user_managers, or their primary manager via users.manager_id).
+      // The primary manager themselves is also a valid target so a
+      // counsellor can hand a lead "up" to their manager.
+      if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+        const ownership = await tenantQuery(
+          req.tenant,
+          `SELECT assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`,
+          [lead_id],
+        );
+        if (!ownership.rows[0]) throw notFound('Lead not found');
+        if (ownership.rows[0].assigned_to !== req.user.id) {
+          throw forbidden('You can only reassign leads you currently own');
+        }
+        // Allowed targets = my managers + everyone who shares any of my
+        // managers (peers) + the primary manager from users.manager_id.
+        // Self is not allowed (no-op reassign).
+        const { rows: allowed } = await tenantQuery(
+          req.tenant,
+          `WITH my_mgrs AS (
+             SELECT manager_id FROM user_managers WHERE user_id = $1
+             UNION
+             SELECT manager_id FROM users WHERE id = $1 AND manager_id IS NOT NULL
+           )
+           SELECT DISTINCT u.id
+             FROM users u
+            WHERE u.deleted_at IS NULL AND u.is_active = true AND u.id <> $1
+              AND (
+                u.id IN (SELECT manager_id FROM my_mgrs)
+                OR u.manager_id IN (SELECT manager_id FROM my_mgrs)
+                OR EXISTS (SELECT 1 FROM user_managers um WHERE um.user_id = u.id AND um.manager_id IN (SELECT manager_id FROM my_mgrs))
+              )`,
+          [req.user.id],
+        );
+        const allowedIds = allowed.map((r) => r.id);
+        if (!allowedIds.includes(assigned_to)) {
+          throw forbidden('You can only reassign to a teammate or your manager');
         }
       }
 

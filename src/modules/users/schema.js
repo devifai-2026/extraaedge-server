@@ -1,11 +1,21 @@
 import { z } from 'zod';
 
+// `role` is the legacy buckets column on `users` (super_admin / sales_manager
+// / counsellor). It still drives a lot of scoping and middleware — see
+// SYSTEM_TENANT_ROLES — so it's required on create. `role_id` points at a
+// row in `custom_roles` and carries the actual tab/feature permissions; for
+// system roles the seeded "Super Admin" / "Sales Manager" / "Counsellor"
+// custom_roles rows are used. For genuine custom roles, the `role` column
+// must hold the closest matching bucket so existing scope logic
+// (auto-assign-unassigned, lead listing, etc.) continues to work.
+const roleBucket = z.enum(['super_admin', 'sales_manager', 'counsellor']);
+
 export const createUserSchema = z.object({
   name: z.string().min(1),
   email: z.string().email(),
   phone: z.string().optional(),
   password: z.string().min(10),
-  role: z.enum(['super_admin', 'sales_manager', 'counsellor']),
+  role: roleBucket,
   role_id: z.string().uuid().optional(),
   manager_id: z.string().uuid().optional(),
   // Multi-manager reporting (1:N). First entry is also stored as `manager_id`
@@ -34,7 +44,7 @@ export const resetPasswordSchema = z.object({
 
 export const listUsersQuery = z.object({
   q: z.string().optional(),
-  role: z.enum(['super_admin', 'sales_manager', 'counsellor']).optional(),
+  role: roleBucket.optional(),
   team_id: z.string().uuid().optional(),
   manager_id: z.string().uuid().optional(),
   is_active: z.enum(['true', 'false']).optional(),
@@ -43,3 +53,19 @@ export const listUsersQuery = z.object({
 });
 
 export const idParam = z.object({ id: z.string().uuid() });
+
+// User theme update. All four fields are optional / nullable so the user
+// can reset to the system default by sending nulls. Hex format is enforced
+// strictly — accepting arbitrary strings would let a malicious user inject
+// CSS expressions if these ever leaked into a style attribute on a server-
+// rendered surface.
+const HEX = /^#[0-9a-fA-F]{6}$/u;
+const optionalHex = z
+  .union([z.string().regex(HEX, 'Must be a 7-character hex color (e.g. #E53935)'), z.null()])
+  .optional();
+export const updateThemeSchema = z.object({
+  theme_preset: z.union([z.string().max(40), z.null()]).optional(),
+  theme_primary: optionalHex,
+  theme_primary_dark: optionalHex,
+  theme_primary_light: optionalHex,
+});

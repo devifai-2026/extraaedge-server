@@ -25,6 +25,13 @@ router.get('/:id',
   validate({ params: tenantIdParam }),
   controller.getOne);
 
+// Org hierarchy of the tenant — owner → managers → counsellors.
+// Returned as a tree for direct rendering by the product-owner UI.
+router.get('/:id/org-tree',
+  requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER, PLATFORM_ROLES.SUPPORT_ADMIN),
+  validate({ params: tenantIdParam }),
+  controller.orgTree);
+
 router.put('/:id',
   requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER),
   validate({ params: tenantIdParam, body: tenantUpdateSchema }),

@@ -56,8 +56,8 @@ export const getSignedDownload = async (tenant, user, id) => {
     // (Override at module boundary if a manager endpoint needs this.)
     if (user.role !== 'super_admin' && user.role !== 'sales_manager') throw forbidden('Not your upload');
   }
-  const url = await getDownloadSignedUrl({ key: row.r2_key, expiresIn: env.R2_SIGNED_URL_TTL_SECONDS });
-  return { url, expires_in: env.R2_SIGNED_URL_TTL_SECONDS, uploaded_file: row };
+  const url = await getDownloadSignedUrl({ key: row.r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS });
+  return { url, expires_in: env.GCS_SIGNED_URL_TTL_SECONDS, uploaded_file: row };
 };
 
 export const deleteUpload = async (tenant, user, id) => {

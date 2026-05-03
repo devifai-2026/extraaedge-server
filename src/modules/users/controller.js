@@ -82,3 +82,10 @@ export const orgTree = async (req, res, next) => {
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
+
+export const updateMyTheme = async (req, res, next) => {
+  try {
+    const data = await service.updateMyTheme(req.tenant, req.user, req.body);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};

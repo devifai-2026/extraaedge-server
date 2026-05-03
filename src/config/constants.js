@@ -90,6 +90,7 @@ export const EVENT_TYPES = Object.freeze({
   CAMPAIGN_COMPLETED: 'campaign.completed',
   WORKFLOW_STARTED: 'workflow.started',
   WORKFLOW_COMPLETED: 'workflow.completed',
+  BULK_IMPORT_COMPLETED: 'bulk_import.completed',
 });
 
 export const QUEUE_NAMES = Object.freeze({

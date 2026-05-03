@@ -263,13 +263,55 @@ router.post('/:id/complete', validate({ params: idParam }), async (req, res, nex
 
 router.post('/:id/reschedule', validate({ params: idParam, body: z.object({ next_action_datetime: z.coerce.date() }) }), async (req, res, next) => {
   try {
+    // Reset BOTH reminder flags + overdue flag so the new due time gets
+    // a fresh T-15 + T-5 + overdue cycle. Status flips back to planned
+    // even if the row was 'missed' — the counsellor is taking action again.
     const { rows } = await tenantQuery(
       req.tenant,
-      `UPDATE lead_followups SET next_action_datetime = $2, status = 'planned', reminder_sent_at = NULL
+      `UPDATE lead_followups
+          SET next_action_datetime = $2,
+              status = 'planned',
+              reminder_sent_at = NULL,
+              reminder_5min_sent_at = NULL,
+              overdue_notified_at = NULL,
+              completed_at = NULL,
+              completed_by = NULL
         WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
       [req.params.id, req.body.next_action_datetime],
     );
     if (!rows[0]) throw notFound('Follow-up not found');
+    // Audit row so the timeline shows the reschedule.
+    await tenantQuery(
+      req.tenant,
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1, $2, 'follow_up_rescheduled', 'Follow-up rescheduled', $3::jsonb)`,
+      [rows[0].lead_id, req.user.id, JSON.stringify({ follow_up_id: rows[0].id, new_due: req.body.next_action_datetime })],
+    );
+    res.json({ data: rows[0], meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// Explicit cancel — open to all 3 tenant roles. We DON'T soft-delete
+// (DELETE /:id below still does that); cancelling sets status='cancelled'
+// but leaves the row visible so the timeline / reports still show that
+// a follow-up was scheduled-then-cancelled.
+router.post('/:id/cancel', validate({ params: idParam, body: z.object({ reason: z.string().max(500).optional() }).optional() }), async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `UPDATE lead_followups
+          SET status = 'cancelled', completed_at = now(), completed_by = $2
+        WHERE id = $1 AND deleted_at IS NULL AND status IN ('planned', 'missed')
+        RETURNING *`,
+      [req.params.id, req.user.id],
+    );
+    if (!rows[0]) throw notFound('Follow-up not found or already finalised');
+    await tenantQuery(
+      req.tenant,
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1, $2, 'follow_up_cancelled', 'Follow-up cancelled', $3::jsonb)`,
+      [rows[0].lead_id, req.user.id, JSON.stringify({ follow_up_id: rows[0].id, reason: req.body?.reason ?? null })],
+    );
     res.json({ data: rows[0], meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });

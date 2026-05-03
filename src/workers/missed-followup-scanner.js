@@ -9,11 +9,16 @@ const tick = async () => {
     for (const { id } of tenants) {
       const tenant = await resolveTenantById(id);
       if (!tenant) continue;
+      // 24-hour grace window. Overdue notifications fire as soon as the
+      // due time passes (handled by followup-reminder-scheduler), but we
+      // don't flip status='missed' until 24h have elapsed — gives the
+      // counsellor a full day to either complete or reschedule before
+      // it counts as a miss in reports.
       const { rows: missed } = await tenantQuery(
         tenant,
         `UPDATE lead_followups
             SET status = 'missed'
-          WHERE deleted_at IS NULL AND status = 'planned' AND next_action_datetime < now() - interval '30 minutes'
+          WHERE deleted_at IS NULL AND status = 'planned' AND next_action_datetime < now() - interval '24 hours'
           RETURNING id, lead_id, created_by`,
       );
       for (const m of missed) {

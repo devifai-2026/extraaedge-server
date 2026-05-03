@@ -185,6 +185,35 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
   // intentionally no longer touches lead_score; this is the single source of
   // truth.
   await recalcScore(tenant, id).catch(() => {});
+
+  // When a stage moves, every PLANNED follow-up on this lead becomes
+  // 'done' — the counsellor's action of progressing the stage IS the
+  // follow-up they had scheduled. We don't touch already-cancelled or
+  // already-missed rows; only flip live planned ones. This is the
+  // "if stage moved, mark follow-up done" half of the spec.
+  try {
+    const { rows: completed } = await tenantQuery(
+      tenant,
+      `UPDATE lead_followups
+          SET status = 'done', completed_at = now(), completed_by = $2
+        WHERE lead_id = $1 AND deleted_at IS NULL AND status = 'planned'
+        RETURNING id`,
+      [id, actor?.id ?? null],
+    );
+    for (const f of completed) {
+      // Audit trail: drop a timeline activity so reports / the timeline
+      // modal can show "follow-up auto-completed because stage moved".
+      await tenantQuery(
+        tenant,
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+         VALUES ($1, $2, 'follow_up_completed', 'Follow-up auto-completed (stage moved)', $3::jsonb)`,
+        [id, actor?.id ?? null, JSON.stringify({ follow_up_id: f.id, reason: 'stage_moved' })],
+      );
+    }
+  } catch {
+    // Non-fatal — if the flip fails the stage change still went through;
+    // the missed-followup scanner will eventually catch a stale planned row.
+  }
   // If the stage change carried a next-action datetime (e.g. lead moved to
   // a "Followup" stage), drop a lead_followups row so it surfaces in the
   // Follow-up Manager for the assigned counsellor. The follow-ups module
@@ -270,7 +299,14 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
             sf.name  AS from_stage_name,
             st.name  AS to_stage_name,
             ssf.name AS from_sub_stage_name,
-            sst.name AS to_sub_stage_name
+            sst.name AS to_sub_stage_name,
+            -- For assignment events, resolve the assignee + their manager
+            -- so the timeline can show "Assigned to Foo (foo@bar.com),
+            -- reporting to Manager (manager@bar.com)".
+            au.name  AS assignee_name,
+            au.email AS assignee_email,
+            mu.name  AS assignee_manager_name,
+            mu.email AS assignee_manager_email
        FROM events e
        LEFT JOIN users u  ON u.id  = e.user_id
        LEFT JOIN lead_stages     sf  ON e.kind = 'activity' AND e.subtype = 'stage_changed'
@@ -281,6 +317,10 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
                                     AND ssf.id = (e.metadata_json->>'from_sub')::uuid
        LEFT JOIN lead_sub_stages sst ON e.kind = 'activity' AND e.subtype = 'stage_changed'
                                     AND sst.id = (e.metadata_json->>'to_sub')::uuid
+       LEFT JOIN users au ON e.kind = 'activity'
+                         AND e.subtype IN ('assigned', 'reassign', 'auto_assign', 'refer')
+                         AND au.id = (e.metadata_json->>'assigned_to')::uuid
+       LEFT JOIN users mu ON au.manager_id = mu.id
       ORDER BY created_at DESC
       LIMIT ${Number(limit)}`,
     params,

@@ -7,13 +7,15 @@ import { tenantQuery } from '../../db/tenant.js';
 
 const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
 
-const ensureRoleValid = async (tenant, role, role_id) => {
-  if (!role_id) return;
+// When the caller passes a role_id, the canonical scope comes from
+// custom_roles.scope. We return that scope so the caller can use it as
+// the user's `role` bucket — the FE never has to pick a bucket separately
+// when assigning a custom role.
+const resolveRoleFromRoleId = async (tenant, role_id) => {
+  if (!role_id) return null;
   const role_row = await roleRepo.findById(tenant, role_id);
   if (!role_row) throw notFound('Role not found');
-  if (role_row.scope !== role) {
-    throw conflict(`role_id scope (${role_row.scope}) does not match role (${role})`);
-  }
+  return role_row.scope; // 'super_admin' | 'sales_manager' | 'counsellor'
 };
 
 export const listUsers = (tenant, query) => repo.list(tenant, query);
@@ -26,18 +28,24 @@ export const getUser = async (tenant, id) => {
 
 export const createUser = async (tenant, input) => {
   if (await repo.findByEmail(tenant, input.email)) throw conflict('Email already in use');
-  await ensureRoleValid(tenant, input.role, input.role_id);
 
-  // Auto-link role_id to the matching seed/custom role so login can resolve allowed_tabs.
-  // Without this, allowed_tabs is null and the user has no UI access.
+  // If a role_id was supplied, the canonical bucket is custom_roles.scope.
+  // Derive `role` from it so the FE can submit just role_id when the admin
+  // picks a custom role from the dropdown.
+  let role = input.role;
   let role_id = input.role_id;
-  if (!role_id) {
-    const seedRole = await roleRepo.findByName(tenant, input.role);
+  if (role_id) {
+    const scope = await resolveRoleFromRoleId(tenant, role_id);
+    if (scope) role = scope;
+  } else {
+    // No role_id — auto-link to the matching seed role for the bucket.
+    // Without this, allowed_tabs would be null and the user would have no UI access.
+    const seedRole = await roleRepo.findByName(tenant, role);
     if (seedRole) role_id = seedRole.id;
   }
 
   // super_admin role should default track_work_time=false
-  const track_work_time = input.track_work_time ?? (input.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN);
+  const track_work_time = input.track_work_time ?? (role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN);
   const password_hash = await argon2.hash(input.password, HASH_OPTS);
 
   // Manager handling: prefer manager_ids[] if provided. The first id becomes
@@ -50,7 +58,7 @@ export const createUser = async (tenant, input) => {
 
   const user = await repo.insert(
     tenant,
-    { ...input, role_id, track_work_time, manager_id: primary },
+    { ...input, role, role_id, track_work_time, manager_id: primary },
     password_hash,
   );
   if (ids.length) await repo.setManagers(tenant, user.id, ids);
@@ -66,8 +74,12 @@ export const updateUser = async (tenant, id, updates, actor) => {
     const others = await repo.list(tenant, { role: SYSTEM_TENANT_ROLES.SUPER_ADMIN, is_active: 'true', page: 1, limit: 2 });
     if (others.total <= 1) throw forbidden('Cannot demote the last super_admin');
   }
-  if (updates.role && updates.role_id) {
-    await ensureRoleValid(tenant, updates.role, updates.role_id);
+  // If role_id is being updated, derive the role bucket from the
+  // custom_role's scope (same logic as createUser). Admin only sends
+  // role_id; we figure out the bucket.
+  if (updates.role_id) {
+    const scope = await resolveRoleFromRoleId(tenant, updates.role_id);
+    if (scope) updates = { ...updates, role: scope };
   }
   if (updates.email && updates.email !== existing.email) {
     const clash = await repo.findByEmail(tenant, updates.email);
@@ -217,4 +229,38 @@ export const orgTree = async (tenant, actor) => {
   );
 
   return { nodes, edges };
+};
+
+// Persist a user's chosen theme. Any field omitted leaves the existing
+// value alone; explicit nulls reset that field back to "use system default".
+// Returns the updated theme so the FE can confirm without a re-fetch.
+export const updateMyTheme = async (tenant, actor, body) => {
+  const sets = [];
+  const params = [actor.id];
+  let i = 2;
+  for (const col of ['theme_preset', 'theme_primary', 'theme_primary_dark', 'theme_primary_light']) {
+    if (Object.prototype.hasOwnProperty.call(body, col)) {
+      sets.push(`${col} = $${i}`);
+      params.push(body[col]);
+      i += 1;
+    }
+  }
+  if (!sets.length) {
+    // Nothing to write; return whatever's stored so the FE stays in sync.
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT theme_preset, theme_primary, theme_primary_dark, theme_primary_light
+         FROM users WHERE id = $1`,
+      [actor.id],
+    );
+    return rows[0] ?? null;
+  }
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE users SET ${sets.join(', ')}, updated_at = now()
+       WHERE id = $1
+   RETURNING theme_preset, theme_primary, theme_primary_dark, theme_primary_light`,
+    params,
+  );
+  return rows[0] ?? null;
 };

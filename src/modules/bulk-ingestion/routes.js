@@ -12,20 +12,31 @@ import { notFound } from '../../lib/errors.js';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { buildTemplateXlsx, loadTemplateLookups } from './template-builder.js';
 
 const router = express.Router();
 // All authenticated tenant users (including counsellors) may upload leads.
 router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
 
-// Serve the canonical CSV template. Institutes download this and fill it in.
-router.get('/template', async (_req, res, next) => {
+// Serve the bulk-lead template. The xlsx variant is generated live from
+// the tenant's current dropdown values so users pick stage / sub_stage /
+// country from a real Excel dropdown — no typos, no failed rows for
+// strict-match fields. Pass ?format=csv for the static CSV (no dropdowns).
+router.get('/template', async (req, res, next) => {
   try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const csvPath = path.resolve(here, '../../../docs/bulk-lead-template.csv');
-    const body = await readFile(csvPath, 'utf8');
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="bulk-lead-template.csv"');
-    res.send(body);
+    if (req.query.format === 'csv') {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const csvPath = path.resolve(here, '../../../docs/bulk-lead-template.csv');
+      const body = await readFile(csvPath, 'utf8');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="bulk-lead-template.csv"');
+      return res.send(body);
+    }
+    const lookups = await loadTemplateLookups(tenantQuery, req.tenant);
+    const buf = await buildTemplateXlsx(lookups);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="bulk-lead-template.xlsx"');
+    res.send(Buffer.from(buf));
   } catch (err) { next(err); }
 });
 
@@ -60,6 +71,11 @@ const commitSchema = z.object({
   duplicate_handling: z.enum(['skip', 'update_existing', 'create_new']).default('skip'),
   send_welcome_email: z.boolean().default(false),
   send_welcome_sms: z.boolean().default(false),
+  // Optional human-readable file name (e.g. "april-leads.xlsx"). Stored on
+  // bulk_imports.file_name so the bulk-upload list page can show something
+  // friendlier than the storage key. Capped to keep weird values out.
+  file_name: z.string().max(255).optional(),
+  file_size: z.coerce.number().int().nonnegative().optional(),
 });
 
 const downloadSchema = z.object({
@@ -114,21 +130,123 @@ router.post('/commit', validate({ body: commitSchema }), async (req, res, next) 
     if (!preview) throw notFound('Preview not found or expired');
     const { rows } = await tenantQuery(
       req.tenant,
-      `INSERT INTO bulk_imports (user_id, preview_id, source, file_r2_key, field_mapping_json, defaults_json, total_rows, duplicate_handling, status, send_welcome_email, send_welcome_sms)
-       VALUES ($1,$2,'csv',$3,$4::jsonb,$5::jsonb,$6,$7,'queued',$8,$9) RETURNING *`,
-      [req.user.id, preview.id, preview.file_r2_key, preview.field_mapping_json, preview.defaults_json, preview.total_rows, req.body.duplicate_handling, req.body.send_welcome_email, req.body.send_welcome_sms],
+      `INSERT INTO bulk_imports (user_id, preview_id, source, file_r2_key, file_name, file_size, field_mapping_json, defaults_json, total_rows, duplicate_handling, status, send_welcome_email, send_welcome_sms)
+       VALUES ($1,$2,'csv',$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,'queued',$10,$11) RETURNING *`,
+      [
+        req.user.id, preview.id, preview.file_r2_key,
+        req.body.file_name ?? null, req.body.file_size ?? null,
+        preview.field_mapping_json, preview.defaults_json, preview.total_rows,
+        req.body.duplicate_handling, req.body.send_welcome_email, req.body.send_welcome_sms,
+      ],
     );
     await publish(QUEUE_NAMES.BULK_IMPORT, 'commit', { tenantId: req.tenant.id, import_id: rows[0].id });
     res.status(202).json({ data: rows[0], meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
-router.get('/imports', async (req, res, next) => {
+// List of bulk imports visible to the actor, scoped by role:
+//   super_admin   → all imports in the tenant
+//   sales_manager → own + every uploader reporting under them (recursive)
+//   counsellor    → own only
+//
+// Optional query filters: ?file_name=&user_id=&page=&limit=
+// `file_name` runs as case-insensitive ILIKE; `user_id` exact-matches the
+// uploader. Counts are returned alongside rows for client-side pagination.
+const importsListQuery = z.object({
+  file_name: z.string().optional(),
+  user_id: z.string().uuid().optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+const allowedUploaderIds = async (req) => {
+  if (req.user.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
+  if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    const { teamHierarchy } = await import('../users/repo.js');
+    return await teamHierarchy(req.tenant, req.user.id);
+  }
+  return [req.user.id];
+};
+
+router.get('/imports', validate({ query: importsListQuery }), async (req, res, next) => {
   try {
+    const allowed = await allowedUploaderIds(req);
+    const conds = [];
+    const params = [];
+    if (allowed !== null) { params.push(allowed); conds.push(`i.user_id = ANY($${params.length}::uuid[])`); }
+    if (req.query.file_name) {
+      params.push(`%${req.query.file_name}%`);
+      // Match the user-supplied file name first, fall back to the storage
+      // key (so old rows without file_name still work).
+      conds.push(`(i.file_name ILIKE $${params.length} OR i.file_r2_key ILIKE $${params.length})`);
+    }
+    if (req.query.user_id) {
+      // Don't let a counsellor / manager bypass scoping by passing a
+      // user_id outside their allowed set.
+      if (allowed !== null && !allowed.includes(req.query.user_id)) {
+        return res.json({ data: [], meta: { requestId: req.id, page: req.query.page, limit: req.query.limit, total: 0 } });
+      }
+      params.push(req.query.user_id);
+      conds.push(`i.user_id = $${params.length}`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const offset = (req.query.page - 1) * req.query.limit;
+
+    const countParams = params.slice();
+    const { rows: countRows } = await tenantQuery(
+      req.tenant,
+      `SELECT count(*)::int AS total FROM bulk_imports i ${where}`,
+      countParams,
+    );
+
+    params.push(req.query.limit, offset);
     const { rows } = await tenantQuery(
       req.tenant,
-      `SELECT * FROM bulk_imports WHERE user_id = $1 OR $2 ORDER BY created_at DESC LIMIT 200`,
-      [req.user.id, req.user.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN],
+      `SELECT i.id, i.user_id, i.source, i.file_r2_key, i.file_name, i.file_size,
+              i.total_rows, i.success_rows, i.failed_rows, i.duplicate_rows,
+              i.duplicate_handling,
+              -- Auto-fail stale queued/processing rows. If the worker hasn't
+              -- moved them in 5 minutes we treat them as failed for display
+              -- so the UI never shows a forever-Queued row.
+              CASE
+                WHEN i.status IN ('queued', 'processing')
+                  AND i.created_at < now() - INTERVAL '5 minutes'
+                THEN 'failed'
+                ELSE i.status
+              END AS status,
+              i.started_at, i.completed_at, i.created_at,
+              u.name AS uploaded_by_name, u.email AS uploaded_by_email, u.role AS uploaded_by_role
+         FROM bulk_imports i
+         LEFT JOIN users u ON u.id = i.user_id
+         ${where}
+         ORDER BY i.created_at DESC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    res.json({
+      data: rows,
+      meta: { requestId: req.id, page: req.query.page, limit: req.query.limit, total: countRows[0]?.total ?? 0 },
+    });
+  } catch (err) { next(err); }
+});
+
+// Distinct list of users that the actor is allowed to filter by — drives
+// the "Uploaded By" dropdown on the bulk-upload list page. Same scoping
+// rules as /imports above.
+router.get('/imports/uploaders', async (req, res, next) => {
+  try {
+    const allowed = await allowedUploaderIds(req);
+    const params = [];
+    let where = `WHERE u.deleted_at IS NULL`;
+    if (allowed !== null) { params.push(allowed); where += ` AND u.id = ANY($${params.length}::uuid[])`; }
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT DISTINCT u.id, u.name, u.email, u.role
+         FROM bulk_imports i
+         JOIN users u ON u.id = i.user_id
+         ${where}
+        ORDER BY u.name`,
+      params,
     );
     res.json({ data: rows, meta: { requestId: req.id } });
   } catch (err) { next(err); }
@@ -139,6 +257,39 @@ router.get('/imports/:id', validate({ params: idParam }), async (req, res, next)
     const { rows } = await tenantQuery(req.tenant, `SELECT * FROM bulk_imports WHERE id = $1`, [req.params.id]);
     if (!rows[0]) throw notFound('Import not found');
     res.json({ data: rows[0], meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// Re-download the original uploaded spreadsheet. Returns a short-lived
+// signed GCS URL so the browser can stream the file directly. Scoped to
+// the same hierarchy the listing uses: super_admin gets any tenant
+// upload, sales_manager only their team's, counsellor only their own.
+router.get('/imports/:id/file', validate({ params: idParam }), async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT id, user_id, file_r2_key, file_name FROM bulk_imports WHERE id = $1`,
+      [req.params.id],
+    );
+    const imp = rows[0];
+    if (!imp) throw notFound('Import not found');
+    if (!imp.file_r2_key) throw notFound('Original file is no longer available');
+
+    // Same scope check as /imports list. We let the actor download iff
+    // they could have seen the row in their listing.
+    const allowed = await allowedUploaderIds(req);
+    if (allowed !== null && !allowed.includes(imp.user_id)) {
+      throw notFound('Import not found');
+    }
+
+    const { getDownloadSignedUrl } = await import('../../lib/r2.js');
+    const url = await getDownloadSignedUrl({
+      key: imp.file_r2_key,
+      // Force the browser to save with the original file name (with a
+      // sane fallback for old rows that have no file_name).
+      downloadAs: imp.file_name || imp.file_r2_key.split('/').pop(),
+    });
+    res.json({ data: { url, file_name: imp.file_name }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

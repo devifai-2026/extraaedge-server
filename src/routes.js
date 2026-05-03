@@ -20,6 +20,7 @@ import calendarRouter from './modules/calendar/routes.js';
 import searchRouter from './modules/search/routes.js';
 import templateVariablesRouter from './modules/template-variables/routes.js';
 import leadsRouter from './modules/leads/routes.js';
+import leadRecordingsRouter from './modules/lead-recordings/routes.js';
 import leadAssignmentsRouter from './modules/lead-assignments/routes.js';
 import leadActivitiesRouter from './modules/lead-activities/routes.js';
 import leadNotesRouter from './modules/lead-notes/routes.js';
@@ -100,6 +101,9 @@ export const mountRoutes = (app) => {
 
   // Tenant — leads + related
   api.use('/leads', leadsRouter);
+  // Per-lead manually-uploaded call recordings. Mounted with the
+  // :lead_id path param the sub-router relies on.
+  api.use('/leads/:lead_id/recordings', leadRecordingsRouter);
   api.use('/lead-assignments', leadAssignmentsRouter);
   api.use('/lead-activities', leadActivitiesRouter);
   api.use('/lead-notes', leadNotesRouter);

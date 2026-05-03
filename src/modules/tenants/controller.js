@@ -49,3 +49,10 @@ export const remove = async (req, res, next) => {
     res.status(204).end();
   } catch (err) { next(err); }
 };
+
+export const orgTree = async (req, res, next) => {
+  try {
+    const tree = await service.getOrgTree(req.params.id);
+    res.json({ data: tree, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};

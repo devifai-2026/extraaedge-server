@@ -54,12 +54,11 @@ const schema = z.object({
   REDIS_URL: z.string().optional().default(''),
   QUEUE_DRIVER: z.enum(['bullmq', 'inprocess']).default('bullmq'),
 
-  R2_ACCOUNT_ID: stringNonEmpty,
-  R2_ACCESS_KEY_ID: stringNonEmpty,
-  R2_SECRET_ACCESS_KEY: stringNonEmpty,
-  R2_BUCKET: stringNonEmpty,
-  R2_PUBLIC_BASE_URL: z.string().optional().default(''),
-  R2_SIGNED_URL_TTL_SECONDS: intFrom(300),
+  GCS_PROJECT_ID: stringNonEmpty,
+  GCS_BUCKET: stringNonEmpty,
+  GCS_KEY_FILE: z.string().optional().default(''),
+  GCS_PUBLIC_BASE_URL: z.string().optional().default(''),
+  GCS_SIGNED_URL_TTL_SECONDS: intFrom(300),
 
   BREVO_API_KEY: stringNonEmpty,
   BREVO_SENDER_EMAIL: z.string().email(),

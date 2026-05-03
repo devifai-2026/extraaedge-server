@@ -1,5 +1,8 @@
 import * as repo from './repo.js';
 import { conflict, forbidden, notFound } from '../../lib/errors.js';
+import { tenantQuery } from '../../db/tenant.js';
+import { notifyUser } from '../../lib/socket.js';
+import { logger } from '../../lib/logger.js';
 
 export const listRoles = (tenant) => repo.list(tenant);
 
@@ -27,7 +30,33 @@ export const updateRole = async (tenant, id, updates) => {
     if (clash) throw conflict('Role name already exists');
   }
   delete updates.is_system;
-  return repo.update(tenant, id, updates);
+  const updated = await repo.update(tenant, id, updates);
+
+  // If tab_permissions changed, push a refresh signal to every active user
+  // currently assigned this role so their FE re-fetches /auth/me and the
+  // sidebar / route-gates update in real time without a re-login.
+  const tabPermsChanged = updates.tab_permissions !== undefined;
+  if (tabPermsChanged) {
+    try {
+      const { rows } = await tenantQuery(
+        tenant,
+        `SELECT id FROM users WHERE role_id = $1 AND deleted_at IS NULL AND is_active = true`,
+        [id],
+      );
+      for (const u of rows) {
+        notifyUser(tenant.id, u.id, 'role.tab_permissions_changed', {
+          role_id: id,
+          role_name: updated.name,
+        });
+      }
+    } catch (err) {
+      // Non-fatal: the role IS updated; users just won't get the live
+      // refresh and will see the change on their next page load.
+      logger.warn({ err: err.message, role_id: id }, 'role tab_permissions broadcast failed');
+    }
+  }
+
+  return updated;
 };
 
 export const deleteRole = async (tenant, id) => {

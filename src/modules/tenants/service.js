@@ -3,7 +3,7 @@ import * as repo from './repo.js';
 import { provisionTenantDatabase } from '../../services/tenant-provisioning.js';
 import { conflict, notFound } from '../../lib/errors.js';
 import { encrypt, randomToken } from '../../lib/crypto.js';
-import { invalidateTenantCache } from '../../db/tenant.js';
+import { invalidateTenantCache, resolveTenantById, tenantQuery } from '../../db/tenant.js';
 import { recordPlatformAudit } from '../../services/platform-audit.js';
 
 const buildDbIdentity = (slug) => {
@@ -105,4 +105,42 @@ export const deleteTenant = async (id, platform_user_id, ip, user_agent) => {
   invalidateTenantCache(row.slug);
   await recordPlatformAudit({ platform_user_id, action: 'tenant.deleted', entity_type: 'tenant', entity_id: id, tenant_id: id, ip, user_agent });
   return row;
+};
+
+// Build the tenant's user hierarchy (super_admin → sales_manager →
+// counsellor) for the product-owner UI. Returns an array of root nodes
+// (users with no manager) so the caller can render multiple top-level
+// owners if a tenant has more than one.
+//
+// Per the product spec, each node carries only `id`, `name`, and `role` —
+// no email or other internal data. The product owner sees structure, not
+// internals.
+export const getOrgTree = async (id) => {
+  const tenant = await resolveTenantById(id);
+  if (!tenant) throw notFound('Tenant not found');
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, name, role, manager_id
+       FROM users
+      WHERE deleted_at IS NULL AND is_active = true
+      ORDER BY
+        -- Owners first, then managers, then counsellors. Stable secondary
+        -- sort by name keeps the tree deterministic.
+        CASE role WHEN 'super_admin' THEN 0 WHEN 'sales_manager' THEN 1 ELSE 2 END,
+        name`,
+  );
+
+  // Build an in-memory tree from the flat list. O(n).
+  const byId = new Map();
+  const roots = [];
+  for (const r of rows) {
+    byId.set(r.id, { id: r.id, name: r.name, role: r.role, children: [] });
+  }
+  for (const r of rows) {
+    const node = byId.get(r.id);
+    const parent = r.manager_id ? byId.get(r.manager_id) : null;
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  }
+  return roots;
 };

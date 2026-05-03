@@ -49,8 +49,9 @@ const tick = async () => {
       const tenant = await resolveTenantById(id);
       if (!tenant) continue;
 
-      // (1) Due in next 15 minutes — counsellor + creator only.
-      const { rows: due } = await tenantQuery(
+      // (1a) T-15min reminder — counsellor + creator only. Fires once per
+      // follow-up; tracked by reminder_sent_at so we don't re-spam each tick.
+      const { rows: due15 } = await tenantQuery(
         tenant,
         `SELECT f.id, f.lead_id, f.created_by, f.next_action_datetime, l.assigned_to, l.name AS lead_name
            FROM lead_followups f LEFT JOIN leads l ON l.id = f.lead_id
@@ -58,18 +59,52 @@ const tick = async () => {
             AND f.next_action_datetime BETWEEN now() AND now() + interval '15 minutes'
           LIMIT 500`,
       );
-      for (const f of due) {
+      for (const f of due15) {
         const recipients = new Set([f.created_by, f.assigned_to].filter(Boolean));
         for (const uid of recipients) {
           await pushNotification(tenant, {
             user_id: uid,
             type: 'follow_up_reminder',
             message: `Follow-up for ${f.lead_name ?? 'a lead'} is due in 15 minutes`,
-            metadata_json: { follow_up_id: f.id, lead_id: f.lead_id, at: f.next_action_datetime },
+            metadata_json: { follow_up_id: f.id, lead_id: f.lead_id, at: f.next_action_datetime, lead_in: '15min' },
             link: `/leadlist?focus=${f.lead_id}`,
+          });
+          // Real-time bell push.
+          notifyUser(tenant.id, uid, 'follow_up.reminder', {
+            follow_up_id: f.id, lead_id: f.lead_id, lead_name: f.lead_name,
+            lead_in: '15min', at: f.next_action_datetime,
           });
         }
         await tenantQuery(tenant, `UPDATE lead_followups SET reminder_sent_at = now() WHERE id = $1`, [f.id]);
+      }
+
+      // (1b) T-5min final reminder — same audience, fires once. We allow
+      // this to run even if the T-15min already fired (different column),
+      // so a follow-up gets two pings: 15 minutes and 5 minutes before due.
+      const { rows: due5 } = await tenantQuery(
+        tenant,
+        `SELECT f.id, f.lead_id, f.created_by, f.next_action_datetime, l.assigned_to, l.name AS lead_name
+           FROM lead_followups f LEFT JOIN leads l ON l.id = f.lead_id
+          WHERE f.deleted_at IS NULL AND f.status = 'planned' AND f.reminder_5min_sent_at IS NULL
+            AND f.next_action_datetime BETWEEN now() AND now() + interval '5 minutes'
+          LIMIT 500`,
+      );
+      for (const f of due5) {
+        const recipients = new Set([f.created_by, f.assigned_to].filter(Boolean));
+        for (const uid of recipients) {
+          await pushNotification(tenant, {
+            user_id: uid,
+            type: 'follow_up_reminder',
+            message: `Follow-up for ${f.lead_name ?? 'a lead'} is due in 5 minutes`,
+            metadata_json: { follow_up_id: f.id, lead_id: f.lead_id, at: f.next_action_datetime, lead_in: '5min' },
+            link: `/leadlist?focus=${f.lead_id}`,
+          });
+          notifyUser(tenant.id, uid, 'follow_up.reminder', {
+            follow_up_id: f.id, lead_id: f.lead_id, lead_name: f.lead_name,
+            lead_in: '5min', at: f.next_action_datetime,
+          });
+        }
+        await tenantQuery(tenant, `UPDATE lead_followups SET reminder_5min_sent_at = now() WHERE id = $1`, [f.id]);
       }
 
       // (2) Overdue — fan out to manager chain + super_admins.

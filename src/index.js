@@ -11,6 +11,20 @@ import { initSocket } from './lib/socket.js';
 // (In production, QUEUE_DRIVER=bullmq runs each worker as its own process.)
 if (env.QUEUE_DRIVER === 'inprocess') {
   await import('./workers/rule-processor.js');
+  await import('./workers/bulk-import-worker.js');
+  // Follow-up + notifications stack:
+  //   notification-worker translates queued event types into
+  //     notifications rows + websocket pushes.
+  //   followup-reminder-scheduler scans lead_followups every minute and
+  //     publishes 'follow_up_due' events when a planned follow-up's time
+  //     is reached.
+  //   missed-followup-scanner marks planned follow-ups as 'missed' once
+  //     they're past-due by N hours and publishes 'follow_up_missed'.
+  // Without these three the notifications popover stays empty for any
+  // follow-up activity, even though /follow-ups/* CRUD works.
+  await import('./workers/notification-worker.js');
+  await import('./workers/followup-reminder-scheduler.js');
+  await import('./workers/missed-followup-scanner.js');
 }
 
 const app = buildApp();

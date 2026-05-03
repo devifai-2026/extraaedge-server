@@ -7,7 +7,7 @@ import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
-import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema } from './schema.js';
+import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema } from './schema.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -16,6 +16,12 @@ const loadUpdatedAt = async (req) => repo.getUpdatedAt(req.tenant, req.params.id
 
 // /users/team — before the :id routes so it doesn't match
 router.get('/team', controller.myTeam);
+
+// Update the current user's UI theme (3 brand colors). Open to every
+// authenticated tenant role — each user manages their own theme. The
+// route lives before /:id so the literal "me" doesn't match the UUID
+// validator on the catch-all.
+router.put('/me/theme', validate({ body: updateThemeSchema }), controller.updateMyTheme);
 
 // /users/org-tree — flat list of nodes + edges for the Org Tree canvas.
 //   super_admin → entire tenant

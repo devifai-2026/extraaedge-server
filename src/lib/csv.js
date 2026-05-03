@@ -1,5 +1,6 @@
 import { parse } from 'csv-parse';
 import { stringify } from 'csv-stringify';
+import ExcelJS from 'exceljs';
 
 export const parseCsvBuffer = (buffer, { columns = true, skip_empty_lines = true } = {}) =>
   new Promise((resolve, reject) => {
@@ -18,3 +19,51 @@ export const streamCsv = (records, { header = true, columns } = {}) =>
   });
 
 export const rowsToCsv = async (rows, columns) => streamCsv(rows, { header: true, columns });
+
+// Parse an .xlsx buffer into an array of {column: value} objects, mirroring
+// the shape returned by parseCsvBuffer so worker code can treat both
+// uniformly. Reads the first worksheet only — bulk lead templates are
+// expected to be single-sheet. Header row is row 1.
+export const parseXlsxBuffer = async (buffer) => {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer);
+  const ws = wb.worksheets[0];
+  if (!ws) return [];
+
+  const headers = [];
+  ws.getRow(1).eachCell({ includeEmpty: true }, (cell, colNumber) => {
+    headers[colNumber - 1] = String(cell.value ?? '').trim();
+  });
+
+  const rows = [];
+  for (let r = 2; r <= ws.rowCount; r += 1) {
+    const row = ws.getRow(r);
+    const obj = {};
+    let hasValue = false;
+    headers.forEach((h, i) => {
+      if (!h) return;
+      const cell = row.getCell(i + 1);
+      let v = cell.value;
+      // ExcelJS returns rich objects for some cell types; flatten to strings.
+      if (v && typeof v === 'object') {
+        if (v instanceof Date) v = v.toISOString();
+        else if (v.text) v = v.text;
+        else if (v.result !== undefined) v = v.result;
+        else if (v.richText) v = v.richText.map((p) => p.text).join('');
+        else v = String(v);
+      }
+      const str = v === null || v === undefined ? '' : String(v).trim();
+      if (str !== '') hasValue = true;
+      obj[h] = str;
+    });
+    if (hasValue) rows.push(obj);
+  }
+  return rows;
+};
+
+// Pick a parser by file extension. Workers and routes can call this without
+// knowing whether the upload is CSV or XLSX.
+export const parseSpreadsheetBuffer = async (buffer, filenameOrKey) => {
+  const isXlsx = /\.xlsx$/i.test(filenameOrKey ?? '');
+  return isXlsx ? parseXlsxBuffer(buffer) : parseCsvBuffer(buffer);
+};

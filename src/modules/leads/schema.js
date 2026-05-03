@@ -1,55 +1,64 @@
 import { z } from 'zod';
 
+// Forms in the admin UI submit '' for cleared optional fields. zod's
+// `.optional()` only accepts `undefined`, so '' would fail .email() / .uuid()
+// even when the field is genuinely blank. These helpers preprocess '' → undefined
+// so blank optional fields behave as "no value" rather than "invalid value".
+const blankToUndef = (v) => (v === '' || v === null ? undefined : v);
+const optionalEmail = z.preprocess(blankToUndef, z.string().email().optional());
+const optionalUuid = z.preprocess(blankToUndef, z.string().uuid().optional());
+const optionalPhone = z.preprocess(blankToUndef, z.string().min(4).optional());
+
 const leadBaseSchema = z.object({
   // Personal
   name: z.string().optional(),
   first_name: z.string().optional(),
   last_name: z.string().optional(),
   alternate_first_name: z.string().optional(),
-  email: z.string().email().optional(),
-  alternate_email: z.string().email().optional(),
-  phone: z.string().min(4).optional(),
+  email: optionalEmail,
+  alternate_email: optionalEmail,
+  phone: optionalPhone,
   whatsapp_number: z.string().optional(),
   alternate_contact: z.string().optional(),
   gender: z.string().optional(),
   language: z.string().optional(),
 
   // Education
-  ug_degree_id: z.string().uuid().optional(),
-  ug_specialization_id: z.string().uuid().optional(),
-  ug_university_id: z.string().uuid().optional(),
+  ug_degree_id: optionalUuid,
+  ug_specialization_id: optionalUuid,
+  ug_university_id: optionalUuid,
   ug_graduation_year: z.coerce.number().int().optional(),
-  pg_degree_id: z.string().uuid().optional(),
-  pg_specialization_id: z.string().uuid().optional(),
-  pg_university_id: z.string().uuid().optional(),
+  pg_degree_id: optionalUuid,
+  pg_specialization_id: optionalUuid,
+  pg_university_id: optionalUuid,
   pg_graduation_year: z.coerce.number().int().optional(),
 
   // Address
-  country_id: z.string().uuid().optional(),
-  state_id: z.string().uuid().optional(),
+  country_id: optionalUuid,
+  state_id: optionalUuid,
   district: z.string().optional(),
   city: z.string().optional(),
   address: z.string().optional(),
   pincode: z.string().optional(),
 
   // Program + stage
-  program_id: z.string().uuid().optional(),
-  stage_id: z.string().uuid().optional(),
-  sub_stage_id: z.string().uuid().optional(),
+  program_id: optionalUuid,
+  stage_id: optionalUuid,
+  sub_stage_id: optionalUuid,
   remarks: z.string().optional(),
   closure_remarks: z.string().optional(),
 
   // Ownership
-  assigned_to: z.string().uuid().optional(),
-  team_id: z.string().uuid().optional(),
+  assigned_to: optionalUuid,
+  team_id: optionalUuid,
 
   // Referral + attribution
-  referred_by_lead_id: z.string().uuid().optional(),
+  referred_by_lead_id: optionalUuid,
   referral_code_used: z.string().optional(),
   referral_source: z.string().optional(),
 
   // First touch (used for attribution)
-  first_touch_campaign_id: z.string().uuid().optional(),
+  first_touch_campaign_id: optionalUuid,
   first_touch_channel: z.string().optional(),
   first_touch_source: z.string().optional(),
   first_touch_medium: z.string().optional(),
@@ -58,13 +67,13 @@ const leadBaseSchema = z.object({
   family: z.object({
     father_name: z.string().optional(),
     father_mobile: z.string().optional(),
-    father_email: z.string().email().optional(),
+    father_email: optionalEmail,
     mother_name: z.string().optional(),
     mother_mobile: z.string().optional(),
-    mother_email: z.string().email().optional(),
+    mother_email: optionalEmail,
     guardian_name: z.string().optional(),
     guardian_mobile: z.string().optional(),
-    guardian_email: z.string().email().optional(),
+    guardian_email: optionalEmail,
   }).optional(),
 
   // Custom fields as a dict keyed by field.key
@@ -72,18 +81,35 @@ const leadBaseSchema = z.object({
 
   // Source attribution (multi)
   sources: z.array(z.object({
-    channel_id: z.string().uuid().optional(),
-    source_id: z.string().uuid().optional(),
-    campaign_id: z.string().uuid().optional(),
-    medium_id: z.string().uuid().optional(),
+    channel_id: optionalUuid,
+    source_id: optionalUuid,
+    campaign_id: optionalUuid,
+    medium_id: optionalUuid,
     is_primary: z.boolean().optional(),
   })).optional(),
 });
 
-export const leadCreateSchema = leadBaseSchema.refine(
-  (v) => v.email || v.phone || v.whatsapp_number || v.name,
-  { message: 'At least one of name/email/phone/whatsapp_number is required' },
-);
+// Lead creation requires four fields. The base schema marks them all
+// optional so that updates can patch a single field; we enforce the
+// "required on create" rule here via a chain of refinements that produce
+// per-field error paths (so the UI can highlight the right input).
+export const leadCreateSchema = leadBaseSchema
+  .refine((v) => Boolean((v.name && v.name.trim()) || (v.first_name && v.first_name.trim())), {
+    path: ['name'],
+    message: 'Name is required',
+  })
+  .refine((v) => Boolean(v.whatsapp_number && v.whatsapp_number.trim()), {
+    path: ['whatsapp_number'],
+    message: 'WhatsApp number is required',
+  })
+  .refine((v) => Boolean(v.program_id), {
+    path: ['program_id'],
+    message: 'Program is required',
+  })
+  .refine((v) => Boolean(v.remarks && v.remarks.trim()), {
+    path: ['remarks'],
+    message: 'Remarks are required',
+  });
 
 export const leadUpdateSchema = leadBaseSchema.partial();
 
