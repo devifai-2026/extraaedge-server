@@ -18,7 +18,17 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
   PORT: intFrom(4000),
   BASE_URL: stringNonEmpty.default('http://localhost:4000'),
-  CORS_ORIGINS: z.string().default('http://localhost:5173'),
+  CORS_ORIGINS: z
+    .string()
+    .default(
+      [
+        'http://localhost:5173',
+        'http://localhost:5174',
+        'http://localhost:3000',
+        'https://extraa-edge-admin.netlify.app',
+        'https://extraaedge-product.netlify.app',
+      ].join(','),
+    ),
   PUBLIC_TENANT_DOMAIN: stringNonEmpty.default('productivo.in'),
 
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
