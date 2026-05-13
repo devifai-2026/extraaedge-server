@@ -94,12 +94,15 @@ const wrap = (type, payload) => ({
   ...payload,
 });
 
-// Always copies admin room too so super-admins see everything.
+// Deliver to exactly one room — the target user's. The admin-room fanout
+// for lead-style events is the responsibility of the caller (typically via
+// notifyLeadChange → notifyManagersOf or notifyAdmins). Emitting here too
+// would deliver the same event twice to super_admins, who are members of
+// BOTH userRoom (their own) and adminRoom.
 export const notifyUser = (tenantId, userId, type, payload) => {
   if (!io || !tenantId || !userId) return;
   const evt = wrap(type, payload);
   io.to(userRoom(tenantId, userId)).emit('notification', evt);
-  io.to(adminRoom(tenantId)).emit('notification', evt);
 };
 
 export const notifyManagersOf = async (tenant, userId, type, payload) => {

@@ -26,6 +26,7 @@ export const createCache = () => ({
   data: {
     stage: new Map(),                   // name -> id
     sub_stage_by_stage: new Map(),      // `${stage_id}::${name}` -> id
+    stages_with_sub: new Set(),         // stage_ids that have at least one sub-stage
     country: new Map(),
     state_by_country: new Map(),        // `${country_id}::${name}` -> id
     program: new Map(),
@@ -59,7 +60,10 @@ const loadStages = (tenant, cache) =>
 
 const loadSubStages = (tenant, cache) =>
   ensureLoaded(tenant, cache, 'sub_stage', `SELECT id, name, stage_id FROM lead_sub_stages WHERE deleted_at IS NULL`,
-    (r) => cache.data.sub_stage_by_stage.set(`${r.stage_id}::${norm(r.name)}`, r.id));
+    (r) => {
+      cache.data.sub_stage_by_stage.set(`${r.stage_id}::${norm(r.name)}`, r.id);
+      cache.data.stages_with_sub.add(r.stage_id);
+    });
 
 const loadCountries = (tenant, cache) =>
   ensureLoaded(tenant, cache, 'country', `SELECT id, name FROM countries WHERE deleted_at IS NULL`,
@@ -171,13 +175,18 @@ export const resolveDropdowns = async (tenant, row, cache) => {
   }
   delete out.stage;
 
-  // ---- SUB-STAGE (strict, scoped to stage) ----
+  // ---- SUB-STAGE ----
+  // Required ONLY when the chosen stage has at least one sub-stage configured.
+  // Stages with no sub-stages may leave it blank. If provided, it must match
+  // a sub-stage that belongs to the chosen stage.
+  await loadSubStages(tenant, cache);
   if (!isEmpty(out.sub_stage)) {
     if (!out.stage_id) return fail('SUBSTAGE_WITHOUT_STAGE', `Sub-stage "${out.sub_stage}" provided but no stage was set`);
-    await loadSubStages(tenant, cache);
     const id = cache.data.sub_stage_by_stage.get(`${out.stage_id}::${norm(out.sub_stage)}`);
     if (!id) return fail('SUBSTAGE_MISMATCH', `Sub-stage "${out.sub_stage}" does not belong to the chosen stage`);
     out.sub_stage_id = id;
+  } else if (out.stage_id && cache.data.stages_with_sub.has(out.stage_id)) {
+    return fail('MISSING_SUBSTAGE', 'Sub-stage is required for this stage (the stage has sub-stages configured)');
   }
   delete out.sub_stage;
 

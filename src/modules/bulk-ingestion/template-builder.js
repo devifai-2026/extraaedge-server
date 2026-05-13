@@ -1,15 +1,17 @@
 // Generates the bulk-lead-template.xlsx live from the tenant's current
-// dropdown values, with Excel data validation (dropdown picker) on the
-// columns where strict matching is required at import time.
+// dropdown values.
 //
-// Why per-tenant: stage / sub_stage / country lists differ between
-// institutes. Picking values from a dropdown in the spreadsheet means
-// users can't typo strict fields, so the import never fails on
-// "Stage not found".
+// We used to emit Excel "data-validation lists" (the little arrow on a cell)
+// backed by INDIRECT()-resolved named ranges for the dependent sub_stage
+// dropdown. That broke in Google Sheets, LibreOffice, WPS, mobile Excel and
+// some older desktop Excel versions — the arrow simply didn't show and users
+// thought the template was broken.
 //
-// Long lists (universities/specializations/etc.) are deliberately NOT
-// turned into dropdowns — too many entries to scroll, and the import
-// auto-creates them anyway.
+// New approach: skip data-validation entirely. Add a visible "Allowed Values"
+// sheet listing every strict-match value (stages, sub-stages grouped under
+// their stage, countries, gender, language). Users type / paste from there.
+// The server validates strictly on import, so wrong values still get caught
+// and surfaced on /failedleads — the dropdown was UX, not a safety net.
 import ExcelJS from 'exceljs';
 
 const HEADERS = [
@@ -43,67 +45,84 @@ const EXAMPLE_ROWS = [
 const FIXED_GENDER = ['Male', 'Female', 'Other', 'Prefer not to say'];
 const FIXED_LANGUAGE = ['en', 'hi', 'mr', 'ta', 'te', 'kn', 'ml', 'gu', 'bn', 'pa'];
 
-// Returns the 1-based column number for a header (so we know where to put
-// data validation).
-const colNum = (header) => HEADERS.indexOf(header) + 1;
+// Build the visible "Allowed Values" reference sheet. Layout: a banner at the
+// top, then for each strict-match field a small titled block listing the valid
+// values. Sub-stages are grouped under the parent stage so users can see which
+// sub-stage belongs where without scrolling.
+const buildAllowedValuesSheet = (wb, { stages, subStagesByStageName, countries }) => {
+  const sh = wb.addWorksheet('Allowed Values');
+  sh.getColumn(1).width = 34;
+  sh.getColumn(2).width = 34;
+  sh.getColumn(3).width = 28;
+  sh.getColumn(4).width = 26;
+  sh.getColumn(5).width = 18;
 
-// Convert a 1-based column number to an Excel letter (A, B, ..., Z, AA, ...).
-const colLetter = (n) => {
-  let s = '';
-  let x = n;
-  while (x > 0) {
-    const r = (x - 1) % 26;
-    s = String.fromCharCode(65 + r) + s;
-    x = Math.floor((x - 1) / 26);
+  const HEADER_FILL  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDF3ED' } };
+  const SECTION_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7E6' } };
+  const BORDER = {
+    top:    { style: 'thin', color: { argb: 'FFE5E5E5' } },
+    left:   { style: 'thin', color: { argb: 'FFE5E5E5' } },
+    bottom: { style: 'thin', color: { argb: 'FFE5E5E5' } },
+    right:  { style: 'thin', color: { argb: 'FFE5E5E5' } },
+  };
+
+  // Title row
+  const title = sh.addRow(['Allowed Values — copy these into the Leads sheet']);
+  title.font = { bold: true, size: 14 };
+  sh.mergeCells(`A${title.number}:E${title.number}`);
+  sh.addRow(['Stage, sub_stage, country, gender and language are STRICT — values must match exactly.']);
+  sh.addRow(['Type or paste from the lists below. Other fields (program, channel, university…) are free text and auto-created on import.']);
+  sh.addRow([]);
+
+  // ---- Stage / sub_stage (grouped) ----
+  const stageHdr = sh.addRow(['Stage (column "stage")', 'Sub-stage (column "sub_stage")']);
+  stageHdr.font = { bold: true };
+  stageHdr.eachCell((c) => { c.fill = HEADER_FILL; c.border = BORDER; });
+
+  for (const stageName of stages) {
+    const subs = subStagesByStageName[stageName] || [];
+    if (subs.length === 0) {
+      const r = sh.addRow([stageName, '(no sub-stages — leave blank)']);
+      r.getCell(1).fill = SECTION_FILL;
+      r.getCell(1).font = { bold: true };
+      r.eachCell((c) => { c.border = BORDER; c.alignment = { vertical: 'top', wrapText: true }; });
+      continue;
+    }
+    // Print one row per sub-stage; merge the stage cell down for visual grouping.
+    const firstRow = sh.rowCount + 1;
+    for (let i = 0; i < subs.length; i += 1) {
+      const r = sh.addRow([i === 0 ? stageName : '', subs[i]]);
+      if (i === 0) {
+        r.getCell(1).fill = SECTION_FILL;
+        r.getCell(1).font = { bold: true };
+      }
+      r.eachCell((c) => { c.border = BORDER; c.alignment = { vertical: 'top', wrapText: true }; });
+    }
+    const lastRow = sh.rowCount;
+    if (subs.length > 1) sh.mergeCells(`A${firstRow}:A${lastRow}`);
   }
-  return s;
-};
 
-// Adds a hidden sheet column of values, returns the absolute range string
-// suitable for `dataValidation.formulae[0]`. Excel requires the range to
-// be on the same workbook, and dropdowns longer than ~255 chars must use
-// a range (not inline values).
-const addListToHiddenSheet = (listsSheet, header, values) => {
-  if (!values.length) return null;
-  const startCol = listsSheet.lastColumnIndex + 1;
-  const letter = colLetter(startCol);
-  // Header at row 1, values from row 2 down. Header is informational only.
-  listsSheet.getCell(`${letter}1`).value = header;
-  values.forEach((v, i) => {
-    listsSheet.getCell(`${letter}${i + 2}`).value = v;
-  });
-  listsSheet.lastColumnIndex = startCol;
-  // Reference must be absolute and quoted because the sheet name has odd chars.
-  return `'Lists'!$${letter}$2:$${letter}$${values.length + 1}`;
-};
+  sh.addRow([]);
 
-const applyDropdown = (ws, header, rangeFormula) => {
-  if (!rangeFormula) return;
-  const col = colNum(header);
-  if (col < 1) return;
-  const letter = colLetter(col);
-  // Apply to rows 2..1001 (1000 data rows). Going to 1048576 (Excel's max)
-  // makes the file huge and Excel slower to open; 1000 is plenty for a
-  // template fill-in. Users can paste-fill more rows if they need to.
-  ws.dataValidations.add(`${letter}2:${letter}1001`, {
-    type: 'list',
-    allowBlank: true,
-    formulae: [rangeFormula],
-    showErrorMessage: true,
-    errorStyle: 'warning',
-    errorTitle: 'Value not in list',
-    error: `Pick a value from the dropdown. New ${header} entries can be added under Settings → Dropdowns.`,
-  });
-};
+  // ---- Other strict-match enums laid out side-by-side ----
+  const otherHdr = sh.addRow(['Country (column "country")', 'Gender (column "gender")', 'Language (column "language")']);
+  otherHdr.font = { bold: true };
+  otherHdr.eachCell((c) => { c.fill = HEADER_FILL; c.border = BORDER; });
 
-// Excel "defined name" ids must be valid (start with a letter, no spaces,
-// no punctuation other than _ . ?). Stage names like "01-New" or "Will join
-// soon" don't qualify, so we sanitise into a deterministic key the
-// INDIRECT() formula can rebuild from the cell value.
-const safeNameKey = (s) => `_${String(s ?? '')
-  .replace(/[^A-Za-z0-9]+/gu, '_')
-  .replace(/^_+|_+$/gu, '')
-  .replace(/^(\d)/u, '_$1')}`;
+  const maxRows = Math.max(countries.length, FIXED_GENDER.length, FIXED_LANGUAGE.length);
+  for (let i = 0; i < maxRows; i += 1) {
+    const r = sh.addRow([
+      countries[i]      || '',
+      FIXED_GENDER[i]   || '',
+      FIXED_LANGUAGE[i] || '',
+    ]);
+    r.eachCell((c) => { c.border = BORDER; });
+  }
+
+  // Freeze the title so it stays put while scrolling the value lists.
+  sh.views = [{ state: 'frozen', ySplit: 1 }];
+  return sh;
+};
 
 // Build the workbook in memory and return the xlsx buffer.
 export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countries }) => {
@@ -122,65 +141,15 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   // ---- Example rows ----
   for (const row of EXAMPLE_ROWS) ws.addRow(row);
 
-  // ---- Hidden sheet to host dropdown source ranges ----
-  const listsSheet = wb.addWorksheet('Lists', { state: 'hidden' });
-  listsSheet.lastColumnIndex = 0;
+  // Freeze the header row so it stays visible while users scroll down to fill rows.
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
 
-  // ---- Fixed enums ----
-  applyDropdown(ws, 'gender', addListToHiddenSheet(listsSheet, 'gender', FIXED_GENDER));
-  applyDropdown(ws, 'language', addListToHiddenSheet(listsSheet, 'language', FIXED_LANGUAGE));
-
-  // ---- Tenant-driven enums ----
-  if (stages.length) applyDropdown(ws, 'stage', addListToHiddenSheet(listsSheet, 'stage', stages));
-
-  // ---- Dependent sub_stage dropdown ----
-  // Each stage gets its own column on the Lists sheet. We register a workbook
-  // "defined name" pointing at that column (sanitised — Excel names can't
-  // contain spaces or hyphens). Then the sub_stage column's data validation
-  // uses INDIRECT() to look up the right named range based on the stage cell.
-  //
-  // The lookup formula in column Z (sub_stage), row 2:
-  //   =INDIRECT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE("_"&Y2," ","_"),"-","_"),".","_"))
-  //
-  // This rebuilds safeNameKey() in Excel: prepend "_", replace each space /
-  // hyphen / dot with "_". So stage "01-New" → name "_01_New" matches the
-  // defined name we registered below. If a stage has no sub_stages registered
-  // (e.g. "Junk"), INDIRECT returns #REF! and Excel shows an empty dropdown.
-  const stageColLetter = colLetter(colNum('stage'));
-  const subStageMap = subStagesByStageName || {};
-  // Track if at least one stage has sub_stages — if not, skip the validation.
-  let anyDefined = false;
-  for (const [stageName, subList] of Object.entries(subStageMap)) {
-    if (!subList?.length) continue;
-    const startCol = listsSheet.lastColumnIndex + 1;
-    const letter = colLetter(startCol);
-    listsSheet.getCell(`${letter}1`).value = stageName;
-    subList.forEach((v, i) => { listsSheet.getCell(`${letter}${i + 2}`).value = v; });
-    listsSheet.lastColumnIndex = startCol;
-    const range = `'Lists'!$${letter}$2:$${letter}$${subList.length + 1}`;
-    // Workbook-scoped named range. exceljs writes these to xl/workbook.xml.
-    wb.definedNames.add(range, safeNameKey(stageName));
-    anyDefined = true;
-  }
-  if (anyDefined) {
-    const subStageCol = colLetter(colNum('sub_stage'));
-    // Apply per-row data validation with a relative reference to the
-    // current row's stage cell. Range "Z2:Z1001" gets validation that
-    // resolves the formula against each row's own Y cell.
-    ws.dataValidations.add(`${subStageCol}2:${subStageCol}1001`, {
-      type: 'list',
-      allowBlank: true,
-      // Y2 is the stage cell on the same row as the first data row. Excel
-      // shifts this reference automatically for rows 3..1001.
-      formulae: [`=INDIRECT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE("_"&${stageColLetter}2," ","_"),"-","_"),".","_"))`],
-      showErrorMessage: true,
-      errorStyle: 'warning',
-      errorTitle: 'Sub-stage doesn\'t match the stage',
-      error: 'Pick a sub-stage that belongs to the chosen stage. Some stages have no sub-stages — in that case leave this column blank.',
-    });
-  }
-
-  if (countries.length) applyDropdown(ws, 'country', addListToHiddenSheet(listsSheet, 'country', countries));
+  // ---- Allowed Values reference sheet (replaces in-cell dropdowns) ----
+  // We deliberately do NOT add Excel data-validation lists. They render
+  // unreliably in Google Sheets, LibreOffice, mobile Excel etc., and the
+  // server validates strictly on import anyway. A visible reference sheet
+  // is portable across every spreadsheet app.
+  buildAllowedValuesSheet(wb, { stages, subStagesByStageName, countries });
 
   // ---- Instructions sheet ----
   // Pure UX. The import parser reads only the first sheet ("Leads"), so
@@ -203,7 +172,8 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   heading('Bulk lead upload — how to fill this template', 16);
   blank();
   para('Fill rows on the "Leads" sheet only. Don\'t edit, reorder, or rename the header row.');
-  para('At least one of first_name / email / phone / whatsapp_number must be filled in every row.');
+  para('Required per row: at least one of email / first_name / last_name, at least one of whatsapp_number / phone, plus stage. Sub-stage is required only when the chosen stage has sub-stages configured.');
+  para('See the "Allowed Values" sheet for valid stage / sub_stage / country / gender / language entries.');
   para('Maximum 30,000 rows per upload.');
   blank();
 
@@ -227,15 +197,15 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
     r.eachCell((c) => { c.border = ROW_BORDER; });
   };
 
-  addRule('first_name',          'One of name/email/phone/whatsapp', 'Text',         'Free text. Trimmed on import.');
-  addRule('last_name',           'No',                               'Text',         'Free text.');
-  addRule('email',               'See first_name',                   'Email format', 'Lowercased and used for duplicate detection. Invalid formats fail the row.');
-  addRule('alternate_email',     'No',                               'Email format', 'Same format rules as email. Not used for duplicate detection.');
-  addRule('phone',               'See first_name',                   'Phone',        '10 digits, or with country code (+91...). Used for duplicate detection (exact match after normalization).');
-  addRule('whatsapp_number',     'See first_name',                   'Phone',        'Same format as phone. Used for duplicate detection.');
+  addRule('first_name',          'One of email/first_name/last_name', 'Text',         'Free text. Trimmed on import.');
+  addRule('last_name',           'One of email/first_name/last_name', 'Text',         'Free text.');
+  addRule('email',               'One of email/first_name/last_name', 'Email format', 'Lowercased and used for duplicate detection. Invalid formats fail the row.');
+  addRule('alternate_email',     'No',                                'Email format', 'Same format rules as email. Not used for duplicate detection.');
+  addRule('phone',               'One of whatsapp_number/phone',      'Phone',        '10 digits, or with country code (+91...). Used for duplicate detection (exact match after normalization).');
+  addRule('whatsapp_number',     'One of whatsapp_number/phone',      'Phone',        'Same format as phone. Used for duplicate detection.');
   addRule('alternate_contact',   'No',                               'Phone',        'Same format as phone.');
-  addRule('gender',              'No',                               'Dropdown',     'Pick from the dropdown — Male / Female / Other / Prefer not to say.');
-  addRule('language',            'No',                               'Dropdown',     'Two-letter code (en, hi, mr, ta, te, kn, ml, gu, bn, pa).');
+  addRule('gender',              'No',                               'Allowed value', 'Type one of Male / Female / Other / Prefer not to say. See "Allowed Values" sheet.');
+  addRule('language',            'No',                               'Allowed value', 'Two-letter code (en, hi, mr, ta, te, kn, ml, gu, bn, pa). See "Allowed Values" sheet.');
   addRule('ug_degree',           'No',                               'Text (auto-create)', 'Free text. New degrees are added automatically (level=UG).');
   addRule('ug_specialization',   'No',                               'Text (auto-create)', 'Free text. New specializations are added automatically.');
   addRule('ug_university',       'No',                               'Text (auto-create)', 'Free text. New universities are added automatically. Casing is preserved on first use.');
@@ -244,15 +214,15 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   addRule('pg_specialization',   'No',                               'Text (auto-create)', 'Free text.');
   addRule('pg_university',       'No',                               'Text (auto-create)', 'Free text.');
   addRule('pg_graduation_year',  'No',                               'Year (1950–2100)',   'Whole number, e.g. 2025.');
-  addRule('country',             'No',                               'Dropdown (strict)',  'Pick from the dropdown. Typed-in values that don\'t match a country in your settings will fail the row.');
+  addRule('country',             'No',                               'Allowed value (strict)',  'Type a country exactly as listed on the "Allowed Values" sheet. Unknown values fail the row.');
   addRule('state',               'No',                               'Text (auto-create)', 'Free text. Requires a valid country in the same row. New states are added automatically scoped to that country.');
   addRule('district',            'No',                               'Text',         'Free text.');
   addRule('city',                'No',                               'Text',         'Free text.');
   addRule('address',             'No',                               'Text',         'Free text. Long values are stored as-is.');
   addRule('pincode',             'No',                               'Number',       'Postal code. Stored as text on the lead.');
   addRule('program',             'No',                               'Text (auto-create)', 'Free text. New programs are added automatically.');
-  addRule('stage',               'No',                               'Dropdown (strict)',  'Pick from the dropdown. Required if you also fill sub_stage. Unknown values will fail the row.');
-  addRule('sub_stage',           'No',                               'Dropdown (strict)',  'Pick from the dropdown. Must belong under the chosen stage — mismatches fail the row.');
+  addRule('stage',               'Yes',                              'Allowed value (strict)',  'Type a stage name exactly as listed on the "Allowed Values" sheet. Unknown values fail the row.');
+  addRule('sub_stage',           'Conditional',                      'Allowed value (strict)',  'Required only when the chosen stage has sub-stages configured. If the stage has none, leave blank. If provided, must match a sub-stage under its parent stage on the "Allowed Values" sheet.');
   addRule('remarks',             'No',                               'Text',         'Free text.');
   addRule('father_name',         'No',                               'Text',         'Free text.');
   addRule('father_mobile',       'No',                               'Phone',        'Same format as phone.');
@@ -284,7 +254,10 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   heading('What you\'ll see if a row fails', 13);
   blank();
   para('Failed rows show on the Failed Leads page with one of these codes:');
-  para('  MISSING_CONTACT — none of first_name / email / phone / whatsapp filled.');
+  para('  MISSING_IDENTITY — none of email / first_name / last_name filled.');
+  para('  MISSING_CONTACT — none of whatsapp_number / phone filled.');
+  para('  MISSING_STAGE — stage column is empty.');
+  para('  MISSING_SUBSTAGE — sub_stage column is empty AND the chosen stage has sub-stages configured.');
   para('  INVALID_EMAIL / INVALID_ALTERNATE_EMAIL — email format is wrong.');
   para('  INVALID_PHONE / INVALID_WHATSAPP — phone digits or length wrong.');
   para('  INVALID_YEAR — graduation year outside 1950–2100.');

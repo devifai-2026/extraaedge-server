@@ -51,16 +51,55 @@ const stoppedTodayAlready = async (tenant, userId) => {
   return rows.length > 0;
 };
 
-// Live computed remaining time = elapsed - paused - any-current-pause-window
+// How long after the last heartbeat we still trust the session is alive.
+// Client heartbeats every 60s — 90s grace covers one missed beat + retry.
+// Beyond this we treat the session as effectively dead and stop accruing
+// active time, which prevents the "paused-overnight = 128h active" bug.
+const STALE_GRACE_MS = 90 * 1000;
+
+// Effective "now" for accounting purposes: clamped to ended_at (if stopped)
+// or last_heartbeat_at + grace (if the client has gone silent).
+const effectiveNow = (row) => {
+  const wall = Date.now();
+  if (row.ended_at) return new Date(row.ended_at).getTime();
+  if (row.last_heartbeat_at) {
+    const hbCap = new Date(row.last_heartbeat_at).getTime() + STALE_GRACE_MS;
+    return Math.min(wall, hbCap);
+  }
+  return wall;
+};
+
+// Live "active seconds" = elapsed - paused, with every component clamped so
+// a corrupt DB row (paused > elapsed, or wildly stale heartbeat) cannot
+// produce nonsense like 128h or negative time.
 const computeActiveSeconds = (row) => {
   if (!row) return 0;
   const start = new Date(row.started_at).getTime();
-  const now = Date.now();
-  let pausedMs = (row.paused_seconds || 0) * 1000;
+  const ref = effectiveNow(row);
+  const elapsedMs = Math.max(0, ref - start);
+  let pausedMs = Math.max(0, (row.paused_seconds || 0) * 1000);
   if (row.status === 'paused' && row.last_paused_at) {
-    pausedMs += now - new Date(row.last_paused_at).getTime();
+    const pauseStart = new Date(row.last_paused_at).getTime();
+    pausedMs += Math.max(0, ref - pauseStart);
   }
-  return Math.max(0, Math.floor((now - start - pausedMs) / 1000));
+  // Hard invariant: paused can never exceed elapsed.
+  pausedMs = Math.min(pausedMs, elapsedMs);
+  return Math.floor((elapsedMs - pausedMs) / 1000);
+};
+
+// Same clamping logic but returns the paused-seconds value to persist.
+const computePausedSeconds = (row) => {
+  if (!row) return 0;
+  const start = new Date(row.started_at).getTime();
+  const ref = effectiveNow(row);
+  const elapsedMs = Math.max(0, ref - start);
+  let pausedMs = Math.max(0, (row.paused_seconds || 0) * 1000);
+  if (row.status === 'paused' && row.last_paused_at) {
+    const pauseStart = new Date(row.last_paused_at).getTime();
+    pausedMs += Math.max(0, ref - pauseStart);
+  }
+  pausedMs = Math.min(pausedMs, elapsedMs);
+  return Math.floor(pausedMs / 1000);
 };
 
 router.post('/start', requireTimedRole, async (req, res, next) => {

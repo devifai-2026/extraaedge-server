@@ -144,6 +144,75 @@ router.get('/calendar', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Range analytics: status totals + per-lead breakdown for date_from..date_to.
+// Same scope rules as /follow-ups and /calendar.
+router.get('/analytics', async (req, res, next) => {
+  try {
+    const date_from = req.query.date_from;
+    const date_to   = req.query.date_to;
+    const conds = ['f.deleted_at IS NULL'];
+    const params = [];
+    if (date_from) { params.push(date_from); conds.push(`f.next_action_datetime >= $${params.length}::timestamptz`); }
+    if (date_to)   { params.push(date_to);   conds.push(`f.next_action_datetime <= $${params.length}::timestamptz`); }
+    if (req.query.assigned_user_id) { params.push(req.query.assigned_user_id); conds.push(`l.assigned_to = $${params.length}`); }
+    if (req.query.stage_id)         { params.push(req.query.stage_id);         conds.push(`l.stage_id = $${params.length}`); }
+    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+      params.push(req.user.id);
+      conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
+    } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+      const team = await teamHierarchy(req.tenant, req.user.id);
+      params.push(team);
+      params.push(req.user.id);
+      conds.push(`(l.assigned_to = ANY($${params.length - 1}::uuid[]) OR f.created_by = $${params.length})`);
+    }
+    const where = `WHERE ${conds.join(' AND ')}`;
+
+    const [totalsRes, byLeadRes] = await Promise.all([
+      tenantQuery(
+        req.tenant,
+        `SELECT count(*) FILTER (WHERE f.status = 'planned')::int   AS planned,
+                count(*) FILTER (WHERE f.status = 'done')::int      AS done,
+                count(*) FILTER (WHERE f.status = 'missed')::int    AS missed,
+                count(*) FILTER (WHERE f.status = 'cancelled')::int AS cancelled,
+                count(*)::int AS total
+           FROM lead_followups f
+           JOIN leads l ON l.id = f.lead_id
+           ${where}`,
+        params,
+      ),
+      tenantQuery(
+        req.tenant,
+        `SELECT l.id   AS lead_id,
+                l.name AS lead_name,
+                l.phone AS lead_phone,
+                au.name AS lead_assigned_to_name,
+                s.name  AS lead_stage_name,
+                count(*) FILTER (WHERE f.status = 'planned')::int   AS planned,
+                count(*) FILTER (WHERE f.status = 'done')::int      AS done,
+                count(*) FILTER (WHERE f.status = 'missed')::int    AS missed,
+                count(*) FILTER (WHERE f.status = 'cancelled')::int AS cancelled,
+                count(*)::int AS total
+           FROM lead_followups f
+           JOIN leads l            ON l.id  = f.lead_id
+           LEFT JOIN users         au ON au.id = l.assigned_to
+           LEFT JOIN lead_stages    s ON s.id  = l.stage_id
+           ${where}
+           GROUP BY l.id, l.name, l.phone, au.name, s.name
+           ORDER BY total DESC, l.name ASC
+           LIMIT 500`,
+        params,
+      ),
+    ]);
+    res.json({
+      data: {
+        totals: totalsRes.rows[0] || { planned: 0, done: 0, missed: 0, cancelled: 0, total: 0 },
+        by_lead: byLeadRes.rows,
+      },
+      meta: { requestId: req.id },
+    });
+  } catch (err) { next(err); }
+});
+
 router.get('/my', async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(

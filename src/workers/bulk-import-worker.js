@@ -54,20 +54,22 @@ const normalizePhone = (raw) => {
 const isBlank = (v) => v === undefined || v === null || String(v).trim() === '';
 
 const validateRow = (mapped) => {
-  // Mandatory fields, mirroring the manual Add Lead schema:
-  // name + whatsapp_number + program + remarks. Each missing field gets its
-  // own error code so /failedleads can show the user what to fix.
-  if (isBlank(mapped.name) && isBlank(mapped.first_name)) {
-    return { ok: false, error: { code: 'MISSING_NAME', message: 'Name is required' } };
+  // Row-level requirements:
+  //   • Identity: at least one of email / first_name / last_name
+  //   • Contact:  at least one of whatsapp_number / phone
+  //   • Stage:    required (sub_stage is enforced later by the resolver,
+  //               which knows whether the chosen stage has any sub-stages —
+  //               stages with none configured are allowed to leave it blank)
+  const hasIdentity = !isBlank(mapped.email) || !isBlank(mapped.first_name) || !isBlank(mapped.last_name) || !isBlank(mapped.name);
+  if (!hasIdentity) {
+    return { ok: false, error: { code: 'MISSING_IDENTITY', message: 'At least one of email, first_name, or last_name is required' } };
   }
-  if (isBlank(mapped.whatsapp_number)) {
-    return { ok: false, error: { code: 'MISSING_WHATSAPP', message: 'WhatsApp number is required' } };
+  const hasContact = !isBlank(mapped.whatsapp_number) || !isBlank(mapped.phone);
+  if (!hasContact) {
+    return { ok: false, error: { code: 'MISSING_CONTACT', message: 'At least one of whatsapp_number or phone is required' } };
   }
-  if (isBlank(mapped.program)) {
-    return { ok: false, error: { code: 'MISSING_PROGRAM', message: 'Program is required' } };
-  }
-  if (isBlank(mapped.remarks)) {
-    return { ok: false, error: { code: 'MISSING_REMARKS', message: 'Remarks are required' } };
+  if (isBlank(mapped.stage) && isBlank(mapped.stage_id)) {
+    return { ok: false, error: { code: 'MISSING_STAGE', message: 'Stage is required' } };
   }
 
   // Email format (only if present).
