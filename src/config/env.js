@@ -67,6 +67,7 @@ const schema = z.object({
   GCS_PROJECT_ID: stringNonEmpty,
   GCS_BUCKET: stringNonEmpty,
   GCS_KEY_FILE: z.string().optional().default(''),
+  GCS_CREDENTIALS_JSON: z.string().optional().default(''),
   GCS_PUBLIC_BASE_URL: z.string().optional().default(''),
   GCS_SIGNED_URL_TTL_SECONDS: intFrom(300),
 

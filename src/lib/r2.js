@@ -11,12 +11,21 @@
 import { Storage } from '@google-cloud/storage';
 import { env } from '../config/env.js';
 
-// When GCS_KEY_FILE is set, the SDK reads that JSON. When unset, the SDK
-// falls back to Application Default Credentials — useful for Cloud Run /
-// GKE / GCE where the workload's attached service account is preferred.
+// Credentials resolution order:
+//   1. GCS_CREDENTIALS_JSON — raw service-account JSON (used on Render/Heroku
+//      where a key file can't be mounted).
+//   2. GCS_KEY_FILE — path to a service-account JSON file (used locally).
+//   3. Application Default Credentials — used on Cloud Run / GKE / GCE.
+const gcsCredentials = env.GCS_CREDENTIALS_JSON
+  ? JSON.parse(env.GCS_CREDENTIALS_JSON)
+  : null;
 const storage = new Storage({
   projectId: env.GCS_PROJECT_ID,
-  ...(env.GCS_KEY_FILE ? { keyFilename: env.GCS_KEY_FILE } : {}),
+  ...(gcsCredentials
+    ? { credentials: gcsCredentials }
+    : env.GCS_KEY_FILE
+      ? { keyFilename: env.GCS_KEY_FILE }
+      : {}),
 });
 
 const bucket = () => storage.bucket(env.GCS_BUCKET);
