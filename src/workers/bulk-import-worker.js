@@ -100,10 +100,21 @@ const validateRow = (mapped) => {
     }
   }
 
+  // Derive `name` from first_name / last_name when the sheet doesn't have a
+  // standalone `name` column. Both present → "first last"; one present →
+  // that one; neither → null (the leads.name column allows null).
+  const trim = (v) => (isBlank(v) ? '' : String(v).trim());
+  const first = trim(mapped.first_name);
+  const last = trim(mapped.last_name);
+  const existing = trim(mapped.name);
+  const composed = existing || [first, last].filter(Boolean).join(' ');
+  const name = composed || null;
+
   return {
     ok: true,
     normalized: {
       ...mapped,
+      name,
       email: mapped.email ? String(mapped.email).trim().toLowerCase() : mapped.email,
       phone: phone || mapped.phone,
       whatsapp_number: wa || mapped.whatsapp_number,
