@@ -6,7 +6,39 @@ import { parseSpreadsheetBuffer } from '../lib/csv.js';
 import { findDuplicates, insertLead } from '../modules/leads/repo.js';
 import { autoAssignUnassigned } from '../modules/leads/service.js';
 import { resolveDropdowns, createCache } from '../modules/bulk-ingestion/resolver.js';
+import { resolveAssignee, createAssigneeCache, lookupUserByEmailStrict } from '../modules/bulk-ingestion/assignee-resolver.js';
+import { notifyUser } from '../lib/socket.js';
 import { logger } from '../lib/logger.js';
+
+// Throttled live-progress emitter: pushes `bulk_import.progress` to the
+// uploader's socket room at most every PROGRESS_THROTTLE_MS, with a
+// forced-emit threshold of PROGRESS_FORCE_EVERY rows so very fast jobs
+// still produce smooth updates and very long ones don't go silent.
+const PROGRESS_THROTTLE_MS = 250;
+const PROGRESS_FORCE_EVERY = 100;
+const makeProgressEmitter = (tenant, imp) => {
+  if (!imp?.user_id) return () => {};
+  let lastEmitAt = 0;
+  let lastEmitRow = 0;
+  return (state, { force = false } = {}) => {
+    const now = Date.now();
+    const sinceLast = state.processed - lastEmitRow;
+    if (!force && now - lastEmitAt < PROGRESS_THROTTLE_MS && sinceLast < PROGRESS_FORCE_EVERY) return;
+    lastEmitAt = now;
+    lastEmitRow = state.processed;
+    try {
+      notifyUser(tenant.id, imp.user_id, 'bulk_import.progress', {
+        import_id: imp.id,
+        total: state.total,
+        processed: state.processed,
+        success: state.success,
+        failed: state.failed,
+        duplicates: state.duplicates,
+        phase: state.phase,         // 'importing' | 'auto_assigning' | 'completed'
+      });
+    } catch { /* socket errors must not break the import */ }
+  };
+};
 
 const fetchByKey = async (key) => {
   const url = await getDownloadSignedUrl({ key, expiresIn: 60 });
@@ -140,10 +172,9 @@ const matchedFieldFor = (mapped, dup) => {
 
 // Strip the resolved row down to the columns insertLead/insertLead's
 // schema actually understands. Anything outside this list is silently
-// ignored — that means tags, assigned_to_email, etc. won't be stored
-// today, but it keeps the bulk path matching the Add Lead UI's payload
-// shape and avoids "column ... does not exist" errors when sheet
-// columns map to no real DB column.
+// ignored. `assigned_to_email` is consumed earlier by resolveAssignee
+// (which translates it to assigned_to + team_id), so it's expected not
+// to appear here. `tags` is still ignored today.
 const LEAD_COLS = new Set([
   'name', 'first_name', 'last_name', 'alternate_first_name',
   'email', 'alternate_email', 'phone', 'whatsapp_number', 'alternate_contact',
@@ -155,6 +186,7 @@ const LEAD_COLS = new Set([
   'assigned_to', 'team_id',
   'referred_by_lead_id', 'referral_code_used', 'referral_source',
   'first_touch_campaign_id', 'first_touch_channel', 'first_touch_source', 'first_touch_medium',
+  'primary_source_id',
 ]);
 const FAMILY_COLS = ['father_name', 'father_mobile', 'father_email',
   'mother_name', 'mother_mobile', 'mother_email',
@@ -249,7 +281,13 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
       // Shared resolver cache: each dropdown is read once per job, and any
       // value auto-created by an early row is reused by later rows.
       const cache = createCache();
+      // Per-job assignee cache: holds user lookups + per-pool RR cursors so
+      // rows in a single upload distribute fairly across each manager's team.
+      const assigneeCache = createAssigneeCache();
       let success = 0; let failed = 0; let duplicates = 0;
+      const emitProgress = makeProgressEmitter(tenant, imp);
+      // First tick so the UI flips from "queued" to "0 / N" immediately.
+      emitProgress({ total: rows.length, processed: 0, success: 0, failed: 0, duplicates: 0, phase: 'importing' }, { force: true });
       for (const [i, row] of rows.entries()) {
         const rowNum = i + 2; // header is row 1
         const mapped = applyMapping(row, mapping, defaults);
@@ -328,9 +366,119 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             await recordDuplicate(tenant, import_id, rowNum, row, primary, 'created_anyway');
           }
 
-          await insertLead(tenant, buildInsertPayload(resolved), imp.user_id);
+          // Owner-column resolution. Three inputs from the sheet:
+          //   - assigned_to_email          (admin / manager / counsellor RR — old path)
+          //   - current_lead_owner_email   (must resolve to a counsellor — new path)
+          //   - previous_lead_owner_email  (must resolve to any real user — history only)
+          //
+          // Validation:
+          //   * If both assigned_to_email and current_lead_owner_email are set and differ
+          //     (case-insensitive trim), the row fails OWNER_MISMATCH.
+          //   * current_lead_owner_email takes precedence over assigned_to_email when both
+          //     are present and equal.
+          //   * Unknown current_lead_owner_email or non-counsellor role fails the row.
+          //   * Unknown previous_lead_owner_email fails the row.
+          const curEmailRaw = resolved.current_lead_owner_email;
+          const prevEmailRaw = resolved.previous_lead_owner_email;
+          const asgEmailRaw = resolved.assigned_to_email;
+          const normEmail = (s) => (s ?? '').toString().trim().toLowerCase();
+          const curNorm = normEmail(curEmailRaw);
+          const asgNorm = normEmail(asgEmailRaw);
+          if (curNorm && asgNorm && curNorm !== asgNorm) {
+            failed += 1;
+            await tenantQuery(
+              tenant,
+              `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
+               VALUES ($1,$2,$3::jsonb,'OWNER_MISMATCH',$4)`,
+              [import_id, rowNum, JSON.stringify(row),
+               `current_lead_owner_email (${curEmailRaw}) and assigned_to_email (${asgEmailRaw}) refer to different users. Leave one blank or make them the same.`],
+            );
+            continue;
+          }
+
+          let previousOwnerId = null;
+          if (prevEmailRaw && String(prevEmailRaw).trim()) {
+            const prevUser = await lookupUserByEmailStrict(tenant, assigneeCache, prevEmailRaw);
+            if (!prevUser) {
+              failed += 1;
+              await tenantQuery(
+                tenant,
+                `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
+                 VALUES ($1,$2,$3::jsonb,'PREVIOUS_OWNER_NOT_FOUND',$4)`,
+                [import_id, rowNum, JSON.stringify(row),
+                 `previous_lead_owner_email "${prevEmailRaw}" did not match any active user in this tenant.`],
+              );
+              continue;
+            }
+            previousOwnerId = prevUser.id;
+          }
+
+          if (curNorm) {
+            // Strict path: must be a counsellor.
+            const curUser = await lookupUserByEmailStrict(tenant, assigneeCache, curEmailRaw);
+            if (!curUser) {
+              failed += 1;
+              await tenantQuery(
+                tenant,
+                `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
+                 VALUES ($1,$2,$3::jsonb,'CURRENT_OWNER_NOT_FOUND',$4)`,
+                [import_id, rowNum, JSON.stringify(row),
+                 `current_lead_owner_email "${curEmailRaw}" did not match any active user in this tenant.`],
+              );
+              continue;
+            }
+            if (curUser.role !== 'counsellor') {
+              failed += 1;
+              await tenantQuery(
+                tenant,
+                `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
+                 VALUES ($1,$2,$3::jsonb,'CURRENT_OWNER_NOT_COUNSELLOR',$4)`,
+                [import_id, rowNum, JSON.stringify(row),
+                 `current_lead_owner_email "${curEmailRaw}" resolves to a ${curUser.role}; only counsellors can be assigned as current owner.`],
+              );
+              continue;
+            }
+            resolved.assigned_to = curUser.id;
+            if (curUser.manager_id) resolved.team_id = curUser.manager_id;
+          } else if (asgNorm) {
+            // Legacy path: admin/manager/counsellor RR via resolveAssignee.
+            const assignee = await resolveAssignee(tenant, assigneeCache, asgEmailRaw);
+            if (assignee.assigned_to) resolved.assigned_to = assignee.assigned_to;
+            if (assignee.team_id) resolved.team_id = assignee.team_id;
+          }
+          delete resolved.assigned_to_email;
+          delete resolved.current_lead_owner_email;
+          delete resolved.previous_lead_owner_email;
+
+          const insertedLead = await insertLead(tenant, buildInsertPayload(resolved), imp.user_id);
           insertedAny = true;
           success += 1;
+
+          // Backfill prior-ownership history. insertLead already wrote an
+          // is_active=true row for the new owner; we add an older inactive
+          // lead_assignments row for the previous owner PLUS a matching
+          // lead_activities row so ViewTimelineModal renders the handover.
+          // Both are backdated 1 second so they sort before the current-owner
+          // row insertLead created.
+          if (previousOwnerId && insertedLead?.id) {
+            await tenantQuery(
+              tenant,
+              `INSERT INTO lead_assignments
+                  (lead_id, assigned_to, assignment_type, is_active, reason, created_at)
+               VALUES ($1, $2, 'reassign', false, 'bulk import: prior owner from sheet',
+                       now() - interval '1 second')`,
+              [insertedLead.id, previousOwnerId],
+            );
+            await tenantQuery(
+              tenant,
+              `INSERT INTO lead_activities
+                  (lead_id, user_id, type, summary, metadata_json, created_at)
+               VALUES ($1, NULL, 'reassign', 'Prior owner imported from bulk upload',
+                       jsonb_build_object('assigned_to', $2::text, 'source', 'bulk_import_previous_owner'),
+                       now() - interval '1 second')`,
+              [insertedLead.id, previousOwnerId],
+            );
+          }
         } catch (err) {
           failed += 1;
           await tenantQuery(
@@ -340,7 +488,26 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             [import_id, rowNum, JSON.stringify(row), err.message.slice(0, 500)],
           );
         }
+
+        // Live progress. Throttled inside makeProgressEmitter so a 30k-row
+        // upload doesn't fire 30k notifications — emits every 250ms or every
+        // 100 rows, whichever comes first.
+        emitProgress({
+          total: rows.length,
+          processed: i + 1,
+          success, failed, duplicates,
+          phase: 'importing',
+        });
       }
+      // Force a final "importing" tick so any rows since the last throttled
+      // emit are visible before we transition phase.
+      emitProgress({
+        total: rows.length,
+        processed: rows.length,
+        success, failed, duplicates,
+        phase: 'importing',
+      }, { force: true });
+
       await tenantQuery(
         tenant,
         `UPDATE bulk_imports SET status = 'completed', completed_at = now(), total_rows = $2, success_rows = $3, failed_rows = $4, duplicate_rows = $5 WHERE id = $1`,
@@ -352,6 +519,12 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
       // rather than per-row to avoid hammering the assignment rule on a 30k
       // upload. Idempotent: leads already assigned won't be touched.
       if (insertedAny) {
+        emitProgress({
+          total: rows.length,
+          processed: rows.length,
+          success, failed, duplicates,
+          phase: 'auto_assigning',
+        }, { force: true });
         try {
           const result = await autoAssignUnassigned(tenant);
           logger.info({ import_id, ...result }, 'bulk import auto-assign complete');
@@ -362,6 +535,13 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
           logger.error({ err: err.message, import_id }, 'bulk import auto-assign failed');
         }
       }
+
+      emitProgress({
+        total: rows.length,
+        processed: rows.length,
+        success, failed, duplicates,
+        phase: 'completed',
+      }, { force: true });
 
       // (4) Real-time push to super_admins when the upload was done by a
       // counsellor or sales_manager — admins want to see new bulk uploads

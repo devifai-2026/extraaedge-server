@@ -11,12 +11,20 @@ const emit = (tenant, type, payload) =>
   publish(QUEUE_NAMES.EVENTS, type, { type, tenantId: tenant.id, occurredAt: new Date().toISOString(), ...payload });
 
 const computeScope = async (tenant, actor) => {
-  // counsellor: own leads only. sales_manager: team (recursive manager_id). super_admin: no filter.
+  // counsellor:      own leads only.
+  // sales_manager:   team (recursive manager_id).
+  // super_admin:     no filter.
+  // account_manager: every converted lead in the tenant, regardless of
+  //                  owner. They handle post-conversion account work and
+  //                  need visibility across the whole converted pipeline.
   if (!actor || !actor.id) return { user_ids: [] };
   if (actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
   if (actor.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
     const ids = await usersRepo.teamHierarchy(tenant, actor.id);
     return { user_ids: ids };
+  }
+  if (actor.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) {
+    return { converted_only: true };
   }
   return { user_ids: [actor.id] };
 };
@@ -90,9 +98,13 @@ export const getLead = async (tenant, actor, id) => {
   const row = await repo.findByIdWithRelations(tenant, id);
   if (!row) throw notFound('Lead not found');
   const scope = await computeScope(tenant, actor);
-  if (scope && !scope.user_ids.includes(row.assigned_to) && row.assigned_to !== null) {
-    // counsellors/managers can only see their scope
-    if (actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) throw forbidden('Lead not in your scope');
+  if (scope) {
+    if (scope.converted_only && !row.converted_at) {
+      throw forbidden('Lead not in your scope');
+    }
+    if (scope.user_ids && !scope.user_ids.includes(row.assigned_to) && row.assigned_to !== null) {
+      if (actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) throw forbidden('Lead not in your scope');
+    }
   }
   return row;
 };
@@ -150,8 +162,13 @@ export const updateLead = async (tenant, actor, id, updates) => {
   const existing = await repo.findById(tenant, id);
   if (!existing) throw notFound('Lead not found');
   const scope = await computeScope(tenant, actor);
-  if (scope && !scope.user_ids.includes(existing.assigned_to) && actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
-    throw forbidden('Lead not in your scope');
+  if (scope && actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    if (scope.converted_only && !existing.converted_at) {
+      throw forbidden('Lead not in your scope');
+    }
+    if (scope.user_ids && !scope.user_ids.includes(existing.assigned_to)) {
+      throw forbidden('Lead not in your scope');
+    }
   }
   const lead = await repo.updateLead(tenant, id, updates);
   emit(tenant, EVENT_TYPES.LEAD_UPDATED, {

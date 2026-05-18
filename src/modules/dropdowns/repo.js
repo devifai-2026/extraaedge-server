@@ -26,6 +26,7 @@ const TABLE_MAP = {
   sources: { table: 'lead_sources_dict', bareCols: 'id, name, order_index, is_active' },
   campaigns: { table: 'lead_campaigns_dict', bareCols: 'id, name, order_index, is_active' },
   mediums: { table: 'lead_mediums', bareCols: 'id, name, order_index, is_active' },
+  'primary-sources': { table: 'lead_primary_sources', bareCols: 'id, name, order_index, is_active' },
   countries: { table: 'countries', bareCols: 'id, name, iso, is_active' },
   // Surface country name on every row so the FE table doesn't show bare UUIDs.
   states: {

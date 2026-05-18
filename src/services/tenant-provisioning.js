@@ -83,6 +83,13 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
         followups: 'full', whatsapp: 'full', bulk_upload: 'full',
         'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
       } },
+      // Post-conversion account ops. No team beneath them, reports to
+      // super_admin. Lead visibility is scoped server-side to converted
+      // leads only (see leads/service.js computeScope).
+      { name: 'account_manager', description: 'Handles converted leads (post-enrollment account work)', scope: 'account_manager', is_system: true, tab_permissions: {
+        dashboard: 'full', leads: 'full', followups: 'full', whatsapp: 'full',
+        'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
+      } },
     ];
     const roleIds = {};
     for (const r of roleBundles) {

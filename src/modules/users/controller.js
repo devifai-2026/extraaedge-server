@@ -14,7 +14,7 @@ export const get = async (req, res, next) => {
 
 export const create = async (req, res, next) => {
   try {
-    const row = await service.createUser(req.tenant, req.body);
+    const row = await service.createUser(req.tenant, req.body, req.user);
     res.status(201).json({ data: row, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

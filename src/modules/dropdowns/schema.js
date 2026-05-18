@@ -7,6 +7,7 @@ export const DROPDOWN_TYPES = [
   'sources',
   'campaigns',
   'mediums',
+  'primary-sources',
   'countries',
   'states',
   'genders',

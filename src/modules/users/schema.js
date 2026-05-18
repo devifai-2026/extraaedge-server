@@ -8,7 +8,10 @@ import { z } from 'zod';
 // custom_roles rows are used. For genuine custom roles, the `role` column
 // must hold the closest matching bucket so existing scope logic
 // (auto-assign-unassigned, lead listing, etc.) continues to work.
-const roleBucket = z.enum(['super_admin', 'sales_manager', 'counsellor']);
+// account_manager is a tenant-level role with no team / no manager (reports
+// directly to the tenant super_admin). Only super_admin can create users
+// in this role — enforced in the service layer.
+const roleBucket = z.enum(['super_admin', 'sales_manager', 'counsellor', 'account_manager']);
 
 export const createUserSchema = z.object({
   name: z.string().min(1),

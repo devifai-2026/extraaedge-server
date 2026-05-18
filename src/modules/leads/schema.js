@@ -123,10 +123,38 @@ export const listQuery = z.object({
   country_id: z.string().uuid().optional(),
   state_id: z.string().uuid().optional(),
   city: z.string().optional(),
+  district: z.string().optional(),
+  pincode: z.string().optional(),
   channel_id: z.string().uuid().optional(),
   source_id: z.string().uuid().optional(),
   campaign_id: z.string().uuid().optional(),
   medium_id: z.string().uuid().optional(),
+  primary_source_id: z.string().uuid().optional(),
+  // Personal + education filters (added so the leads list has a filter
+  // control for every visible column).
+  gender: z.string().optional(),
+  language: z.string().optional(),
+  ug_degree_id: z.string().uuid().optional(),
+  pg_degree_id: z.string().uuid().optional(),
+  ug_university_id: z.string().uuid().optional(),
+  pg_university_id: z.string().uuid().optional(),
+  ug_specialization_id: z.string().uuid().optional(),
+  pg_specialization_id: z.string().uuid().optional(),
+  ug_graduation_year: z.coerce.number().int().optional(),
+  pg_graduation_year: z.coerce.number().int().optional(),
+  lead_value: z.string().optional(),
+  is_cold: z.preprocess((v) => {
+    if (v === 'true' || v === true) return true;
+    if (v === 'false' || v === false) return false;
+    return undefined;
+  }, z.boolean().optional()),
+  is_converted: z.preprocess((v) => {
+    if (v === 'true' || v === true) return true;
+    if (v === 'false' || v === false) return false;
+    return undefined;
+  }, z.boolean().optional()),
+  created_by: z.string().uuid().optional(),
+  referral_code_used: z.string().optional(),
   email: z.string().optional(),
   phone: z.string().optional(),
   whatsapp_number: z.string().optional(),

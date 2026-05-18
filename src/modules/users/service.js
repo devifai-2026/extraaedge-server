@@ -26,7 +26,7 @@ export const getUser = async (tenant, id) => {
   return row;
 };
 
-export const createUser = async (tenant, input) => {
+export const createUser = async (tenant, input, actor) => {
   if (await repo.findByEmail(tenant, input.email)) throw conflict('Email already in use');
 
   // If a role_id was supplied, the canonical bucket is custom_roles.scope.
@@ -42,6 +42,21 @@ export const createUser = async (tenant, input) => {
     // Without this, allowed_tabs would be null and the user would have no UI access.
     const seedRole = await roleRepo.findByName(tenant, role);
     if (seedRole) role_id = seedRole.id;
+  }
+
+  // Only the tenant super_admin can create users in the account_manager
+  // role. Other elevated roles (sales_manager) can manage their team but
+  // not provision org-level account managers.
+  if (role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER
+      && actor?.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    throw forbidden('Only the tenant admin can create account-manager users');
+  }
+
+  // account_manager has no team / no reporting manager — these don't apply
+  // even if the caller accidentally sends them. Strip silently so the FE
+  // doesn't have to special-case the payload shape.
+  if (role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) {
+    input = { ...input, manager_id: null, manager_ids: [], team_id: null };
   }
 
   // super_admin role should default track_work_time=false
@@ -81,9 +96,23 @@ export const updateUser = async (tenant, id, updates, actor) => {
     const scope = await resolveRoleFromRoleId(tenant, updates.role_id);
     if (scope) updates = { ...updates, role: scope };
   }
-  if (updates.email && updates.email !== existing.email) {
+  if (updates.email && updates.email.toLowerCase() !== (existing.email ?? '').toLowerCase()) {
     const clash = await repo.findByEmail(tenant, updates.email);
-    if (clash) throw conflict('Email already in use');
+    if (clash && clash.id !== id) throw conflict('Email already in use');
+  }
+
+  // Same gate as createUser: changing a user's role TO account_manager
+  // requires super_admin. Existing account_managers can still be edited
+  // by other admins, just not promoted INTO the role.
+  if (updates.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER
+      && existing.role !== SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER
+      && actor?.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    throw forbidden('Only the tenant admin can promote a user to account_manager');
+  }
+  // account_manager has no team / no manager — null them if the caller
+  // didn't explicitly clear them.
+  if (updates.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) {
+    updates = { ...updates, manager_id: null, manager_ids: [], team_id: null };
   }
   // Don't let the last active super_admin deactivate themselves — would lock
   // everybody out. Same logic as the demote / delete guards above.

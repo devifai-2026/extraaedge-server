@@ -7,6 +7,11 @@ export const SYSTEM_TENANT_ROLES = Object.freeze({
   SUPER_ADMIN: 'super_admin',
   SALES_MANAGER: 'sales_manager',
   COUNSELLOR: 'counsellor',
+  // Tenant-level role for staff who handle CONVERTED leads (post-enrollment
+  // account management). No team beneath them, no reporting manager — they
+  // report directly to the tenant's super_admin. Scoped lead visibility:
+  // they only see leads where converted_at IS NOT NULL.
+  ACCOUNT_MANAGER: 'account_manager',
 });
 
 export const TENANT_STATUS = Object.freeze({

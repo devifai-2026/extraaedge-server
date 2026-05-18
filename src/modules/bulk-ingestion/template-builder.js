@@ -24,8 +24,9 @@ const HEADERS = [
   'father_name', 'father_mobile', 'father_email',
   'mother_name', 'mother_mobile', 'mother_email',
   'guardian_name', 'guardian_mobile', 'guardian_email',
-  'channel', 'source', 'campaign', 'medium',
-  'assigned_to_email', 'referral_code_used', 'tags',
+  'channel', 'source', 'primary_source', 'campaign', 'medium',
+  'assigned_to_email', 'current_lead_owner_email', 'previous_lead_owner_email',
+  'referral_code_used', 'tags',
 ];
 
 const EXAMPLE_ROWS = [
@@ -38,8 +39,9 @@ const EXAMPLE_ROWS = [
     'Ramesh Sharma', '+919822222222', 'ramesh@example.com',
     'Sunita Sharma', '+919833333333', '',
     '', '', '',
-    'Online', 'Website', 'Web Add Lead', 'Free',
-    '', '', 'priority'],
+    'Online', 'Website', 'Google Ads', 'Web Add Lead', 'Free',
+    '', '', '',
+    '', 'priority'],
 ];
 
 const FIXED_GENDER = ['Male', 'Female', 'Other', 'Prefer not to say'];

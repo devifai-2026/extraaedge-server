@@ -53,9 +53,14 @@ export const findById = async (tenant, id) => {
 };
 
 export const findByEmail = async (tenant, email) => {
+  // Case-insensitive: the DB has a partial unique index on lower(email)
+  // where deleted_at IS NULL, so the app-level dedup check must match the
+  // same casing rule. Otherwise the FE could submit "Foo@x.com" past the
+  // app check and then trip the unique index at INSERT time.
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT ${COLS} FROM users u LEFT JOIN custom_roles r ON r.id = u.role_id WHERE u.email = $1 AND u.deleted_at IS NULL`,
+    `SELECT ${COLS} FROM users u LEFT JOIN custom_roles r ON r.id = u.role_id
+      WHERE lower(u.email) = lower($1) AND u.deleted_at IS NULL`,
     [email],
   );
   return rows[0] ?? null;

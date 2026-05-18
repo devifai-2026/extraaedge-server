@@ -5,8 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { publish } from '../../lib/queue.js';
-import { SYSTEM_TENANT_ROLES, QUEUE_NAMES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
 import { forbidden } from '../../lib/errors.js';
 
@@ -76,16 +75,11 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:id/retry', validate({ params: idParam }), async (req, res, next) => {
-  try {
-    await assertCanActOn(req, '(SELECT import_id FROM bulk_import_failures WHERE id = $1)', req.params.id);
-    const { rows } = await tenantQuery(req.tenant, `SELECT * FROM bulk_import_failures WHERE id = $1 AND retried_at IS NULL`, [req.params.id]);
-    if (!rows[0]) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Failure row not found or already retried' } });
-    await publish(QUEUE_NAMES.BULK_IMPORT, 'retry_row', { tenantId: req.tenant.id, failure_id: req.params.id });
-    await tenantQuery(req.tenant, `UPDATE bulk_import_failures SET retried_at = now() WHERE id = $1`, [req.params.id]);
-    res.status(202).end();
-  } catch (err) { next(err); }
-});
+// Retry route was removed — retrying individual rows had unclear semantics
+// (validation-only retries skipped the resolver entirely) and the workflow
+// is now: bulk-delete bad rows, fix the spreadsheet, re-upload. The
+// scheduler's retry_row job consumer is still wired but never receives
+// jobs from this route; it can be removed in a follow-up.
 
 const editSchema = z.object({ raw_row_json: z.record(z.string(), z.any()) });
 router.put('/:id', validate({ params: idParam, body: editSchema }), async (req, res, next) => {
@@ -105,6 +99,30 @@ router.delete('/:id', validate({ params: idParam }), async (req, res, next) => {
     await assertCanActOn(req, '(SELECT import_id FROM bulk_import_failures WHERE id = $1)', req.params.id);
     await tenantQuery(req.tenant, `DELETE FROM bulk_import_failures WHERE id = $1`, [req.params.id]);
     res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// Bulk-delete validation failures. Scoping rule: a counsellor / manager
+// can only delete rows from their own (or their team's) imports, same as
+// the single-row delete. Rows owned by someone outside scope are silently
+// skipped — the response reports how many were actually deleted so the UI
+// can show a clear "deleted X of Y" toast.
+const bulkDeleteSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(500) });
+router.post('/bulk-delete', validate({ body: bulkDeleteSchema }), async (req, res, next) => {
+  try {
+    const allowed = await scopeFor(req);
+    const params = [req.body.ids];
+    let where = `f.id = ANY($1::uuid[])`;
+    if (allowed !== null) { params.push(allowed); where += ` AND i.user_id = ANY($${params.length}::uuid[])`; }
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `DELETE FROM bulk_import_failures f
+        USING bulk_imports i
+        WHERE f.import_id = i.id AND ${where}
+        RETURNING f.id`,
+      params,
+    );
+    res.json({ data: { deleted: rows.length, requested: req.body.ids.length }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
@@ -143,6 +161,26 @@ router.delete('/duplicates/:id', validate({ params: idParam }), async (req, res,
     await assertCanActOn(req, '(SELECT import_id FROM bulk_import_duplicates WHERE id = $1)', req.params.id);
     await tenantQuery(req.tenant, `DELETE FROM bulk_import_duplicates WHERE id = $1`, [req.params.id]);
     res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// Bulk-delete duplicates — same scoping + response shape as the failures
+// bulk-delete above.
+router.post('/duplicates/bulk-delete', validate({ body: bulkDeleteSchema }), async (req, res, next) => {
+  try {
+    const allowed = await scopeFor(req);
+    const params = [req.body.ids];
+    let where = `d.id = ANY($1::uuid[])`;
+    if (allowed !== null) { params.push(allowed); where += ` AND i.user_id = ANY($${params.length}::uuid[])`; }
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `DELETE FROM bulk_import_duplicates d
+        USING bulk_imports i
+        WHERE d.import_id = i.id AND ${where}
+        RETURNING d.id`,
+      params,
+    );
+    res.json({ data: { deleted: rows.length, requested: req.body.ids.length }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

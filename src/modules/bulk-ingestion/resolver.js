@@ -38,6 +38,7 @@ export const createCache = () => ({
     source: new Map(),
     campaign: new Map(),
     medium: new Map(),
+    primary_source: new Map(),
   },
 });
 
@@ -107,6 +108,10 @@ const loadCampaigns = (tenant, cache) =>
 const loadMediums = (tenant, cache) =>
   ensureLoaded(tenant, cache, 'medium', `SELECT id, name FROM lead_mediums WHERE deleted_at IS NULL`,
     (r) => cache.data.medium.set(norm(r.name), r.id));
+
+const loadPrimarySources = (tenant, cache) =>
+  ensureLoaded(tenant, cache, 'primary_source', `SELECT id, name FROM lead_primary_sources WHERE deleted_at IS NULL`,
+    (r) => cache.data.primary_source.set(norm(r.name), r.id));
 
 // ----- Auto-create helpers. ON CONFLICT covers concurrent-job races. -----
 const autoCreateSingle = async (tenant, table, name) => {
@@ -300,6 +305,22 @@ export const resolveDropdowns = async (tenant, row, cache) => {
   if (Object.keys(sourceAttribution).length) {
     out.sources = [{ ...sourceAttribution, is_primary: true }];
   }
+
+  // ---- PRIMARY SOURCE (auto-create) ----
+  // Separate dictionary from `source`. Lives directly on leads.primary_source_id
+  // (no attribution row). Case-insensitive match; same string reuses the same
+  // dictionary row across rows in a single job.
+  if (!isEmpty(out.primary_source)) {
+    await loadPrimarySources(tenant, cache);
+    const k = norm(out.primary_source);
+    let id = cache.data.primary_source.get(k);
+    if (!id) {
+      id = await autoCreateSingle(tenant, 'lead_primary_sources', String(out.primary_source).trim());
+      cache.data.primary_source.set(k, id);
+    }
+    out.primary_source_id = id;
+  }
+  delete out.primary_source;
 
   return { ok: true, resolved: out };
 };

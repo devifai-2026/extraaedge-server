@@ -14,6 +14,7 @@ export const LEAD_COLUMNS = `
   last_touch_campaign_id, last_touch_channel, last_touch_source, last_touch_medium, last_touch_at,
   mobile_verified_at, email_verified_at, is_cold,
   converted_at, merged_into_id,
+  primary_source_id,
   created_at, updated_at, last_activity_at
 `;
 
@@ -163,7 +164,7 @@ export const findById = async (tenant, id) => {
 export const findByIdWithRelations = async (tenant, id) => {
   const base = await findById(tenant, id);
   if (!base) return null;
-  const [family, sources, tagsRes, customValuesRes] = await Promise.all([
+  const [family, sources, tagsRes, customValuesRes, assignmentsRes, primarySourceRes] = await Promise.all([
     tenantQuery(tenant, `SELECT * FROM lead_family WHERE lead_id = $1`, [id]),
     tenantQuery(tenant, `
       SELECT lsa.*,
@@ -186,15 +187,41 @@ export const findByIdWithRelations = async (tenant, id) => {
         JOIN custom_field_definitions d ON d.id = v.field_id
        WHERE v.lead_id = $1 AND d.deleted_at IS NULL
     `, [id]),
+    // Ownership history. Includes the current active row at the top.
+    // LeadCard / timeline use this to render previous → current chain.
+    tenantQuery(tenant, `
+      SELECT la.id, la.assigned_to, la.from_user_id, la.assigned_by,
+             la.assignment_type, la.is_active, la.reason, la.created_at,
+             u_to.name   AS assigned_to_name,
+             u_to.email  AS assigned_to_email,
+             u_from.name AS from_user_name,
+             u_by.name   AS assigned_by_name
+        FROM lead_assignments la
+        LEFT JOIN users u_to   ON u_to.id   = la.assigned_to
+        LEFT JOIN users u_from ON u_from.id = la.from_user_id
+        LEFT JOIN users u_by   ON u_by.id   = la.assigned_by
+       WHERE la.lead_id = $1
+       ORDER BY la.is_active DESC, la.created_at DESC
+    `, [id]),
+    tenantQuery(tenant, `SELECT id, name FROM lead_primary_sources WHERE id = $1`, [base.primary_source_id]),
   ]);
   const custom_values = {};
   for (const r of customValuesRes.rows) custom_values[r.key] = r.value;
+  const assignments = assignmentsRes.rows;
+  // Surface the two most recent owners for FE convenience. The active row is
+  // current_owner; the most recent inactive row is previous_owner.
+  const current_owner = assignments.find((a) => a.is_active) ?? null;
+  const previous_owner = assignments.find((a) => !a.is_active) ?? null;
   return {
     ...base,
     family: family.rows[0] ?? null,
     sources: sources.rows,
     tags: tagsRes.rows,
     custom_values,
+    primary_source: primarySourceRes.rows[0] ?? null,
+    assignments,
+    current_owner,
+    previous_owner,
   };
 };
 
@@ -355,8 +382,13 @@ const sortClause = (sort) => {
 export const list = async (tenant, opts, scope) => {
   const {
     q, stage_id, sub_stage_id, program_id, assigned_to, team_id, tag_id,
-    country_id, state_id, city,
-    channel_id, source_id, campaign_id, medium_id,
+    country_id, state_id, city, district, pincode,
+    channel_id, source_id, campaign_id, medium_id, primary_source_id,
+    gender, language,
+    ug_degree_id, pg_degree_id, ug_university_id, pg_university_id,
+    ug_specialization_id, pg_specialization_id,
+    ug_graduation_year, pg_graduation_year,
+    lead_value, is_cold, is_converted, created_by, referral_code_used,
     email, phone, whatsapp_number,
     is_touched,
     lead_age_from, lead_age_to,
@@ -374,6 +406,26 @@ export const list = async (tenant, opts, scope) => {
   if (country_id) { params.push(country_id); conds.push(`l.country_id = $${params.length}`); }
   if (state_id) { params.push(state_id); conds.push(`l.state_id = $${params.length}`); }
   if (city) { params.push(`%${city}%`); conds.push(`l.city ILIKE $${params.length}`); }
+  if (district) { params.push(`%${district}%`); conds.push(`l.district ILIKE $${params.length}`); }
+  if (pincode) { params.push(`%${pincode}%`); conds.push(`l.pincode ILIKE $${params.length}`); }
+  if (primary_source_id) { params.push(primary_source_id); conds.push(`l.primary_source_id = $${params.length}`); }
+  if (gender) { params.push(gender); conds.push(`l.gender = $${params.length}`); }
+  if (language) { params.push(language); conds.push(`l.language = $${params.length}`); }
+  if (ug_degree_id) { params.push(ug_degree_id); conds.push(`l.ug_degree_id = $${params.length}`); }
+  if (pg_degree_id) { params.push(pg_degree_id); conds.push(`l.pg_degree_id = $${params.length}`); }
+  if (ug_university_id) { params.push(ug_university_id); conds.push(`l.ug_university_id = $${params.length}`); }
+  if (pg_university_id) { params.push(pg_university_id); conds.push(`l.pg_university_id = $${params.length}`); }
+  if (ug_specialization_id) { params.push(ug_specialization_id); conds.push(`l.ug_specialization_id = $${params.length}`); }
+  if (pg_specialization_id) { params.push(pg_specialization_id); conds.push(`l.pg_specialization_id = $${params.length}`); }
+  if (ug_graduation_year != null) { params.push(ug_graduation_year); conds.push(`l.ug_graduation_year = $${params.length}`); }
+  if (pg_graduation_year != null) { params.push(pg_graduation_year); conds.push(`l.pg_graduation_year = $${params.length}`); }
+  if (lead_value) { params.push(lead_value); conds.push(`l.lead_value = $${params.length}`); }
+  if (is_cold === true) { conds.push(`l.is_cold = true`); }
+  if (is_cold === false) { conds.push(`l.is_cold = false`); }
+  if (is_converted === true) { conds.push(`l.converted_at IS NOT NULL`); }
+  if (is_converted === false) { conds.push(`l.converted_at IS NULL`); }
+  if (created_by) { params.push(created_by); conds.push(`l.created_by = $${params.length}`); }
+  if (referral_code_used) { params.push(`%${referral_code_used}%`); conds.push(`l.referral_code_used ILIKE $${params.length}`); }
   if (email) { params.push(`%${email}%`); conds.push(`l.email::text ILIKE $${params.length}`); }
   if (phone) { params.push(`%${phone}%`); conds.push(`l.phone ILIKE $${params.length}`); }
   if (whatsapp_number) { params.push(`%${whatsapp_number}%`); conds.push(`l.whatsapp_number ILIKE $${params.length}`); }
@@ -429,6 +481,11 @@ export const list = async (tenant, opts, scope) => {
     params.push(scope.user_ids);
     conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
   }
+  // account_manager scope: see every converted lead across the tenant,
+  // ignore owner. Set by computeScope() in leads/service.js.
+  if (scope && scope.converted_only) {
+    conds.push(`l.converted_at IS NOT NULL`);
+  }
   let tagJoin = '';
   if (tag_id) {
     params.push(tag_id);
@@ -444,11 +501,13 @@ export const list = async (tenant, opts, scope) => {
       `SELECT l.id, l.name, l.email, l.phone, l.whatsapp_number, l.stage_id, l.sub_stage_id,
               l.program_id, l.assigned_to, l.team_id, l.lead_score, l.engagement_score,
               l.is_cold, l.created_at, l.updated_at, l.last_activity_at,
+              l.primary_source_id,
               s.name  AS stage_name,
               ss.name AS sub_stage_name,
               p.name  AS program_name,
               c.name  AS country_name,
               st.name AS state_name,
+              ps.name AS primary_source_name,
               l.district, l.city,
               u.name   AS assigned_to_name,
               u.role   AS assigned_to_role,
@@ -480,11 +539,12 @@ export const list = async (tenant, opts, scope) => {
               COALESCE((SELECT count(*)::int FROM message_reply mr
                           WHERE mr.lead_id = l.id AND mr.is_read = false), 0) AS unread_messages_count
          FROM leads l ${tagJoin}
-         LEFT JOIN lead_stages     s   ON s.id  = l.stage_id
-         LEFT JOIN lead_sub_stages ss  ON ss.id = l.sub_stage_id
-         LEFT JOIN programs        p   ON p.id  = l.program_id
-         LEFT JOIN countries       c   ON c.id  = l.country_id
-         LEFT JOIN states          st  ON st.id = l.state_id
+         LEFT JOIN lead_stages         s   ON s.id  = l.stage_id
+         LEFT JOIN lead_sub_stages     ss  ON ss.id = l.sub_stage_id
+         LEFT JOIN programs            p   ON p.id  = l.program_id
+         LEFT JOIN countries           c   ON c.id  = l.country_id
+         LEFT JOIN states              st  ON st.id = l.state_id
+         LEFT JOIN lead_primary_sources ps ON ps.id = l.primary_source_id
          LEFT JOIN users           u    ON u.id    = l.assigned_to
          LEFT JOIN users           mgr  ON mgr.id  = l.manager_id
          LEFT JOIN users           gmgr ON gmgr.id = mgr.manager_id
@@ -513,6 +573,10 @@ export const stageCounts = async (tenant, scope) => {
     params.push(scope.user_ids);
     conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
   }
+  // account_manager: limit to converted leads.
+  if (scope && scope.converted_only) {
+    conds.push(`l.converted_at IS NOT NULL`);
+  }
   const where = `WHERE ${conds.join(' AND ')}`;
   const { rows } = await tenantQuery(
     tenant,
@@ -521,6 +585,7 @@ export const stageCounts = async (tenant, scope) => {
        FROM lead_stages s
        LEFT JOIN leads l ON l.stage_id = s.id AND l.deleted_at IS NULL
             ${scope && scope.user_ids ? `AND l.assigned_to = ANY($1::uuid[])` : ''}
+            ${scope && scope.converted_only ? `AND l.converted_at IS NOT NULL` : ''}
       WHERE s.is_active = true
       GROUP BY s.id, s.name, s.order_index
       ORDER BY COALESCE(s.order_index, 0), s.name`,
@@ -573,6 +638,7 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
     if (filter?.team_id) { params.push(filter.team_id); conds.push(`team_id = $${params.length}`); }
     if (filter?.q) { params.push(`%${filter.q}%`); conds.push(`(name ILIKE $${params.length} OR email::text ILIKE $${params.length} OR phone ILIKE $${params.length})`); }
     if (scope && scope.user_ids) { params.push(scope.user_ids); conds.push(`assigned_to = ANY($${params.length}::uuid[])`); }
+    if (scope && scope.converted_only) { conds.push(`converted_at IS NOT NULL`); }
     const r = await client.query(`SELECT id FROM leads WHERE ${conds.join(' AND ')}`, params);
     ids = r.rows.map((x) => x.id);
   }
