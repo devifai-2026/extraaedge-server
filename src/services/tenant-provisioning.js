@@ -101,47 +101,12 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       roleIds[r.name] = rows[0].id;
     }
 
-    // Default lead stages
-    const stages = [
-      { name: 'New', code: '01-New', order_index: 1, color: '#1976D2', is_terminal: false },
-      { name: 'Contacted', code: '02-Contacted', order_index: 2, color: '#7B1FA2', is_terminal: false },
-      { name: 'Followup', code: '03-Followup', order_index: 3, color: '#F57C00', is_terminal: false },
-      { name: 'Qualified', code: '05-Qualified', order_index: 4, color: '#388E3C', is_terminal: false },
-      { name: 'Requirement Match', code: '07-Requirement-Match', order_index: 5, color: '#00838F', is_terminal: false },
-      { name: 'Interested', code: '08-Interested', order_index: 6, color: '#2E7D32', is_terminal: false },
-      { name: 'Visited', code: '09-Visited', order_index: 7, color: '#1565C0', is_terminal: false },
-      { name: 'Enrolled', code: '10-Enrolled', order_index: 8, color: '#2E7D32', is_terminal: true },
-      { name: 'Junk', code: '11-Junk', order_index: 9, color: '#757575', is_terminal: true },
-      { name: 'Cold', code: '12-Cold', order_index: 10, color: '#546E7A', is_terminal: true },
-    ];
-    for (const s of stages) {
-      await client.query(
-        `INSERT INTO lead_stages (name, code, order_index, color, is_terminal) VALUES ($1,$2,$3,$4,$5)`,
-        [s.name, s.code, s.order_index, s.color, s.is_terminal],
-      );
-    }
-
-    // Default sub-stages (one "Default" sub-stage per stage — tenants extend later)
-    const subStages = ['Not Called', 'Awaiting confirmation', 'Will join soon', 'Negotiation phase', 'Needs demo', 'Not Eligible', 'Not Interested', 'Asked to call back'];
-    for (const ss of subStages) {
-      await client.query(
-        `INSERT INTO lead_sub_stages (stage_id, name, is_default)
-         SELECT id, $1, false FROM lead_stages WHERE code = '01-New'`,
-        [ss],
-      );
-    }
-
-    // Dropdown dictionaries
-    const channels = ['Offline', 'Online', 'Direct', 'Facebook', 'Google Ads', 'LinkedIn', 'Email Campaign'];
-    for (const c of channels) await client.query(`INSERT INTO lead_channels (name) VALUES ($1)`, [c]);
-    const sources = ['Direct Walk-in', 'Website', 'Social Media', 'Professional Network', 'Newsletter', 'Referral'];
-    for (const s of sources) await client.query(`INSERT INTO lead_sources_dict (name) VALUES ($1)`, [s]);
-    const campaignNames = ['Web Add Lead', 'ORGANIC', 'PAID'];
-    for (const c of campaignNames) await client.query(`INSERT INTO lead_campaigns_dict (name) VALUES ($1)`, [c]);
-    const mediums = ['Free', 'CPC', 'Referral', 'Email'];
-    for (const m of mediums) await client.query(`INSERT INTO lead_mediums (name) VALUES ($1)`, [m]);
-    const genders = ['Male', 'Female', 'Other'];
-    for (const g of genders) await client.query(`INSERT INTO genders (name) VALUES ($1)`, [g]);
+    // Stages, sub-stages, channels, sources, campaigns, mediums, primary
+    // sources, genders, degrees, specializations, universities and India
+    // (country) are all seeded by migration 1700000030000_seed_extraaedge_defaults.cjs,
+    // which has already run as part of applyMigrations above. The migration is
+    // idempotent (ON CONFLICT DO NOTHING) so we don't duplicate them here.
+    // Programs are intentionally NOT seeded — tenants curate their own catalog.
 
     // Business hours
     for (const bh of DEFAULT_BUSINESS_HOURS) {

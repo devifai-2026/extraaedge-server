@@ -21,6 +21,18 @@ const HEADERS = [
   'pg_degree', 'pg_specialization', 'pg_university', 'pg_graduation_year',
   'country', 'state', 'district', 'city', 'address', 'pincode',
   'program', 'stage', 'sub_stage', 'remarks',
+  // Upcoming follow-up (single, planned)
+  'followup_scheduled_on', 'followup_comments',
+  // Past follow-up attempts — most recent first. Stored as completed rows
+  // in lead_followups (status='done'). Format DD-MM-YYYY HH:mm:ss.
+  'next_action_date_1', 'comment_1',
+  'next_action_date_2', 'comment_2',
+  'next_action_date_3', 'comment_3',
+  'next_action_date_4', 'comment_4',
+  'next_action_date_5', 'comment_5',
+  // Optional audit timestamps. If blank, server uses now().
+  // Format DD-MM-YYYY HH:mm:ss.
+  'lead_created_on', 'lead_updated_on',
   'father_name', 'father_mobile', 'father_email',
   'mother_name', 'mother_mobile', 'mother_email',
   'guardian_name', 'guardian_mobile', 'guardian_email',
@@ -32,14 +44,24 @@ const HEADERS = [
 const EXAMPLE_ROWS = [
   ['Rahul', 'Sharma', 'rahul@example.com', '', '+919811111111', '+919811111111', '',
     'Male', 'en',
-    'B.Tech', 'Computer Science', 'IIT Delhi', 2023,
+    'B.Tech', 'Computer Science', 'Savitribai Phule Pune University', 2023,
     '', '', '', '',
-    'India', 'Delhi', 'New Delhi', 'New Delhi', '12 Rajiv Chowk', 110001,
-    '', '', '', 'Prefers evening callback',
+    'India', 'Maharashtra', 'Pune', 'Pune', '12 FC Road', 411005,
+    'Data Analyst Training and Certification', '02-Ringing / Not Reachable', 'Ringing no response', 'Prefers evening callback',
+    // followup_scheduled_on, followup_comments
+    '20-05-2026 18:00:00', 'Follow up tomorrow evening',
+    // next_action_date_1..5 + comment_1..5  (most recent past attempts first)
+    '17-04-2026 21:40:00', 'voicemail',
+    '14-04-2026 14:55:00', 'not received',
+    '', '',
+    '', '',
+    '', '',
+    // lead_created_on, lead_updated_on
+    '14-04-2026 13:07:56', '14-04-2026 13:08:29',
     'Ramesh Sharma', '+919822222222', 'ramesh@example.com',
     'Sunita Sharma', '+919833333333', '',
     '', '', '',
-    'Online', 'Website', 'Google Ads', 'Web Add Lead', 'Free',
+    'Offline', 'Raw Database', 'Raw Database', 'Web Quick Add Lead', 'Offline',
     '', '', '',
     '', 'priority'],
 ];
@@ -226,6 +248,20 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   addRule('stage',               'Yes',                              'Allowed value (strict)',  'Type a stage name exactly as listed on the "Allowed Values" sheet. Unknown values fail the row.');
   addRule('sub_stage',           'Conditional',                      'Allowed value (strict)',  'Required only when the chosen stage has sub-stages configured. If the stage has none, leave blank. If provided, must match a sub-stage under its parent stage on the "Allowed Values" sheet.');
   addRule('remarks',             'No',                               'Text',         'Free text.');
+  addRule('followup_scheduled_on','No',                              'Date (DD-MM-YYYY HH:mm:ss)', 'Upcoming follow-up. Creates a planned row in lead_followups. Example: 20-05-2026 18:00:00.');
+  addRule('followup_comments',   'No',                               'Text',         'Comment for the upcoming follow-up. Stored on the same lead_followups row.');
+  addRule('next_action_date_1',  'No',                               'Date (DD-MM-YYYY HH:mm:ss)', 'Past follow-up attempt #1 (most recent). Creates a "done" lead_followups row.');
+  addRule('comment_1',           'No',                               'Text',         'Comment for past follow-up attempt #1.');
+  addRule('next_action_date_2',  'No',                               'Date (DD-MM-YYYY HH:mm:ss)', 'Past follow-up attempt #2. Same shape as #1.');
+  addRule('comment_2',           'No',                               'Text',         'Comment for past follow-up attempt #2.');
+  addRule('next_action_date_3',  'No',                               'Date (DD-MM-YYYY HH:mm:ss)', 'Past follow-up attempt #3.');
+  addRule('comment_3',           'No',                               'Text',         'Comment for past follow-up attempt #3.');
+  addRule('next_action_date_4',  'No',                               'Date (DD-MM-YYYY HH:mm:ss)', 'Past follow-up attempt #4.');
+  addRule('comment_4',           'No',                               'Text',         'Comment for past follow-up attempt #4.');
+  addRule('next_action_date_5',  'No',                               'Date (DD-MM-YYYY HH:mm:ss)', 'Past follow-up attempt #5 (oldest).');
+  addRule('comment_5',           'No',                               'Text',         'Comment for past follow-up attempt #5.');
+  addRule('lead_created_on',     'No',                               'Date (DD-MM-YYYY HH:mm:ss)', 'Optional. If provided, used as the lead.created_at value. Blank → server uses now().');
+  addRule('lead_updated_on',     'No',                               'Date (DD-MM-YYYY HH:mm:ss)', 'Optional. If provided, used as the lead.updated_at value.');
   addRule('father_name',         'No',                               'Text',         'Free text.');
   addRule('father_mobile',       'No',                               'Phone',        'Same format as phone.');
   addRule('father_email',        'No',                               'Email format', '');

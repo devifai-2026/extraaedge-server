@@ -87,6 +87,21 @@ const leadBaseSchema = z.object({
     medium_id: optionalUuid,
     is_primary: z.boolean().optional(),
   })).optional(),
+
+  // Optional audit timestamps. Used during data migration (CSV import or
+  // manual backfill) to preserve the original create/update time from the
+  // source system. Blank/missing → Postgres defaults apply (now()).
+  created_at: z.preprocess(blankToUndef, z.coerce.date().optional()),
+  updated_at: z.preprocess(blankToUndef, z.coerce.date().optional()),
+
+  // Follow-up rows to insert alongside the lead. The 5-slot CSV-parity
+  // history maps to up to 5 entries with status='done'; the active upcoming
+  // follow-up maps to one entry with status='planned'.
+  followups: z.array(z.object({
+    next_action_datetime: z.coerce.date(),
+    comment: z.string().optional().nullable(),
+    status: z.enum(['planned', 'done', 'missed', 'cancelled']).optional(),
+  })).optional(),
 });
 
 // Lead creation requires four fields. The base schema marks them all

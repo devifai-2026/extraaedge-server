@@ -36,13 +36,21 @@ export const findDuplicates = async (tenant, { phone, email, whatsapp_number }, 
 };
 
 export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, async (client) => {
-  // Main lead row
+  // Main lead row.
+  //
+  // `followups` is a virtual array passed by callers (manual create form +
+  // bulk import) that needs separate inserts into lead_followups — handled
+  // at the end of this function. We strip it out of the main column loop.
+  //
+  // `created_at` / `updated_at` are honored when callers pass them
+  // (e.g. CSV migration from another CRM). Blank / missing → Postgres
+  // defaults to now() via the column DEFAULT.
   const cols = [];
   const vals = [];
   const placeholders = [];
   let i = 1;
   for (const [k, v] of Object.entries(input)) {
-    if (['family', 'custom_values', 'sources'].includes(k)) continue;
+    if (['family', 'custom_values', 'sources', 'followups'].includes(k)) continue;
     if (v === undefined) continue;
     cols.push(k);
     vals.push(v);
@@ -153,6 +161,36 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     );
   }
 
+  // Follow-up rows. Two shapes accepted:
+  //   { next_action_datetime: Date, comment?, status?: 'planned' | 'done' | 'missed' | 'cancelled' }
+  // Used by the manual-create form (one planned follow-up) and by bulk
+  // import to backfill the up-to-five past attempts (status='done') plus
+  // the upcoming scheduled follow-up (status='planned').
+  if (Array.isArray(input.followups) && input.followups.length) {
+    for (const f of input.followups) {
+      if (!f || !f.next_action_datetime) continue;
+      const status = f.status ?? 'planned';
+      const completed_at = status === 'done' ? f.next_action_datetime : null;
+      await client.query(
+        `INSERT INTO lead_followups
+            (lead_id, next_action_datetime, comment, status, created_by, completed_at, completed_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), COALESCE($8, now()))`,
+        [
+          lead.id,
+          f.next_action_datetime,
+          f.comment ?? null,
+          status,
+          created_by ?? null,
+          completed_at,
+          completed_at ? (created_by ?? null) : null,
+          // Backdate created_at of past attempts to the action date itself so
+          // the LeadCard "Last 5 follow-ups" panel sorts in time order.
+          status === 'done' ? f.next_action_datetime : null,
+        ],
+      );
+    }
+  }
+
   return lead;
 });
 
@@ -164,7 +202,7 @@ export const findById = async (tenant, id) => {
 export const findByIdWithRelations = async (tenant, id) => {
   const base = await findById(tenant, id);
   if (!base) return null;
-  const [family, sources, tagsRes, customValuesRes, assignmentsRes, primarySourceRes] = await Promise.all([
+  const [family, sources, tagsRes, customValuesRes, assignmentsRes, primarySourceRes, followupsRes] = await Promise.all([
     tenantQuery(tenant, `SELECT * FROM lead_family WHERE lead_id = $1`, [id]),
     tenantQuery(tenant, `
       SELECT lsa.*,
@@ -204,6 +242,15 @@ export const findByIdWithRelations = async (tenant, id) => {
        ORDER BY la.is_active DESC, la.created_at DESC
     `, [id]),
     tenantQuery(tenant, `SELECT id, name FROM lead_primary_sources WHERE id = $1`, [base.primary_source_id]),
+    // All follow-ups for this lead, ordered by action date descending. The
+    // LeadCard "Last 5 follow-ups" panel slices the first 5 for the CSV-
+    // parity slots view; the "Full history" tab uses the whole array.
+    tenantQuery(tenant, `
+      SELECT id, next_action_datetime, comment, status, completed_at, created_at, updated_at
+        FROM lead_followups
+       WHERE lead_id = $1 AND deleted_at IS NULL
+       ORDER BY next_action_datetime DESC
+    `, [id]),
   ]);
   const custom_values = {};
   for (const r of customValuesRes.rows) custom_values[r.key] = r.value;
@@ -212,6 +259,14 @@ export const findByIdWithRelations = async (tenant, id) => {
   // current_owner; the most recent inactive row is previous_owner.
   const current_owner = assignments.find((a) => a.is_active) ?? null;
   const previous_owner = assignments.find((a) => !a.is_active) ?? null;
+  // Split follow-ups so the FE has both shapes ready:
+  //   • upcoming — status='planned' rows with future-or-present action time
+  //   • past     — completed/missed/cancelled rows, most recent first
+  // The LeadCard slots view fills with `past.slice(0,5)`; the Full History
+  // tab renders both arrays together.
+  const allFollowups = followupsRes.rows;
+  const upcoming_followups = allFollowups.filter((f) => f.status === 'planned');
+  const past_followups = allFollowups.filter((f) => f.status !== 'planned');
   return {
     ...base,
     family: family.rows[0] ?? null,
@@ -222,6 +277,9 @@ export const findByIdWithRelations = async (tenant, id) => {
     assignments,
     current_owner,
     previous_owner,
+    followups: allFollowups,
+    upcoming_followups,
+    past_followups,
   };
 };
 

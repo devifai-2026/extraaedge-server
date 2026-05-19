@@ -85,6 +85,30 @@ const normalizePhone = (raw) => {
 
 const isBlank = (v) => v === undefined || v === null || String(v).trim() === '';
 
+// Strict parser for the CSV format DD-MM-YYYY HH:mm:ss (24h). This is the
+// format ExtraAEdge exports, and our template documents it as the only
+// accepted shape — keeps imports deterministic.
+//
+// Returns Date on success, null on a string that doesn't match the format,
+// undefined on blank input (so callers can distinguish "not provided" from
+// "provided but invalid").
+//
+// ExcelJS may hand us a real Date object for cells the user formatted as a
+// date in Excel; we pass those through unchanged.
+const DDMMYYYY_RE = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/u;
+const parseCsvDate = (raw) => {
+  if (isBlank(raw)) return undefined;
+  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
+  const s = String(raw).trim();
+  const m = DDMMYYYY_RE.exec(s);
+  if (!m) return null;
+  const [, dd, mm, yyyy, hh, mi, ss] = m;
+  const d = new Date(Date.UTC(+yyyy, +mm - 1, +dd, +hh, +mi, +ss));
+  // Reject mismatches like 32-01-2026 — JS clamps to a valid date silently.
+  if (d.getUTCFullYear() !== +yyyy || d.getUTCMonth() !== +mm - 1 || d.getUTCDate() !== +dd) return null;
+  return d;
+};
+
 const validateRow = (mapped) => {
   // Row-level requirements:
   //   • Identity: at least one of email / first_name / last_name
@@ -132,6 +156,50 @@ const validateRow = (mapped) => {
     }
   }
 
+  // CSV-format date columns. Strict DD-MM-YYYY HH:mm:ss.
+  //   lead_created_on / lead_updated_on  → leads.created_at / updated_at
+  //   followup_scheduled_on              → lead_followups row, status='planned'
+  //   next_action_date_1..5              → lead_followups rows, status='done'
+  // Each invalid date fails the row with a precise INVALID_DATE error so the
+  // operator knows which column to fix.
+  const DATE_COLS = [
+    'lead_created_on', 'lead_updated_on', 'followup_scheduled_on',
+    'next_action_date_1', 'next_action_date_2', 'next_action_date_3',
+    'next_action_date_4', 'next_action_date_5',
+  ];
+  const parsedDates = {};
+  for (const col of DATE_COLS) {
+    if (isBlank(mapped[col])) { parsedDates[col] = undefined; continue; }
+    const d = parseCsvDate(mapped[col]);
+    if (d === null) {
+      return { ok: false, error: { code: 'INVALID_DATE', message: `${col} "${mapped[col]}" must be DD-MM-YYYY HH:mm:ss (e.g. 14-04-2026 13:07:56)` } };
+    }
+    parsedDates[col] = d;
+  }
+
+  // Build the followups[] array. Past attempts first (status='done', from
+  // next_action_date_1..5), followed by the upcoming planned follow-up
+  // (status='planned', from followup_scheduled_on).
+  const followups = [];
+  for (let n = 1; n <= 5; n += 1) {
+    const dt = parsedDates[`next_action_date_${n}`];
+    const cm = mapped[`comment_${n}`];
+    if (!dt && isBlank(cm)) continue;
+    if (!dt) continue; // comment without a date is meaningless — silently skip
+    followups.push({
+      next_action_datetime: dt,
+      comment: isBlank(cm) ? null : String(cm).trim(),
+      status: 'done',
+    });
+  }
+  if (parsedDates.followup_scheduled_on) {
+    followups.push({
+      next_action_datetime: parsedDates.followup_scheduled_on,
+      comment: isBlank(mapped.followup_comments) ? null : String(mapped.followup_comments).trim(),
+      status: 'planned',
+    });
+  }
+
   // Derive `name` from first_name / last_name when the sheet doesn't have a
   // standalone `name` column. Both present → "first last"; one present →
   // that one; neither → null (the leads.name column allows null).
@@ -142,16 +210,28 @@ const validateRow = (mapped) => {
   const composed = existing || [first, last].filter(Boolean).join(' ');
   const name = composed || null;
 
-  return {
-    ok: true,
-    normalized: {
-      ...mapped,
-      name,
-      email: mapped.email ? String(mapped.email).trim().toLowerCase() : mapped.email,
-      phone: phone || mapped.phone,
-      whatsapp_number: wa || mapped.whatsapp_number,
-    },
+  const normalized = {
+    ...mapped,
+    name,
+    email: mapped.email ? String(mapped.email).trim().toLowerCase() : mapped.email,
+    phone: phone || mapped.phone,
+    whatsapp_number: wa || mapped.whatsapp_number,
   };
+  if (parsedDates.lead_created_on) normalized.created_at = parsedDates.lead_created_on;
+  if (parsedDates.lead_updated_on) normalized.updated_at = parsedDates.lead_updated_on;
+  if (followups.length) normalized.followups = followups;
+  // Drop the raw CSV columns so the resolver / buildInsertPayload don't try
+  // to push them onto the leads table.
+  delete normalized.lead_created_on;
+  delete normalized.lead_updated_on;
+  delete normalized.followup_scheduled_on;
+  delete normalized.followup_comments;
+  for (let n = 1; n <= 5; n += 1) {
+    delete normalized[`next_action_date_${n}`];
+    delete normalized[`comment_${n}`];
+  }
+
+  return { ok: true, normalized };
 };
 
 // Pick the first matching field that triggered the duplicate, for the
@@ -187,6 +267,9 @@ const LEAD_COLS = new Set([
   'referred_by_lead_id', 'referral_code_used', 'referral_source',
   'first_touch_campaign_id', 'first_touch_channel', 'first_touch_source', 'first_touch_medium',
   'primary_source_id',
+  // Optional audit timestamps imported from CSV. Allowed to flow through to
+  // INSERT so callers can preserve the source-system's timeline.
+  'created_at', 'updated_at',
 ]);
 const FAMILY_COLS = ['father_name', 'father_mobile', 'father_email',
   'mother_name', 'mother_mobile', 'mother_email',
@@ -206,6 +289,8 @@ const buildInsertPayload = (resolved) => {
   if (Object.keys(family).length) lead.family = family;
   // Pass through sources[] if the resolver built one (channel/source/etc).
   if (resolved.sources) lead.sources = resolved.sources;
+  // Pass through followups[] built by validateRow (past + upcoming).
+  if (resolved.followups) lead.followups = resolved.followups;
   return lead;
 };
 
