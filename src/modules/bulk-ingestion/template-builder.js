@@ -20,7 +20,12 @@ const HEADERS = [
   'ug_degree', 'ug_specialization', 'ug_university', 'ug_graduation_year',
   'pg_degree', 'pg_specialization', 'pg_university', 'pg_graduation_year',
   'country', 'state', 'district', 'city', 'address', 'pincode',
-  'program', 'stage', 'sub_stage', 'remarks',
+  'program', 'stage', 'sub_stage',
+  // Owner columns live next to stage/sub_stage — they're part of the same
+  // workflow block (who handles this lead in this stage). Keeps the
+  // assignment story together when the counsellor scans the sheet.
+  'assigned_to_email', 'current_lead_owner_email', 'previous_lead_owner_email',
+  'remarks',
   // Upcoming follow-up (single, planned)
   'followup_scheduled_on', 'followup_comments',
   // Past follow-up attempts — most recent first. Stored as completed rows
@@ -37,7 +42,6 @@ const HEADERS = [
   'mother_name', 'mother_mobile', 'mother_email',
   'guardian_name', 'guardian_mobile', 'guardian_email',
   'channel', 'source', 'primary_source', 'campaign', 'medium',
-  'assigned_to_email', 'current_lead_owner_email', 'previous_lead_owner_email',
   'referral_code_used', 'tags',
 ];
 
@@ -47,7 +51,10 @@ const EXAMPLE_ROWS = [
     'B.Tech', 'Computer Science', 'Savitribai Phule Pune University', 2023,
     '', '', '', '',
     'India', 'Maharashtra', 'Pune', 'Pune', '12 FC Road', 411005,
-    'Data Analyst Training and Certification', '02-Ringing / Not Reachable', 'Ringing no response', 'Prefers evening callback',
+    'Data Analyst Training and Certification', '02-Ringing / Not Reachable', 'Ringing no response',
+    // assigned_to_email, current_lead_owner_email, previous_lead_owner_email
+    '', '', '',
+    'Prefers evening callback',
     // followup_scheduled_on, followup_comments
     '20-05-2026 18:00:00', 'Follow up tomorrow evening',
     // next_action_date_1..5 + comment_1..5  (most recent past attempts first)
@@ -62,7 +69,6 @@ const EXAMPLE_ROWS = [
     'Sunita Sharma', '+919833333333', '',
     '', '', '',
     'Offline', 'Raw Database', 'Raw Database', 'Web Quick Add Lead', 'Offline',
-    '', '', '',
     '', 'priority'],
 ];
 
@@ -167,6 +173,14 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
 
   // Freeze the header row so it stays visible while users scroll down to fill rows.
   ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+  // Per-column filter + sort dropdowns anchored on the HEADER ROW. Excel
+  // renders the little arrow on each header cell so the user can filter /
+  // sort any column inline without leaving the spreadsheet. Range spans
+  // A1 to the last header column on row 1 — Excel automatically extends
+  // the filter to all data rows below it.
+  const lastColLetter = ws.getColumn(HEADERS.length).letter;
+  ws.autoFilter = `A1:${lastColLetter}1`;
 
   // ---- Allowed Values reference sheet (replaces in-cell dropdowns) ----
   // We deliberately do NOT add Excel data-validation lists. They render
@@ -273,9 +287,12 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   addRule('guardian_email',      'No',                               'Email format', '');
   addRule('channel',             'No',                               'Text (auto-create)', 'Marketing channel — e.g. Online / Offline / Facebook. New entries created on first use.');
   addRule('source',              'No',                               'Text (auto-create)', 'Marketing source — e.g. Website / Social Media. New entries created on first use.');
+  addRule('primary_source',      'No',                               'Text (auto-create)', 'Primary marketing source dictionary — separate from `source`. Auto-created on first use. Stored directly on the lead (not as attribution row).');
   addRule('campaign',            'No',                               'Text (auto-create)', 'Marketing campaign name. New entries created on first use.');
   addRule('medium',              'No',                               'Text (auto-create)', 'Marketing medium — e.g. CPC / Organic / Free. New entries created on first use.');
-  addRule('assigned_to_email',   'No',                               'Email format', 'Email of the counsellor to assign this lead to. If not provided, auto-assignment runs after the import.');
+  addRule('current_lead_owner_email', 'No',                          'Email',              'Any active user email. Counsellor → direct assign. Sales-manager → round-robin within their team. Super-admin → round-robin across the tenant. Interchangeable with assigned_to_email; if both are set they must point to the SAME user (OWNER_MISMATCH otherwise).');
+  addRule('previous_lead_owner_email', 'No',                         'Email',              'Any active user (any role). Recorded as prior owner in the lead\'s ownership history — does NOT affect current assignment.');
+  addRule('assigned_to_email',   'No',                               'Email',              'Same semantics as current_lead_owner_email. Counsellor → direct; sales-manager → RR within team; super-admin → RR tenant-wide. Both columns blank → end-of-upload auto-assignment rule picks an owner.');
   addRule('referral_code_used',  'No',                               'Text',         'Free text.');
   addRule('tags',                'No',                               'Comma-separated', 'e.g. priority,returning. Trimmed.');
 
@@ -304,7 +321,24 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   para('  SUBSTAGE_MISMATCH — sub_stage doesn\'t belong under the chosen stage.');
   para('  COUNTRY_NOT_FOUND — country isn\'t in your institute\'s country list.');
   para('  STATE_NEEDS_COUNTRY — state filled but country missing or invalid.');
+  para('  INVALID_DATE — a date column (followup_scheduled_on, next_action_date_1..5, lead_created_on, lead_updated_on) is not in DD-MM-YYYY HH:mm:ss format.');
+  para('  OWNER_MISMATCH — assigned_to_email and current_lead_owner_email are both set but point to different users. Leave one blank or make them match.');
+  para('  OWNER_NOT_FOUND — assigned_to_email / current_lead_owner_email doesn\'t match any active user in this tenant.');
+  para('  PREVIOUS_OWNER_NOT_FOUND — previous_lead_owner_email doesn\'t match any active user in this tenant.');
   para('  ROW_FAILED — generic insert failure (rare). Open the row to see the database error.');
+
+  blank();
+  heading('Owner columns — how each behaves', 13);
+  blank();
+  para('There are three optional owner columns. Use the one that fits your workflow:');
+  para('  • current_lead_owner_email — Any active user email. Counsellor → direct assignment (manager_id snapped from their manager). Sales-manager → round-robin across their team. Super-admin → round-robin across the whole tenant. Interchangeable with assigned_to_email below.');
+  para('  • previous_lead_owner_email — Any active user (any role). Recorded as prior owner in lead_assignments history; doesn\'t affect current assignment.');
+  para('  • assigned_to_email — Same role-aware routing as current_lead_owner_email:');
+  para('       - counsellor email → assigns directly to that counsellor.');
+  para('       - sales_manager email → round-robins across that manager\'s counsellors within the upload.');
+  para('       - super_admin email → round-robins across every counsellor + sales_manager in the tenant (excluding the admin themselves).');
+  para('  • All three blank → lead lands unassigned; the active auto-assignment rule picks it up at end-of-upload.');
+  para('  • Setting BOTH assigned_to_email and current_lead_owner_email to DIFFERENT emails fails with OWNER_MISMATCH. If they match (case-insensitive trim) they\'re treated as one and the same.');
 
   return wb.xlsx.writeBuffer();
 };

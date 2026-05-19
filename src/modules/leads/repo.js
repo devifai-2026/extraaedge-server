@@ -161,20 +161,29 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     );
   }
 
-  // Follow-up rows. Two shapes accepted:
-  //   { next_action_datetime: Date, comment?, status?: 'planned' | 'done' | 'missed' | 'cancelled' }
+  // Follow-up rows. Three shapes accepted:
+  //   { next_action_datetime, comment?, status?, slot_index? }
   // Used by the manual-create form (one planned follow-up) and by bulk
-  // import to backfill the up-to-five past attempts (status='done') plus
-  // the upcoming scheduled follow-up (status='planned').
+  // import to backfill the up-to-five past attempts (status='done',
+  // slot_index = 1..5 preserving CSV column order) plus the upcoming
+  // scheduled follow-up (status='planned', no slot_index).
+  //
+  // We deliberately do NOT de-duplicate by (datetime, comment). The product
+  // rule is "store exactly what the user typed in each slot, even if two
+  // slots are identical" so the slot order in the UI matches the CSV 1:1.
   if (Array.isArray(input.followups) && input.followups.length) {
     for (const f of input.followups) {
       if (!f || !f.next_action_datetime) continue;
       const status = f.status ?? 'planned';
       const completed_at = status === 'done' ? f.next_action_datetime : null;
+      const slotIndex = Number.isInteger(f.slot_index) && f.slot_index >= 1 && f.slot_index <= 5
+        ? f.slot_index
+        : null;
       await client.query(
         `INSERT INTO lead_followups
-            (lead_id, next_action_datetime, comment, status, created_by, completed_at, completed_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), COALESCE($8, now()))`,
+            (lead_id, next_action_datetime, comment, status, created_by,
+             completed_at, completed_by, slot_index, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, now()), COALESCE($9, now()))`,
         [
           lead.id,
           f.next_action_datetime,
@@ -183,8 +192,11 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
           created_by ?? null,
           completed_at,
           completed_at ? (created_by ?? null) : null,
+          slotIndex,
           // Backdate created_at of past attempts to the action date itself so
-          // the LeadCard "Last 5 follow-ups" panel sorts in time order.
+          // any consumer that sorts by created_at still gets a reasonable
+          // chronological view. Slot-order callers should sort by slot_index
+          // instead.
           status === 'done' ? f.next_action_datetime : null,
         ],
       );
@@ -242,14 +254,18 @@ export const findByIdWithRelations = async (tenant, id) => {
        ORDER BY la.is_active DESC, la.created_at DESC
     `, [id]),
     tenantQuery(tenant, `SELECT id, name FROM lead_primary_sources WHERE id = $1`, [base.primary_source_id]),
-    // All follow-ups for this lead, ordered by action date descending. The
-    // LeadCard "Last 5 follow-ups" panel slices the first 5 for the CSV-
-    // parity slots view; the "Full history" tab uses the whole array.
+    // All follow-ups for this lead. Sort order matters:
+    //   • slot_index ASC NULLS LAST — rows that came from CSV columns 1..5
+    //     keep their column order so the LeadCard "5 slots" view matches
+    //     what the user typed, even when slot 1's date is later than slot 2's.
+    //   • next_action_datetime DESC tiebreaker — for ad-hoc rows
+    //     (slot_index NULL) we still want most-recent first.
     tenantQuery(tenant, `
-      SELECT id, next_action_datetime, comment, status, completed_at, created_at, updated_at
+      SELECT id, next_action_datetime, comment, status, completed_at,
+             slot_index, created_at, updated_at
         FROM lead_followups
        WHERE lead_id = $1 AND deleted_at IS NULL
-       ORDER BY next_action_datetime DESC
+       ORDER BY slot_index ASC NULLS LAST, next_action_datetime DESC
     `, [id]),
   ]);
   const custom_values = {};
@@ -370,6 +386,26 @@ export const softDelete = async (tenant, id) => {
 // message_log etc. All restricted to super_admin at the route layer.
 export const hardDelete = async (tenant, id) => tenantTx(tenant, async (client) => {
   await client.query(`DELETE FROM leads WHERE id = $1`, [id]);
+});
+
+// Bulk hard-delete: same semantics as hardDelete but takes an array of ids
+// and runs in one transaction. FK CASCADEs wipe every dependent row
+// (followups, notes, assignments, activities, family, source attributions,
+// custom values, tags, calls, recordings, payments, referral edges, etc.)
+// so nothing about the deleted leads survives in the tenant DB.
+//
+// Returns the count actually deleted so the caller can compare it against
+// the requested list (mismatches mean some ids were already gone or out of
+// scope; we still report success since the end state is correct).
+//
+// Super-admin only — enforced at the route layer.
+export const hardDeleteMany = async (tenant, ids) => tenantTx(tenant, async (client) => {
+  if (!Array.isArray(ids) || ids.length === 0) return { deleted: 0 };
+  const r = await client.query(
+    `DELETE FROM leads WHERE id = ANY($1::uuid[]) RETURNING id`,
+    [ids],
+  );
+  return { deleted: r.rowCount, deleted_ids: r.rows.map((row) => row.id) };
 });
 
 export const changeStage = async (tenant, id, { stage_id, sub_stage_id, remarks }, user_id) => tenantTx(tenant, async (client) => {

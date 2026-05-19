@@ -194,6 +194,29 @@ export const deleteLead = async (tenant, actor, id) => {
   });
 };
 
+// Bulk hard-delete. Same cascade behaviour as deleteLead, but takes an array
+// of ids and emits one event per actually-deleted row. Super-admin only —
+// enforced at the route layer.
+//
+// We intentionally do NOT pre-check that every id exists before deleting;
+// the underlying DELETE is set-based so missing ids are simply no-ops. The
+// returned `deleted` count tells the FE how many rows actually went away.
+export const bulkDeleteLeads = async (tenant, actor, ids) => {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { deleted: 0, deleted_ids: [] };
+  }
+  const result = await repo.hardDeleteMany(tenant, ids);
+  for (const deletedId of result.deleted_ids ?? []) {
+    emit(tenant, EVENT_TYPES.LEAD_DELETED ?? 'lead.deleted', {
+      actorUserId: actor?.id ?? null,
+      entityType: 'lead',
+      entityId: deletedId,
+      payload: { source: 'bulk_delete' },
+    });
+  }
+  return result;
+};
+
 export const changeStage = async (tenant, actor, id, stageChange) => {
   const result = await repo.changeStage(tenant, id, stageChange, actor?.id);
   if (!result) throw notFound('Lead not found');

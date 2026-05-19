@@ -1,15 +1,21 @@
 // Resolves a bulk-import row's `assigned_to_email` into `assigned_to` (and
-// `team_id`) following these rules:
+// `manager_id`) following these rules:
 //
 //   blank / unknown email   → leave assigned_to NULL (global RR catches it
 //                             at end-of-job)
-//   COUNSELLOR               → assign directly, team_id = counsellor.manager_id
+//   COUNSELLOR               → assign directly, manager_id = counsellor.manager_id
 //   SALES_MANAGER            → round-robin across that manager's counsellors,
-//                             team_id = the manager
+//                             manager_id = the manager
 //   SUPER_ADMIN              → round-robin across all managers + counsellors
 //                             in the tenant, excluding the admin themselves.
-//                             If the picked user is a counsellor, team_id is
+//                             If the picked user is a counsellor, manager_id is
 //                             that counsellor's manager_id; otherwise NULL.
+//
+// NOTE: this used to return `team_id` but that's a FK to the `teams` table
+// (an actual team entity, only created when teams are configured). The
+// hierarchy info we're computing here belongs on `leads.manager_id` (FK to
+// users). Sending a user UUID through `team_id` caused FK violations like
+// "leads_team_id_fkey violates" and bounced the whole row to failed_leads.
 //
 // State is per-bulk-import (in-memory): each distinct pool gets its own
 // cursor inside one job, so leads land fairly within a single upload.
@@ -94,38 +100,41 @@ const pickNext = (cache, poolKey, pool) => {
 export const lookupUserByEmailStrict = (tenant, cache, email) =>
   lookupUserByEmail(tenant, cache, String(email ?? ''));
 
-// Returns { assigned_to, team_id } — either may be null. Never throws on
+// Returns { assigned_to, manager_id } — either may be null. Never throws on
 // unknown email; the caller treats null assigned_to as "leave to global RR".
+// `manager_id` is a FK to users(id) — the lead's hierarchy parent — NOT the
+// `teams.id` FK on `leads.team_id`. Callers should write this onto
+// `leads.manager_id`, not `leads.team_id`.
 export const resolveAssignee = async (tenant, cache, assigned_to_email) => {
   if (!assigned_to_email || !String(assigned_to_email).trim()) {
-    return { assigned_to: null, team_id: null };
+    return { assigned_to: null, manager_id: null };
   }
 
   const user = await lookupUserByEmail(tenant, cache, String(assigned_to_email));
-  if (!user) return { assigned_to: null, team_id: null };
+  if (!user) return { assigned_to: null, manager_id: null };
 
   if (user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
-    return { assigned_to: user.id, team_id: user.manager_id ?? null };
+    return { assigned_to: user.id, manager_id: user.manager_id ?? null };
   }
 
   if (user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
     const pool = await loadCounsellorsFor(tenant, cache, user.id);
     const picked = pickNext(cache, `mgr:${user.id}`, pool);
-    if (!picked) return { assigned_to: null, team_id: user.id };
-    return { assigned_to: picked.id, team_id: user.id };
+    if (!picked) return { assigned_to: null, manager_id: user.id };
+    return { assigned_to: picked.id, manager_id: user.id };
   }
 
   if (user.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
     const pool = await loadAdminPool(tenant, cache, user.id);
     const picked = pickNext(cache, `admin:${user.id}`, pool);
-    if (!picked) return { assigned_to: null, team_id: null };
-    const team_id = picked.role === SYSTEM_TENANT_ROLES.COUNSELLOR
+    if (!picked) return { assigned_to: null, manager_id: null };
+    const manager_id = picked.role === SYSTEM_TENANT_ROLES.COUNSELLOR
       ? (picked.manager_id ?? null)
       : null;
-    return { assigned_to: picked.id, team_id };
+    return { assigned_to: picked.id, manager_id };
   }
 
   // Unknown role (platform role, custom role without a mapped system role) —
   // treat as no match.
-  return { assigned_to: null, team_id: null };
+  return { assigned_to: null, manager_id: null };
 };

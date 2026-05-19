@@ -9,7 +9,7 @@ import { tenantQuery } from '../../db/tenant.js';
 import { forbidden, notFound } from '../../lib/errors.js';
 import * as controller from './controller.js';
 import * as service from './service.js';
-import { leadCreateSchema, leadUpdateSchema, listQuery, idParam, stageChangeSchema, bulkAssignSchema } from './schema.js';
+import { leadCreateSchema, leadUpdateSchema, listQuery, idParam, stageChangeSchema, bulkAssignSchema, bulkDeleteSchema } from './schema.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -44,6 +44,19 @@ router.post(
 router.get('/', validate({ query: listQuery }), controller.list);
 router.get('/stage-counts', controller.stageCounts);
 router.post('/bulk-assign', validate({ body: bulkAssignSchema }), controller.bulkAssign);
+
+// Bulk hard-delete. Super-admin ONLY — counsellors / managers don't even
+// see the button on the FE, but we enforce here too because the FE check
+// is just a hint, not a security boundary. FK CASCADEs at the schema layer
+// guarantee follow-ups, notes, activities, assignments, family, attribution,
+// custom values, tags, calls, recordings, payments and referral edges are
+// physically removed alongside the lead row.
+router.post(
+  '/bulk-delete',
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN),
+  validate({ body: bulkDeleteSchema }),
+  controller.bulkDelete,
+);
 router.get('/:id', validate({ params: idParam }), controller.get);
 router.get('/:id/timeline', validate({ params: idParam }), controller.timeline);
 

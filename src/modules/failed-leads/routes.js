@@ -45,8 +45,20 @@ const assertCanActOn = async (req, importIdSql, idValue) => {
 
 const listQuery = z.object({
   import_id: z.string().uuid().optional(),
+  // Date range filter. Applied against bulk_imports.created_at (when the file
+  // was uploaded) — the natural "date" of a failed row, since the underlying
+  // bulk_import_failures / bulk_import_duplicates rows are created in the
+  // same transaction as the import. Both bounds are optional and inclusive.
+  // Format: ISO date or datetime (z.coerce.date accepts both).
+  date_from: z.coerce.date().optional(),
+  date_to: z.coerce.date().optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+const summaryQuery = z.object({
+  import_id: z.string().uuid().optional(),
+  date_from: z.coerce.date().optional(),
+  date_to: z.coerce.date().optional(),
 });
 const idParam = z.object({ id: z.string().uuid() });
 
@@ -55,6 +67,11 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
     const conds = [];
     const params = [];
     if (req.query.import_id) { params.push(req.query.import_id); conds.push(`f.import_id = $${params.length}`); }
+    // Date range filter on the parent import's upload time. date_to is
+    // treated as inclusive end-of-day when a date-only value is supplied,
+    // so the picker can be a simple date picker without time inputs.
+    if (req.query.date_from) { params.push(req.query.date_from); conds.push(`i.created_at >= $${params.length}::timestamptz`); }
+    if (req.query.date_to)   { params.push(req.query.date_to);   conds.push(`i.created_at <  ($${params.length}::timestamptz + INTERVAL '1 day')`); }
     // Scope to imports the viewer is allowed to see.
     const scope = await scopeFor(req);
     if (scope !== null) { params.push(scope); conds.push(`i.user_id = ANY($${params.length}::uuid[])`); }
@@ -135,6 +152,8 @@ router.get('/duplicates', validate({ query: listQuery }), async (req, res, next)
     const conds = [];
     const params = [];
     if (req.query.import_id) { params.push(req.query.import_id); conds.push(`d.import_id = $${params.length}`); }
+    if (req.query.date_from) { params.push(req.query.date_from); conds.push(`i.created_at >= $${params.length}::timestamptz`); }
+    if (req.query.date_to)   { params.push(req.query.date_to);   conds.push(`i.created_at <  ($${params.length}::timestamptz + INTERVAL '1 day')`); }
     const scope = await scopeFor(req);
     if (scope !== null) { params.push(scope); conds.push(`i.user_id = ANY($${params.length}::uuid[])`); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
@@ -186,11 +205,13 @@ router.post('/duplicates/bulk-delete', validate({ body: bulkDeleteSchema }), asy
 
 // Counts for the page header tabs ("Validation Errors (3)" + "Duplicates (12)").
 // Optionally scoped to a single import_id.
-router.get('/summary', validate({ query: z.object({ import_id: z.string().uuid().optional() }) }), async (req, res, next) => {
+router.get('/summary', validate({ query: summaryQuery }), async (req, res, next) => {
   try {
     const conds = [];
     const params = [];
     if (req.query.import_id) { params.push(req.query.import_id); conds.push(`x.import_id = $${params.length}`); }
+    if (req.query.date_from) { params.push(req.query.date_from); conds.push(`i.created_at >= $${params.length}::timestamptz`); }
+    if (req.query.date_to)   { params.push(req.query.date_to);   conds.push(`i.created_at <  ($${params.length}::timestamptz + INTERVAL '1 day')`); }
     const scope = await scopeFor(req);
     if (scope !== null) { params.push(scope); conds.push(`i.user_id = ANY($${params.length}::uuid[])`); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';

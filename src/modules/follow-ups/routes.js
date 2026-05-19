@@ -261,6 +261,87 @@ router.post('/', validate({ body: createSchema }), async (req, res, next) => {
        VALUES ($1,$2,'follow_up_scheduled',$3,$4::jsonb)`,
       [req.body.lead_id, req.user.id, 'Follow-up scheduled', JSON.stringify({ at: req.body.next_action_datetime })],
     );
+
+    // Auto-move stage on first-touch.
+    //
+    // Why: scheduling a follow-up is itself a counsellor action — the lead is
+    // no longer "Not Called". Leaving it in 01-New corrupts pipeline reporting
+    // (the New bucket fills with already-worked leads). Industry-standard CRM
+    // behaviour is to move the lead out of New the moment any meaningful
+    // action happens on it.
+    //
+    // Scope is intentionally narrow:
+    //   • Only fires when the lead is currently in '01-New'.
+    //   • Targets '04-Followup' (with the default sub-stage if one exists).
+    //   • Other stages are left alone — a counsellor scheduling a follow-up
+    //     from Contacted / Qualified / etc. is normal and shouldn't churn.
+    //
+    // We log a stage_changed activity so the timeline tells the full story:
+    // follow_up_scheduled + stage_changed appear together with matching
+    // timestamps, making the cause obvious to anyone reading the history.
+    try {
+      const { rows: leadRows } = await tenantQuery(
+        req.tenant,
+        `SELECT l.id, l.stage_id, s.code AS stage_code
+           FROM leads l
+           LEFT JOIN lead_stages s ON s.id = l.stage_id
+          WHERE l.id = $1 AND l.deleted_at IS NULL
+          LIMIT 1`,
+        [req.body.lead_id],
+      );
+      const lead = leadRows[0];
+      if (lead && lead.stage_code === '01-New') {
+        const { rows: targetRows } = await tenantQuery(
+          req.tenant,
+          `SELECT id FROM lead_stages WHERE code = '04-Followup' AND deleted_at IS NULL AND is_active LIMIT 1`,
+        );
+        const targetStageId = targetRows[0]?.id;
+        if (targetStageId) {
+          // Pick the default sub-stage for Followup if one is configured;
+          // otherwise leave sub_stage NULL so the counsellor can fill it in.
+          const { rows: subRows } = await tenantQuery(
+            req.tenant,
+            `SELECT id FROM lead_sub_stages
+              WHERE stage_id = $1 AND deleted_at IS NULL AND is_active
+              ORDER BY is_default DESC, order_index, name
+              LIMIT 1`,
+            [targetStageId],
+          );
+          const targetSubStageId = subRows[0]?.id ?? null;
+          await tenantQuery(
+            req.tenant,
+            `UPDATE leads
+                SET stage_id = $2,
+                    sub_stage_id = $3,
+                    last_activity_at = now()
+              WHERE id = $1`,
+            [req.body.lead_id, targetStageId, targetSubStageId],
+          );
+          await tenantQuery(
+            req.tenant,
+            `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+             VALUES ($1, $2, 'stage_changed', $3, $4::jsonb)`,
+            [
+              req.body.lead_id,
+              req.user.id,
+              'Stage auto-moved to Followup (follow-up scheduled on a New lead)',
+              JSON.stringify({
+                from: lead.stage_id,
+                to: targetStageId,
+                to_sub: targetSubStageId,
+                reason: 'follow_up_scheduled_on_new',
+              }),
+            ],
+          );
+        }
+      }
+    } catch (err) {
+      // Auto-move must never break follow-up creation. If the lookup or
+      // update fails, the follow-up still exists; an admin can fix the
+      // stage manually.
+      // eslint-disable-next-line no-console
+      console.warn('[follow-ups] stage auto-move failed:', err.message);
+    }
     await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.FOLLOWUP_SCHEDULED, {
       type: EVENT_TYPES.FOLLOWUP_SCHEDULED,
       tenantId: req.tenant.id,

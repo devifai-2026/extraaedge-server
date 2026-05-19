@@ -44,10 +44,26 @@ export const parseXlsxBuffer = async (buffer) => {
       if (!h) return;
       const cell = row.getCell(i + 1);
       let v = cell.value;
+
+      // Special-case Date cells: keep the Date object intact so downstream
+      // workers can re-interpret the wall-clock components in the correct
+      // timezone (IST). If we toISOString()'d here we'd freeze the value as
+      // UTC, and a Node process running in UTC TZ would corrupt every
+      // Excel-auto-formatted date by 5h30m. The worker's parseCsvDate
+      // handles Date instances explicitly.
+      if (v instanceof Date) {
+        if (Number.isNaN(v.getTime())) {
+          obj[h] = '';
+          return;
+        }
+        obj[h] = v;
+        hasValue = true;
+        return;
+      }
+
       // ExcelJS returns rich objects for some cell types; flatten to strings.
       if (v && typeof v === 'object') {
-        if (v instanceof Date) v = v.toISOString();
-        else if (v.text) v = v.text;
+        if (v.text) v = v.text;
         else if (v.result !== undefined) v = v.result;
         else if (v.richText) v = v.richText.map((p) => p.text).join('');
         else v = String(v);

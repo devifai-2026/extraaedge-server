@@ -85,27 +85,93 @@ const normalizePhone = (raw) => {
 
 const isBlank = (v) => v === undefined || v === null || String(v).trim() === '';
 
-// Strict parser for the CSV format DD-MM-YYYY HH:mm:ss (24h). This is the
-// format ExtraAEdge exports, and our template documents it as the only
-// accepted shape — keeps imports deterministic.
+// Parser for the date columns in the bulk template.
 //
-// Returns Date on success, null on a string that doesn't match the format,
-// undefined on blank input (so callers can distinguish "not provided" from
-// "provided but invalid").
+// Returns Date on success, null on a string that doesn't match any accepted
+// format, undefined on blank input (so callers can distinguish "not provided"
+// from "provided but invalid").
 //
-// ExcelJS may hand us a real Date object for cells the user formatted as a
-// date in Excel; we pass those through unchanged.
+// Accepted inputs, in order of precedence:
+//   • Real JS Date — ExcelJS hands these back for cells that Excel itself
+//     interpreted as dates (which happens to our DD-MM-YYYY strings the
+//     moment Excel auto-formats the column on open). Pass through as-is.
+//   • ISO 8601 strings — produced by csv.js when it flattens a Date cell
+//     before this worker sees it (e.g. "2026-04-17T21:40:00.000Z").
+//     Same intent as a Date object; parse straight back.
+//   • Our documented "DD-MM-YYYY HH:mm:ss" plain-text format — what users
+//     paste when ExtraAEdge gives them the data verbatim.
+//
+// Anything else (US "MM/DD/YYYY", just a date, free text, etc.) is rejected
+// so silent date-format mixups don't corrupt the timeline.
 const DDMMYYYY_RE = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/u;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/u;
+const IST_OFFSET_MIN = 330; // 5h 30m
+
+// Re-interpret a Date object's wall-clock components as IST and return the
+// corresponding UTC Date. ExcelJS hands us Date instances for cells the
+// spreadsheet auto-formatted as dates — but those Dates are constructed in
+// the Node process's local TZ, which on most servers is UTC. The result is
+// that "24/05/2026 14:55" (intended IST) becomes 14:55 UTC instead of
+// 14:55 IST (= 09:25 UTC), a silent 5h30m drift.
+//
+// Strategy: read whatever the Date's UTC h:m:s says (those are the digits
+// the user typed, since the Date was constructed at UTC midnight-ish), and
+// re-anchor them to IST.
+const reinterpretAsIst = (d) => {
+  const yyyy = d.getUTCFullYear();
+  const mm = d.getUTCMonth();
+  const dd = d.getUTCDate();
+  const hh = d.getUTCHours();
+  const mi = d.getUTCMinutes();
+  const ss = d.getUTCSeconds();
+  return new Date(Date.UTC(yyyy, mm, dd, hh, mi, ss) - IST_OFFSET_MIN * 60_000);
+};
+
 const parseCsvDate = (raw) => {
   if (isBlank(raw)) return undefined;
-  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) return null;
+    // Wall-clock components are the user's IST intent; re-anchor.
+    return reinterpretAsIst(raw);
+  }
   const s = String(raw).trim();
+
+  // ISO 8601: this is what ExcelJS-via-csv.js produces for Excel-detected
+  // date cells. We trust it as long as JS can parse it cleanly.
+  if (ISO_RE.test(s)) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  // DD-MM-YYYY HH:mm:ss (24h) — the explicit user-typed format.
+  //
+  // The wall-clock time is interpreted in Asia/Kolkata (IST, +05:30) because
+  // every customer running the platform today is in India and types their
+  // CSVs in local time. Previously we used Date.UTC() which silently shifted
+  // every imported follow-up 5h30m forward — e.g. "17-04-2026 21:40:00"
+  // landed in the DB as 2026-04-17 21:40 UTC, then rendered to the user as
+  // 18-Apr 03:10 IST, a confusing duplicate of "next day morning".
+  //
+  // IST has no DST so the +05:30 offset is constant — no need for a full
+  // tz database, just subtract 5h30m from the local wall clock to get UTC.
   const m = DDMMYYYY_RE.exec(s);
   if (!m) return null;
   const [, dd, mm, yyyy, hh, mi, ss] = m;
-  const d = new Date(Date.UTC(+yyyy, +mm - 1, +dd, +hh, +mi, +ss));
-  // Reject mismatches like 32-01-2026 — JS clamps to a valid date silently.
-  if (d.getUTCFullYear() !== +yyyy || d.getUTCMonth() !== +mm - 1 || d.getUTCDate() !== +dd) return null;
+  const IST_OFFSET_MIN = 330; // 5h 30m
+  const d = new Date(Date.UTC(+yyyy, +mm - 1, +dd, +hh, +mi, +ss) - IST_OFFSET_MIN * 60_000);
+  // Round-trip validation: reject mismatches like 32-01-2026 by formatting
+  // `d` back in IST and comparing to the parsed parts. Uses Intl APIs so DST
+  // edges (none in IST, but future-proof) are handled correctly.
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(d).reduce((acc, p) => ({ ...acc, [p.type]: p.value }), {});
+  if (
+    Number(parts.year) !== +yyyy ||
+    Number(parts.month) !== +mm ||
+    Number(parts.day) !== +dd
+  ) return null;
   return d;
 };
 
@@ -172,14 +238,16 @@ const validateRow = (mapped) => {
     if (isBlank(mapped[col])) { parsedDates[col] = undefined; continue; }
     const d = parseCsvDate(mapped[col]);
     if (d === null) {
-      return { ok: false, error: { code: 'INVALID_DATE', message: `${col} "${mapped[col]}" must be DD-MM-YYYY HH:mm:ss (e.g. 14-04-2026 13:07:56)` } };
+      return { ok: false, error: { code: 'INVALID_DATE', message: `${col} "${mapped[col]}" is not a recognised date — use DD-MM-YYYY HH:mm:ss (e.g. 14-04-2026 13:07:56) or a real Excel date cell` } };
     }
     parsedDates[col] = d;
   }
 
   // Build the followups[] array. Past attempts first (status='done', from
-  // next_action_date_1..5), followed by the upcoming planned follow-up
-  // (status='planned', from followup_scheduled_on).
+  // next_action_date_1..5 — slot_index preserved so the LeadCard renders
+  // them in CSV column order, not date order), followed by the upcoming
+  // planned follow-up (status='planned', from followup_scheduled_on, no
+  // slot_index).
   const followups = [];
   for (let n = 1; n <= 5; n += 1) {
     const dt = parsedDates[`next_action_date_${n}`];
@@ -190,6 +258,7 @@ const validateRow = (mapped) => {
       next_action_datetime: dt,
       comment: isBlank(cm) ? null : String(cm).trim(),
       status: 'done',
+      slot_index: n,
     });
   }
   if (parsedDates.followup_scheduled_on) {
@@ -263,7 +332,7 @@ const LEAD_COLS = new Set([
   'pg_degree_id', 'pg_specialization_id', 'pg_university_id', 'pg_graduation_year',
   'country_id', 'state_id', 'district', 'city', 'address', 'pincode',
   'program_id', 'stage_id', 'sub_stage_id', 'remarks', 'closure_remarks',
-  'assigned_to', 'team_id',
+  'assigned_to', 'team_id', 'manager_id',
   'referred_by_lead_id', 'referral_code_used', 'referral_source',
   'first_touch_campaign_id', 'first_touch_channel', 'first_touch_source', 'first_touch_medium',
   'primary_source_id',
@@ -452,23 +521,39 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
           }
 
           // Owner-column resolution. Three inputs from the sheet:
-          //   - assigned_to_email          (admin / manager / counsellor RR — old path)
-          //   - current_lead_owner_email   (must resolve to a counsellor — new path)
-          //   - previous_lead_owner_email  (must resolve to any real user — history only)
+          //   - assigned_to_email          (any role — counsellor assigns
+          //                                 directly; manager / admin runs
+          //                                 round-robin across their team /
+          //                                 the full tenant pool)
+          //   - current_lead_owner_email   (same rules as assigned_to_email
+          //                                 — both columns are interchangeable
+          //                                 product-wise; if both are set,
+          //                                 they must agree)
+          //   - previous_lead_owner_email  (any active user — history only,
+          //                                 doesn't affect current assignment)
           //
-          // Validation:
-          //   * If both assigned_to_email and current_lead_owner_email are set and differ
-          //     (case-insensitive trim), the row fails OWNER_MISMATCH.
-          //   * current_lead_owner_email takes precedence over assigned_to_email when both
-          //     are present and equal.
-          //   * Unknown current_lead_owner_email or non-counsellor role fails the row.
-          //   * Unknown previous_lead_owner_email fails the row.
+          // Rules:
+          //   * Both columns blank → leave assigned_to NULL; the end-of-job
+          //     auto-assign sweep applies the active round-robin rule across
+          //     the full counsellor pool.
+          //   * Both columns set + same email → behave as if only one was set.
+          //   * Both columns set + different emails → OWNER_MISMATCH.
+          //   * Email points to a counsellor → direct assignment.
+          //   * Email points to a sales_manager → RR across that manager's
+          //     active counsellors (only).
+          //   * Email points to a super_admin → RR across all active managers
+          //     + counsellors in the tenant, excluding the admin themselves.
+          //   * Unknown email in either current/assigned column → OWNER_NOT_FOUND
+          //     so the operator can see the typo, instead of silently falling
+          //     through to global round-robin.
+          //   * Unknown previous_lead_owner_email → PREVIOUS_OWNER_NOT_FOUND.
           const curEmailRaw = resolved.current_lead_owner_email;
           const prevEmailRaw = resolved.previous_lead_owner_email;
           const asgEmailRaw = resolved.assigned_to_email;
           const normEmail = (s) => (s ?? '').toString().trim().toLowerCase();
           const curNorm = normEmail(curEmailRaw);
           const asgNorm = normEmail(asgEmailRaw);
+
           if (curNorm && asgNorm && curNorm !== asgNorm) {
             failed += 1;
             await tenantQuery(
@@ -498,38 +583,39 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             previousOwnerId = prevUser.id;
           }
 
-          if (curNorm) {
-            // Strict path: must be a counsellor.
-            const curUser = await lookupUserByEmailStrict(tenant, assigneeCache, curEmailRaw);
-            if (!curUser) {
+          // Whichever owner email is provided, route through the same
+          // role-aware resolveAssignee. Pre-check existence so a typo
+          // produces a clear OWNER_NOT_FOUND instead of falling through to
+          // auto-assignment with no signal to the operator.
+          const ownerEmail = curEmailRaw && String(curEmailRaw).trim()
+            ? curEmailRaw
+            : (asgEmailRaw && String(asgEmailRaw).trim() ? asgEmailRaw : null);
+          if (ownerEmail) {
+            const lookup = await lookupUserByEmailStrict(tenant, assigneeCache, ownerEmail);
+            if (!lookup) {
               failed += 1;
+              const which = curEmailRaw && String(curEmailRaw).trim()
+                ? 'current_lead_owner_email'
+                : 'assigned_to_email';
               await tenantQuery(
                 tenant,
                 `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-                 VALUES ($1,$2,$3::jsonb,'CURRENT_OWNER_NOT_FOUND',$4)`,
+                 VALUES ($1,$2,$3::jsonb,'OWNER_NOT_FOUND',$4)`,
                 [import_id, rowNum, JSON.stringify(row),
-                 `current_lead_owner_email "${curEmailRaw}" did not match any active user in this tenant.`],
+                 `${which} "${ownerEmail}" did not match any active user in this tenant.`],
               );
               continue;
             }
-            if (curUser.role !== 'counsellor') {
-              failed += 1;
-              await tenantQuery(
-                tenant,
-                `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-                 VALUES ($1,$2,$3::jsonb,'CURRENT_OWNER_NOT_COUNSELLOR',$4)`,
-                [import_id, rowNum, JSON.stringify(row),
-                 `current_lead_owner_email "${curEmailRaw}" resolves to a ${curUser.role}; only counsellors can be assigned as current owner.`],
-              );
-              continue;
-            }
-            resolved.assigned_to = curUser.id;
-            if (curUser.manager_id) resolved.team_id = curUser.manager_id;
-          } else if (asgNorm) {
-            // Legacy path: admin/manager/counsellor RR via resolveAssignee.
-            const assignee = await resolveAssignee(tenant, assigneeCache, asgEmailRaw);
+            // Found a real user. resolveAssignee picks a counsellor based on
+            // their role (counsellor=self, manager=RR within team, admin=RR
+            // tenant-wide) and snaps the hierarchy onto manager_id.
+            const assignee = await resolveAssignee(tenant, assigneeCache, ownerEmail);
             if (assignee.assigned_to) resolved.assigned_to = assignee.assigned_to;
-            if (assignee.team_id) resolved.team_id = assignee.team_id;
+            if (assignee.manager_id)  resolved.manager_id  = assignee.manager_id;
+            // If resolveAssignee returned no counsellor (e.g. manager with
+            // an empty team), we leave assigned_to NULL so the end-of-job
+            // auto-assign sweep can place the lead via the global rule
+            // rather than fail the row.
           }
           delete resolved.assigned_to_email;
           delete resolved.current_lead_owner_email;

@@ -111,7 +111,34 @@ const pickTarget = async (tenant, rule) => {
     candidates.push(...rows.map((r) => r.user_id));
   }
   if (rule.target_users) candidates.push(...rule.target_users);
-  // No target team and no explicit target_users → fall back to every active
+
+  // Filter candidates down to ACTIVE COUNSELLORS only. `leads.assigned_to`
+  // must always point to a counsellor — sales_managers and super_admins
+  // own a TEAM of counsellors, they don't directly carry leads in their
+  // queue. Saved rule configs sometimes drift (admin pastes manager UUIDs
+  // into target_users, a counsellor gets promoted to manager, etc.); we
+  // refuse to honour those entries instead of silently corrupting
+  // assigned_to. Same query is the implicit pool when target_users is
+  // empty, so both paths produce a valid set of counsellors.
+  if (candidates.length) {
+    const { rows: validRows } = await tenantQuery(
+      tenant,
+      `SELECT id FROM users
+        WHERE id = ANY($1::uuid[])
+          AND role = 'counsellor'
+          AND is_active = true
+          AND deleted_at IS NULL`,
+      [candidates],
+    );
+    const valid = new Set(validRows.map((u) => u.id));
+    // Preserve the rule's intended order (matters for round-robin
+    // determinism) while removing the non-counsellor entries.
+    const filtered = candidates.filter((id) => valid.has(id));
+    candidates.length = 0;
+    candidates.push(...filtered);
+  }
+
+  // No target team / no valid target_users → fall back to every active
   // counsellor in the tenant. This makes the auto-seeded "Default round-robin"
   // rule work out of the box without admins having to pick users first.
   if (!candidates.length) {

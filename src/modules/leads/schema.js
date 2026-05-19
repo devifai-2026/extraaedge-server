@@ -241,6 +241,14 @@ export const bulkActionSchema = z.object({
   params: z.record(z.string(), z.any()).default({}),
 });
 
+// Bulk delete: requires an explicit list of ids. We intentionally do NOT
+// accept a filter object here — bulk delete is destructive and we want the
+// caller to commit to a specific selection rather than "delete everything
+// matching this filter," which is too easy to misclick.
+export const bulkDeleteSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1, 'at least one lead id is required'),
+});
+
 export const bulkAssignSchema = z.object({
   lead_ids: z.array(z.string().uuid()).optional(),
   filter: z.object({
