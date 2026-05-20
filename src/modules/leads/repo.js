@@ -161,17 +161,32 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     );
   }
 
-  // Follow-up rows. Three shapes accepted:
-  //   { next_action_datetime, comment?, status?, slot_index? }
-  // Used by the manual-create form (one planned follow-up) and by bulk
-  // import to backfill the up-to-five past attempts (status='done',
-  // slot_index = 1..5 preserving CSV column order) plus the upcoming
-  // scheduled follow-up (status='planned', no slot_index).
+  // Follow-up rows. Per-stage 5-slot history: each row carries stage_id
+  // (required when slot_index is set) and optional sub_stage_id. Manual
+  // create form sends past slots (status='done', slot_index 1..5) and
+  // optionally one upcoming planned row. Bulk import sends the same
+  // shape from CSV columns.
   //
   // We deliberately do NOT de-duplicate by (datetime, comment). The product
   // rule is "store exactly what the user typed in each slot, even if two
   // slots are identical" so the slot order in the UI matches the CSV 1:1.
+  //
+  // is_success stages are rejected — no follow-up rows survive a Converted
+  // stage by policy.
   if (Array.isArray(input.followups) && input.followups.length) {
+    // Cache stage success-flags so we don't re-query for every row.
+    const stageSuccessCache = new Map();
+    const isSuccessStage = async (sId) => {
+      if (!sId) return false;
+      if (stageSuccessCache.has(sId)) return stageSuccessCache.get(sId);
+      const r = await client.query(`SELECT is_success FROM lead_stages WHERE id = $1`, [sId]);
+      const v = r.rows[0]?.is_success === true;
+      stageSuccessCache.set(sId, v);
+      return v;
+    };
+    // App-level uniqueness on (lead_id, stage_id, slot_index): later rows
+    // with the same key win — matches "user retyped this slot" intent.
+    const slotKeysSeen = new Set();
     for (const f of input.followups) {
       if (!f || !f.next_action_datetime) continue;
       const status = f.status ?? 'planned';
@@ -179,11 +194,21 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
       const slotIndex = Number.isInteger(f.slot_index) && f.slot_index >= 1 && f.slot_index <= 5
         ? f.slot_index
         : null;
+      const stageId = f.stage_id ?? null;
+      const subStageId = f.sub_stage_id ?? null;
+      if (slotIndex !== null && !stageId) continue; // slot rows must carry stage
+      if (await isSuccessStage(stageId)) continue;  // Converted stages own no followups
+      if (slotIndex !== null) {
+        const k = `${stageId}|${slotIndex}`;
+        if (slotKeysSeen.has(k)) continue;
+        slotKeysSeen.add(k);
+      }
       await client.query(
         `INSERT INTO lead_followups
             (lead_id, next_action_datetime, comment, status, created_by,
-             completed_at, completed_by, slot_index, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, now()), COALESCE($9, now()))`,
+             completed_at, completed_by, slot_index, stage_id, sub_stage_id,
+             created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), COALESCE($11, now()))`,
         [
           lead.id,
           f.next_action_datetime,
@@ -193,6 +218,8 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
           completed_at,
           completed_at ? (created_by ?? null) : null,
           slotIndex,
+          stageId,
+          subStageId,
           // Backdate created_at of past attempts to the action date itself so
           // any consumer that sorts by created_at still gets a reasonable
           // chronological view. Slot-order callers should sort by slot_index
@@ -262,10 +289,11 @@ export const findByIdWithRelations = async (tenant, id) => {
     //     (slot_index NULL) we still want most-recent first.
     tenantQuery(tenant, `
       SELECT id, next_action_datetime, comment, status, completed_at,
-             slot_index, created_at, updated_at
+             completion_reason, slot_index, stage_id, sub_stage_id,
+             created_at, updated_at
         FROM lead_followups
        WHERE lead_id = $1 AND deleted_at IS NULL
-       ORDER BY slot_index ASC NULLS LAST, next_action_datetime DESC
+       ORDER BY stage_id NULLS LAST, slot_index ASC NULLS LAST, next_action_datetime DESC
     `, [id]),
   ]);
   const custom_values = {};
@@ -283,6 +311,17 @@ export const findByIdWithRelations = async (tenant, id) => {
   const allFollowups = followupsRes.rows;
   const upcoming_followups = allFollowups.filter((f) => f.status === 'planned');
   const past_followups = allFollowups.filter((f) => f.status !== 'planned');
+  // Per-stage 5-slot grouping for the FE form. Only stage-scoped slot rows
+  // (slot_index 1..5, stage_id set) participate; ad-hoc rows stay flat in
+  // `followups` / `past_followups`. Each stage gets a 5-element array;
+  // missing slots are null so the FE can render fixed-width grids.
+  const followups_by_stage = {};
+  for (const f of allFollowups) {
+    if (!f.stage_id || !Number.isInteger(f.slot_index)) continue;
+    if (f.slot_index < 1 || f.slot_index > 5) continue;
+    if (!followups_by_stage[f.stage_id]) followups_by_stage[f.stage_id] = [null, null, null, null, null];
+    followups_by_stage[f.stage_id][f.slot_index - 1] = f;
+  }
   return {
     ...base,
     family: family.rows[0] ?? null,
@@ -296,6 +335,7 @@ export const findByIdWithRelations = async (tenant, id) => {
     followups: allFollowups,
     upcoming_followups,
     past_followups,
+    followups_by_stage,
   };
 };
 
@@ -379,6 +419,89 @@ export const updateLead = async (tenant, id, updates) => tenantTx(tenant, async 
 export const softDelete = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE leads SET deleted_at = now() WHERE id = $1`, [id]);
 };
+
+// Replace the 5 slot rows for a single (lead, stage). Non-destructive:
+// rows that no longer appear in the input are soft-deleted (deleted_at set),
+// never physically removed; existing rows for the same (lead, stage, slot)
+// are UPDATE-d in place so their id stays stable.
+//
+// Input shape: rows = [{ slot_index: 1..5, next_action_datetime, comment?,
+// sub_stage_id?, status? }, ...]. Rows without a datetime are ignored.
+//
+// Rejects entirely if the stage is is_success — Converted stages own no
+// followups.
+export const replaceFollowupsForStage = async (tenant, lead_id, stage_id, rows, actor_id) =>
+  tenantTx(tenant, async (client) => {
+    if (!lead_id || !stage_id) return { written: 0 };
+    const { rows: stageRow } = await client.query(
+      `SELECT is_success FROM lead_stages WHERE id = $1`,
+      [stage_id],
+    );
+    if (stageRow[0]?.is_success) return { written: 0, skipped_reason: 'is_success_stage' };
+
+    const incomingBySlot = new Map();
+    for (const r of rows || []) {
+      if (!r?.next_action_datetime) continue;
+      const slot = Number.isInteger(r.slot_index) && r.slot_index >= 1 && r.slot_index <= 5
+        ? r.slot_index : null;
+      if (slot === null) continue;
+      incomingBySlot.set(slot, r);
+    }
+
+    const { rows: existing } = await client.query(
+      `SELECT id, slot_index FROM lead_followups
+        WHERE lead_id = $1 AND stage_id = $2 AND slot_index IS NOT NULL
+          AND deleted_at IS NULL`,
+      [lead_id, stage_id],
+    );
+    const existingBySlot = new Map(existing.map((e) => [e.slot_index, e.id]));
+
+    // Soft-delete slot rows not present in the new payload.
+    for (const [slot, existingId] of existingBySlot) {
+      if (!incomingBySlot.has(slot)) {
+        await client.query(
+          `UPDATE lead_followups SET deleted_at = now(), updated_at = now()
+            WHERE id = $1 AND deleted_at IS NULL`,
+          [existingId],
+        );
+      }
+    }
+
+    let written = 0;
+    for (const [slot, r] of incomingBySlot) {
+      const status = r.status ?? 'done';
+      const completedAt = status === 'done' ? r.next_action_datetime : null;
+      const subStageId = r.sub_stage_id ?? null;
+      const existingId = existingBySlot.get(slot);
+      if (existingId) {
+        await client.query(
+          `UPDATE lead_followups
+              SET next_action_datetime = $1,
+                  comment = $2,
+                  status = $3,
+                  sub_stage_id = $4,
+                  completed_at = $5,
+                  completed_by = COALESCE(completed_by, $6),
+                  updated_at = now()
+            WHERE id = $7`,
+          [r.next_action_datetime, r.comment ?? null, status, subStageId,
+           completedAt, completedAt ? actor_id ?? null : null, existingId],
+        );
+      } else {
+        await client.query(
+          `INSERT INTO lead_followups
+              (lead_id, next_action_datetime, comment, status, created_by,
+               completed_at, completed_by, slot_index, stage_id, sub_stage_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [lead_id, r.next_action_datetime, r.comment ?? null, status,
+           actor_id ?? null, completedAt,
+           completedAt ? actor_id ?? null : null, slot, stage_id, subStageId],
+        );
+      }
+      written += 1;
+    }
+    return { written };
+  });
 
 // Hard-delete: physically remove the lead row. Foreign-key cascades clean up
 // lead_family / lead_source_attributions / lead_custom_values / lead_tags /

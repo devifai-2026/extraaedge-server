@@ -57,6 +57,7 @@ import auditLogRouter from './modules/audit-log/routes.js';
 import analyticsRouter from './modules/analytics/routes.js';
 import reportsRouter from './modules/reports/routes.js';
 import workSessionsRouter from './modules/work-sessions/routes.js';
+import admissionsRouter from './modules/admissions/routes.js';
 
 // ---- Pending modules (wired as these passes complete) ----
 // Pass 7: follow-ups, quick-add
@@ -150,6 +151,9 @@ export const mountRoutes = (app) => {
   api.use('/analytics', analyticsRouter);
   api.use('/reports', reportsRouter);
   api.use('/work-sessions', workSessionsRouter);
+
+  // Accounts / admissions module (account_manager + super_admin)
+  api.use('/admissions', admissionsRouter);
 
   app.use('/api/v1', api);
 };

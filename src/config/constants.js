@@ -149,4 +149,17 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'third_party_integration',
   'reports',
   'analytics',
+  // Accounts module (account_manager role). These show up in the
+  // super_admin's "tab permissions" matrix so the role assignments can
+  // be tuned per tenant without a code deploy.
+  'accounts.dashboard',
+  'accounts.pending_admissions',
+  'accounts.this_month_admissions',
+  'accounts.total_admissions',
+  'accounts.approvals',
+  'accounts.attendings',
+  'accounts.break',
+  'accounts.report',
+  'accounts.pay_schedule',
+  'accounts.collection_receipt_wise',
 ]);

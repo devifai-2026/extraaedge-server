@@ -94,13 +94,18 @@ const leadBaseSchema = z.object({
   created_at: z.preprocess(blankToUndef, z.coerce.date().optional()),
   updated_at: z.preprocess(blankToUndef, z.coerce.date().optional()),
 
-  // Follow-up rows to insert alongside the lead. The 5-slot CSV-parity
-  // history maps to up to 5 entries with status='done'; the active upcoming
-  // follow-up maps to one entry with status='planned'.
+  // Follow-up rows to insert alongside the lead. Each row is scoped to a
+  // stage: per-stage 5-slot history (status='done', slot_index 1..5) plus
+  // optional planned rows. stage_id is required for any slot row; ad-hoc
+  // (slot_index null) rows may omit it. sub_stage_id is optional and
+  // typically captured via the review modal on save.
   followups: z.array(z.object({
     next_action_datetime: z.coerce.date(),
     comment: z.string().optional().nullable(),
     status: z.enum(['planned', 'done', 'missed', 'cancelled']).optional(),
+    stage_id: z.string().uuid().optional(),
+    sub_stage_id: z.string().uuid().optional().nullable(),
+    slot_index: z.number().int().min(1).max(5).optional().nullable(),
   })).optional(),
 });
 

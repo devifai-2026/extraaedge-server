@@ -4,6 +4,24 @@ import { tenantQuery } from '../../db/tenant.js';
 import { notifyUser } from '../../lib/socket.js';
 import { logger } from '../../lib/logger.js';
 
+// Drop any tab_permissions entry that doesn't apply to the role's scope.
+// Mirrors isTabApplicable() in the FE editor — the FE disables those
+// rows, this is the server-side guarantee that nobody can sneak them in
+// via a direct API call.
+//
+// Rule: account_manager scope → only 'accounts.*' tabs allowed. Every
+// other scope → any tab EXCEPT 'accounts.*'.
+const sanitizeTabPermissions = (scope, tabPermissions) => {
+  if (!tabPermissions || typeof tabPermissions !== 'object') return tabPermissions;
+  const out = {};
+  for (const [k, v] of Object.entries(tabPermissions)) {
+    const isAccounts = k.startsWith('accounts.');
+    const applicable = scope === 'account_manager' ? isAccounts : !isAccounts;
+    if (applicable) out[k] = v;
+  }
+  return out;
+};
+
 export const listRoles = (tenant) => repo.list(tenant);
 
 export const getRole = async (tenant, id) => {
@@ -14,7 +32,11 @@ export const getRole = async (tenant, id) => {
 
 export const createRole = async (tenant, input) => {
   if (await repo.findByName(tenant, input.name)) throw conflict('Role name already exists');
-  return repo.insert(tenant, input);
+  const sanitized = {
+    ...input,
+    tab_permissions: sanitizeTabPermissions(input.scope, input.tab_permissions),
+  };
+  return repo.insert(tenant, sanitized);
 };
 
 export const updateRole = async (tenant, id, updates) => {
@@ -30,6 +52,12 @@ export const updateRole = async (tenant, id, updates) => {
     if (clash) throw conflict('Role name already exists');
   }
   delete updates.is_system;
+  // Sanitize tab_permissions against the role's scope (unchanged on edit
+  // for system roles, or whatever updates.scope was for user-defined ones).
+  if (updates.tab_permissions !== undefined) {
+    const effectiveScope = updates.scope ?? role.scope;
+    updates.tab_permissions = sanitizeTabPermissions(effectiveScope, updates.tab_permissions);
+  }
   const updated = await repo.update(tenant, id, updates);
 
   // If tab_permissions changed, push a refresh signal to every active user

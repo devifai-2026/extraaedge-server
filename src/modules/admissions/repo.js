@@ -1,0 +1,676 @@
+import { tenantQuery, tenantTx } from '../../db/tenant.js';
+
+// ---------- Centers --------------------------------------------------------
+
+export const listCenters = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, name, address, is_active, sort_order, created_at, updated_at
+       FROM admission_centers
+      WHERE deleted_at IS NULL
+      ORDER BY sort_order ASC, name ASC`,
+  );
+  return rows;
+};
+
+export const findCenter = async (tenant, id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT * FROM admission_centers WHERE id = $1 AND deleted_at IS NULL`,
+    [id],
+  );
+  return rows[0] || null;
+};
+
+export const insertCenter = async (tenant, input) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO admission_centers (name, address, is_active, sort_order)
+     VALUES ($1, $2, COALESCE($3, true), COALESCE($4, 0))
+     RETURNING *`,
+    [input.name, input.address ?? null, input.is_active, input.sort_order],
+  );
+  return rows[0];
+};
+
+export const updateCenter = async (tenant, id, patch) => {
+  const fields = [];
+  const params = [];
+  let i = 1;
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) continue;
+    fields.push(`${k} = $${i}`);
+    params.push(v);
+    i += 1;
+  }
+  if (!fields.length) return findCenter(tenant, id);
+  params.push(id);
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE admission_centers SET ${fields.join(', ')}, updated_at = now()
+      WHERE id = $${i} AND deleted_at IS NULL
+      RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
+};
+
+export const softDeleteCenter = async (tenant, id) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE admission_centers SET deleted_at = now(), updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL`,
+    [id],
+  );
+};
+
+// ---------- Admissions ----------------------------------------------------
+
+const ADMISSION_COLS = `
+  a.id, a.lead_id, a.admission_date,
+  a.first_name, a.middle_name, a.last_name,
+  a.email, a.whatsapp_number, a.alternate_contact, a.address,
+  a.program_id, a.mode_of_training, a.center_id,
+  a.total_fees, a.mode_of_payment,
+  a.status, a.break_reason,
+  a.selfie_r2_key, a.photo_r2_key,
+  a.guided_by_counsellor_id, a.guided_by_manager_id, a.source,
+  a.created_by, a.approved_by, a.approved_at,
+  a.created_at, a.updated_at
+`;
+
+const ADMISSION_JOINS = `
+  LEFT JOIN programs        p   ON p.id   = a.program_id
+  LEFT JOIN admission_centers c ON c.id   = a.center_id
+  LEFT JOIN users           u1  ON u1.id  = a.guided_by_counsellor_id
+  LEFT JOIN users           u2  ON u2.id  = a.guided_by_manager_id
+`;
+
+const ADMISSION_NAMED_COLS = `
+  p.name AS program_name,
+  c.name AS center_name,
+  u1.name AS guided_by_counsellor_name,
+  u2.name AS guided_by_manager_name
+`;
+
+export const list = async (tenant, q = {}) => {
+  const conds = ['a.deleted_at IS NULL'];
+  const params = [];
+  if (q.status) { params.push(q.status); conds.push(`a.status = $${params.length}`); }
+  if (q.program_id) { params.push(q.program_id); conds.push(`a.program_id = $${params.length}`); }
+  if (q.center_id) { params.push(q.center_id); conds.push(`a.center_id = $${params.length}`); }
+  if (q.date_from) { params.push(q.date_from); conds.push(`a.admission_date >= $${params.length}`); }
+  if (q.date_to) { params.push(q.date_to); conds.push(`a.admission_date <= $${params.length}`); }
+  if (q.month) {
+    // YYYY-MM → first day of month, < first day of next month
+    const [y, m] = q.month.split('-').map(Number);
+    const start = `${y}-${String(m).padStart(2, '0')}-01`;
+    const nextY = m === 12 ? y + 1 : y;
+    const nextM = m === 12 ? 1 : m + 1;
+    const end = `${nextY}-${String(nextM).padStart(2, '0')}-01`;
+    params.push(start); conds.push(`a.admission_date >= $${params.length}`);
+    params.push(end);   conds.push(`a.admission_date < $${params.length}`);
+  }
+  if (q.q) {
+    params.push(`%${q.q}%`);
+    conds.push(`(a.first_name ILIKE $${params.length} OR a.last_name ILIKE $${params.length} OR a.email ILIKE $${params.length} OR a.whatsapp_number ILIKE $${params.length})`);
+  }
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const page = q.page || 1;
+  const limit = q.limit || 50;
+  const offset = (page - 1) * limit;
+  params.push(limit, offset);
+  const [{ rows }, { rows: countRows }] = await Promise.all([
+    tenantQuery(
+      tenant,
+      `SELECT ${ADMISSION_COLS}, ${ADMISSION_NAMED_COLS}
+         FROM admissions a ${ADMISSION_JOINS}
+         ${where}
+         ORDER BY a.admission_date DESC, a.created_at DESC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    ),
+    tenantQuery(tenant, `SELECT count(*)::int AS total FROM admissions a ${where}`, params.slice(0, -2)),
+  ]);
+  return { rows, total: countRows[0].total };
+};
+
+export const findById = async (tenant, id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT ${ADMISSION_COLS}, ${ADMISSION_NAMED_COLS}
+       FROM admissions a ${ADMISSION_JOINS}
+      WHERE a.id = $1 AND a.deleted_at IS NULL`,
+    [id],
+  );
+  return rows[0] || null;
+};
+
+export const findByIdWithRelations = async (tenant, id) => {
+  const adm = await findById(tenant, id);
+  if (!adm) return null;
+  const [edu, fees, receipts] = await Promise.all([
+    tenantQuery(tenant, `SELECT * FROM admission_education WHERE admission_id = $1 ORDER BY sort_order, created_at`, [id]),
+    tenantQuery(tenant, `SELECT * FROM admission_fee_schedule WHERE admission_id = $1 ORDER BY installment_no`, [id]),
+    tenantQuery(tenant, `SELECT * FROM admission_receipts WHERE admission_id = $1 AND deleted_at IS NULL ORDER BY receipt_date DESC, created_at DESC`, [id]),
+  ]);
+  // Aggregate the money side so the FE doesn't have to.
+  const paid_till_date = receipts.rows.reduce((s, r) => s + Number(r.amount || 0), 0);
+  return {
+    ...adm,
+    education: edu.rows,
+    fee_schedule: fees.rows,
+    receipts: receipts.rows,
+    paid_till_date,
+    pending_fees: Number(adm.total_fees || 0) - paid_till_date,
+  };
+};
+
+export const insert = async (tenant, input, created_by) =>
+  tenantTx(tenant, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO admissions
+         (lead_id, admission_date, first_name, middle_name, last_name, email,
+          whatsapp_number, alternate_contact, address, program_id, mode_of_training,
+          center_id, total_fees, mode_of_payment, status,
+          selfie_r2_key, photo_r2_key,
+          guided_by_counsellor_id, guided_by_manager_id, source,
+          created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+       RETURNING *`,
+      [
+        input.lead_id ?? null,
+        input.admission_date,
+        input.first_name,
+        input.middle_name ?? null,
+        input.last_name ?? null,
+        input.email ?? null,
+        input.whatsapp_number,
+        input.alternate_contact ?? null,
+        input.address ?? null,
+        input.program_id ?? null,
+        input.mode_of_training,
+        input.center_id ?? null,
+        input.total_fees ?? 0,
+        input.mode_of_payment ?? null,
+        input.status ?? 'pending_approval',
+        input.selfie_r2_key ?? null,
+        input.photo_r2_key ?? null,
+        input.guided_by_counsellor_id ?? null,
+        input.guided_by_manager_id ?? null,
+        input.source ?? null,
+        created_by ?? null,
+      ],
+    );
+    const admission = rows[0];
+
+    if (Array.isArray(input.education) && input.education.length) {
+      for (let i = 0; i < input.education.length; i += 1) {
+        const e = input.education[i];
+        await client.query(
+          `INSERT INTO admission_education
+             (admission_id, examination, stream, college_name, board_university,
+              year_of_passing, percentage, sort_order)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [admission.id, e.examination, e.stream ?? null, e.college_name ?? null,
+           e.board_university ?? null, e.year_of_passing ?? null, e.percentage ?? null, i],
+        );
+      }
+    }
+    if (Array.isArray(input.fee_schedule) && input.fee_schedule.length) {
+      for (const fs of input.fee_schedule) {
+        await client.query(
+          `INSERT INTO admission_fee_schedule (admission_id, installment_no, due_date, amount)
+           VALUES ($1,$2,$3,$4)`,
+          [admission.id, fs.installment_no, fs.due_date, fs.amount],
+        );
+      }
+    }
+    return admission;
+  });
+
+export const updateRow = async (tenant, id, patch) =>
+  tenantTx(tenant, async (client) => {
+    const { education, fee_schedule, ...scalar } = patch;
+    const fields = [];
+    const params = [];
+    let i = 1;
+    for (const [k, v] of Object.entries(scalar)) {
+      if (v === undefined) continue;
+      fields.push(`${k} = $${i}`);
+      params.push(v);
+      i += 1;
+    }
+    if (fields.length) {
+      params.push(id);
+      await client.query(
+        `UPDATE admissions SET ${fields.join(', ')}, updated_at = now()
+          WHERE id = $${i} AND deleted_at IS NULL`,
+        params,
+      );
+    }
+    if (Array.isArray(education)) {
+      // Replace strategy — wipe existing, re-insert. Cheap because N<=4.
+      await client.query(`DELETE FROM admission_education WHERE admission_id = $1`, [id]);
+      for (let n = 0; n < education.length; n += 1) {
+        const e = education[n];
+        await client.query(
+          `INSERT INTO admission_education
+             (admission_id, examination, stream, college_name, board_university,
+              year_of_passing, percentage, sort_order)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [id, e.examination, e.stream ?? null, e.college_name ?? null,
+           e.board_university ?? null, e.year_of_passing ?? null, e.percentage ?? null, n],
+        );
+      }
+    }
+    if (Array.isArray(fee_schedule)) {
+      await client.query(`DELETE FROM admission_fee_schedule WHERE admission_id = $1`, [id]);
+      for (const fs of fee_schedule) {
+        await client.query(
+          `INSERT INTO admission_fee_schedule (admission_id, installment_no, due_date, amount)
+           VALUES ($1,$2,$3,$4)`,
+          [id, fs.installment_no, fs.due_date, fs.amount],
+        );
+      }
+    }
+    return findById(tenant, id);
+  });
+
+export const softDelete = async (tenant, id) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE admissions SET deleted_at = now(), updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL`,
+    [id],
+  );
+};
+
+export const approve = async (tenant, id, user_id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE admissions
+        SET status = 'attending',
+            approved_by = $2,
+            approved_at = now(),
+            updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL AND status = 'pending_approval'
+      RETURNING *`,
+    [id, user_id],
+  );
+  return rows[0] || null;
+};
+
+export const setStatus = async (tenant, id, status, extra = {}) => {
+  const params = [id, status];
+  let extraSql = '';
+  if (status === 'on_break' && extra.break_reason) {
+    params.push(extra.break_reason);
+    extraSql = `, break_reason = $${params.length}`;
+  }
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE admissions SET status = $2 ${extraSql}, updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
+};
+
+// ---------- Receipts ------------------------------------------------------
+
+export const listReceipts = async (tenant, q = {}) => {
+  const conds = ['r.deleted_at IS NULL'];
+  const params = [];
+  if (q.date_from) { params.push(q.date_from); conds.push(`r.receipt_date >= $${params.length}`); }
+  if (q.date_to)   { params.push(q.date_to);   conds.push(`r.receipt_date <= $${params.length}`); }
+  if (q.program_id) {
+    params.push(q.program_id);
+    conds.push(`a.program_id = $${params.length}`);
+  }
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT r.*, a.first_name, a.last_name, a.email, a.whatsapp_number,
+            p.name AS program_name
+       FROM admission_receipts r
+       JOIN admissions a ON a.id = r.admission_id
+       LEFT JOIN programs p ON p.id = a.program_id
+       ${where}
+       ORDER BY r.receipt_date DESC, r.created_at DESC`,
+    params,
+  );
+  return rows;
+};
+
+export const insertReceipt = async (tenant, admission_id, input, created_by) => {
+  // Auto-generate receipt_no if not supplied: RC-YYYYMMDD-<seq>
+  let receipt_no = input.receipt_no;
+  if (!receipt_no) {
+    const today = new Date();
+    const stamp = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+    const { rows: c } = await tenantQuery(
+      tenant,
+      `SELECT count(*)::int AS n FROM admission_receipts
+        WHERE receipt_no LIKE $1 AND deleted_at IS NULL`,
+      [`RC-${stamp}-%`],
+    );
+    receipt_no = `RC-${stamp}-${String((c[0]?.n || 0) + 1).padStart(4, '0')}`;
+  }
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO admission_receipts
+       (admission_id, receipt_no, receipt_date, amount, mode_of_payment,
+        transaction_details, is_old_collection, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     RETURNING *`,
+    [admission_id, receipt_no, input.receipt_date, input.amount, input.mode_of_payment,
+     input.transaction_details ?? null, input.is_old_collection ?? false, created_by ?? null],
+  );
+  return rows[0];
+};
+
+export const deleteReceipt = async (tenant, id) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE admission_receipts SET deleted_at = now(), updated_at = now() WHERE id = $1`,
+    [id],
+  );
+};
+
+// ---------- Reports -------------------------------------------------------
+
+// Pay-schedule report. For each admission active in the date window, compute
+// total_fees / paid_till_date / pending / due-this-month / next-due-date.
+export const paySchedule = async (tenant, q = {}) => {
+  const conds = [`a.deleted_at IS NULL`, `a.status IN ('attending', 'on_break')`];
+  const params = [];
+  if (q.date_from) { params.push(q.date_from); conds.push(`a.admission_date >= $${params.length}`); }
+  if (q.date_to)   { params.push(q.date_to);   conds.push(`a.admission_date <= $${params.length}`); }
+  if (q.program_id) { params.push(q.program_id); conds.push(`a.program_id = $${params.length}`); }
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const { rows } = await tenantQuery(
+    tenant,
+    `WITH paid AS (
+       SELECT admission_id,
+              COALESCE(SUM(amount) FILTER (WHERE deleted_at IS NULL), 0) AS paid,
+              COALESCE(SUM(amount) FILTER (WHERE deleted_at IS NULL AND is_old_collection), 0) AS old_paid,
+              COALESCE(SUM(amount) FILTER (WHERE deleted_at IS NULL AND NOT is_old_collection), 0) AS new_paid
+         FROM admission_receipts
+        GROUP BY admission_id
+     ), next_due AS (
+       SELECT DISTINCT ON (admission_id) admission_id, due_date, amount
+         FROM admission_fee_schedule
+        WHERE due_date >= CURRENT_DATE
+        ORDER BY admission_id, due_date ASC
+     ), this_month AS (
+       SELECT admission_id, COALESCE(SUM(amount), 0) AS due_this_month
+         FROM admission_fee_schedule
+        WHERE due_date >= date_trunc('month', CURRENT_DATE)
+          AND due_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+        GROUP BY admission_id
+     )
+     SELECT a.id, a.first_name, a.last_name, a.whatsapp_number, a.alternate_contact,
+            a.admission_date, a.status, a.total_fees,
+            p.name AS course,
+            COALESCE(paid.paid, 0) AS paid_till_date,
+            COALESCE(paid.old_paid, 0) AS old_paid,
+            COALESCE(paid.new_paid, 0) AS new_paid,
+            (a.total_fees - COALESCE(paid.paid, 0)) AS pending_fees,
+            COALESCE(tm.due_this_month, 0) AS due_this_month,
+            nd.due_date AS next_due_date
+       FROM admissions a
+       LEFT JOIN programs p   ON p.id = a.program_id
+       LEFT JOIN paid         ON paid.admission_id = a.id
+       LEFT JOIN next_due nd  ON nd.admission_id   = a.id
+       LEFT JOIN this_month tm ON tm.admission_id  = a.id
+       ${where}
+       ORDER BY a.admission_date DESC`,
+    params,
+  );
+  // Totals strip the FE shows above the table.
+  const totals = rows.reduce(
+    (acc, r) => {
+      acc.due_this_month += Number(r.due_this_month || 0);
+      acc.collection_received += Number(r.paid_till_date || 0);
+      acc.old += Number(r.old_paid || 0);
+      acc.new += Number(r.new_paid || 0);
+      return acc;
+    },
+    { due_this_month: 0, collection_received: 0, old: 0, new: 0 },
+  );
+  return { rows, totals };
+};
+
+export const collectionReceiptWise = async (tenant, q = {}) => {
+  const conds = [`r.deleted_at IS NULL`];
+  const params = [];
+  if (q.date_from) { params.push(q.date_from); conds.push(`r.receipt_date >= $${params.length}`); }
+  if (q.date_to)   { params.push(q.date_to);   conds.push(`r.receipt_date <= $${params.length}`); }
+  if (q.program_id) {
+    params.push(q.program_id);
+    conds.push(`a.program_id = $${params.length}`);
+  }
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT r.id, r.receipt_no, r.receipt_date, r.amount, r.mode_of_payment,
+            r.transaction_details, r.is_old_collection,
+            a.first_name, a.last_name,
+            p.name AS course
+       FROM admission_receipts r
+       JOIN admissions a ON a.id = r.admission_id
+       LEFT JOIN programs p ON p.id = a.program_id
+       ${where}
+       ORDER BY r.receipt_date DESC, r.created_at DESC`,
+    params,
+  );
+  const totals = rows.reduce(
+    (acc, r) => {
+      acc.total += Number(r.amount || 0);
+      if (r.is_old_collection) acc.old += Number(r.amount || 0);
+      else acc.new += Number(r.amount || 0);
+      return acc;
+    },
+    { total: 0, old: 0, new: 0 },
+  );
+  return { rows, totals };
+};
+
+// ---------- Pending admissions queue ----------
+// "Pending" = converted-but-not-yet-fully-onboarded. Two sources:
+//   1. Leads with converted_at IS NOT NULL that have NO admissions row
+//      → the auto-stub failed, OR conversion happened before the
+//      admissions module existed. UI shows them with stage='lead'.
+//   2. Admissions in 'pending_approval' status → the stub exists but
+//      accounts hasn't filled the full form / verified yet.
+// Unified into one ranked list newest-first so accounts has a single
+// queue to chew through.
+export const pendingAdmissions = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `WITH unified AS (
+       -- Source 1: leads converted but with no admission row
+       SELECT
+         l.id                AS source_id,
+         'lead'              AS source_kind,
+         NULL::uuid          AS admission_id,
+         l.id                AS lead_id,
+         l.name              AS student_name,
+         l.email             AS email,
+         l.whatsapp_number   AS whatsapp_number,
+         p.name              AS program_name,
+         l.converted_at      AS event_at,
+         l.assigned_to       AS owner_id,
+         u.name              AS owner_name
+       FROM leads l
+       LEFT JOIN programs p ON p.id = l.program_id
+       LEFT JOIN users u    ON u.id = l.assigned_to
+       WHERE l.converted_at IS NOT NULL
+         AND l.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM admissions a
+            WHERE a.lead_id = l.id AND a.deleted_at IS NULL
+         )
+
+       UNION ALL
+
+       -- Source 2: admissions in pending_approval (stub exists, accounts to verify)
+       SELECT
+         a.id                AS source_id,
+         'admission'         AS source_kind,
+         a.id                AS admission_id,
+         a.lead_id           AS lead_id,
+         COALESCE(NULLIF(TRIM(a.first_name || ' ' || COALESCE(a.last_name, '')), ''), a.email) AS student_name,
+         a.email             AS email,
+         a.whatsapp_number   AS whatsapp_number,
+         p.name              AS program_name,
+         a.created_at        AS event_at,
+         a.guided_by_counsellor_id AS owner_id,
+         u.name              AS owner_name
+       FROM admissions a
+       LEFT JOIN programs p ON p.id = a.program_id
+       LEFT JOIN users u    ON u.id = a.guided_by_counsellor_id
+       WHERE a.deleted_at IS NULL
+         AND a.status = 'pending_approval'
+     )
+     SELECT * FROM unified ORDER BY event_at DESC NULLS LAST`,
+  );
+  return rows;
+};
+
+// Lightweight count query for the sidebar badge — same WHERE shape as
+// pendingAdmissions() but skips the JOINs / column projection.
+export const pendingAdmissionsCount = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT
+       (SELECT count(*)::int FROM leads l
+         WHERE l.converted_at IS NOT NULL
+           AND l.deleted_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM admissions a WHERE a.lead_id = l.id AND a.deleted_at IS NULL))
+       +
+       (SELECT count(*)::int FROM admissions a
+         WHERE a.deleted_at IS NULL AND a.status = 'pending_approval')
+       AS pending`,
+  );
+  return rows[0]?.pending || 0;
+};
+
+// ---------- Charts ----------
+// Daily admissions count over the last `days` days. Returns
+// [{ day: 'YYYY-MM-DD', count: int }] padded so missing days show 0.
+export const admissionsTrend = async (tenant, days = 30) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `WITH range AS (
+       SELECT generate_series(
+         CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day',
+         CURRENT_DATE,
+         INTERVAL '1 day'
+       )::date AS day
+     ), counts AS (
+       SELECT admission_date::date AS day, count(*)::int AS n
+         FROM admissions
+        WHERE deleted_at IS NULL
+          AND admission_date >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+        GROUP BY admission_date::date
+     )
+     SELECT to_char(r.day, 'YYYY-MM-DD') AS day, COALESCE(c.n, 0) AS count
+       FROM range r LEFT JOIN counts c ON c.day = r.day
+      ORDER BY r.day`,
+    [days],
+  );
+  return rows;
+};
+
+// Daily collection (sum of admission_receipts.amount) over the last N days.
+export const collectionTrend = async (tenant, days = 30) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `WITH range AS (
+       SELECT generate_series(
+         CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day',
+         CURRENT_DATE,
+         INTERVAL '1 day'
+       )::date AS day
+     ), sums AS (
+       SELECT receipt_date::date AS day, COALESCE(SUM(amount), 0)::float AS amt
+         FROM admission_receipts
+        WHERE deleted_at IS NULL
+          AND receipt_date >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+        GROUP BY receipt_date::date
+     )
+     SELECT to_char(r.day, 'YYYY-MM-DD') AS day, COALESCE(s.amt, 0)::float AS amount
+       FROM range r LEFT JOIN sums s ON s.day = r.day
+      ORDER BY r.day`,
+    [days],
+  );
+  return rows;
+};
+
+// Pie / donut: count by status (excludes soft-deleted).
+export const statusBreakdown = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT status, count(*)::int AS n
+       FROM admissions WHERE deleted_at IS NULL
+      GROUP BY status
+      ORDER BY status`,
+  );
+  return rows;
+};
+
+// Bar: this month's admissions per program. Top 10 to keep the chart legible.
+export const courseBreakdown = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT COALESCE(p.name, 'Unassigned') AS course, count(*)::int AS n
+       FROM admissions a
+       LEFT JOIN programs p ON p.id = a.program_id
+      WHERE a.deleted_at IS NULL
+        AND a.admission_date >= date_trunc('month', CURRENT_DATE)
+        AND a.admission_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+      GROUP BY p.name
+      ORDER BY n DESC
+      LIMIT 10`,
+  );
+  return rows;
+};
+
+export const dashboard = async (tenant) => {
+  // Single fan-out query so the FE renders the dashboard with one round-trip.
+  const [counts, monthCounts, monthMoney] = await Promise.all([
+    tenantQuery(
+      tenant,
+      `SELECT status, count(*)::int AS n
+         FROM admissions WHERE deleted_at IS NULL
+        GROUP BY status`,
+    ),
+    tenantQuery(
+      tenant,
+      `SELECT count(*)::int AS n
+         FROM admissions
+        WHERE deleted_at IS NULL
+          AND admission_date >= date_trunc('month', CURRENT_DATE)
+          AND admission_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
+    ),
+    tenantQuery(
+      tenant,
+      `SELECT COALESCE(SUM(amount), 0)::float AS month_collection
+         FROM admission_receipts
+        WHERE deleted_at IS NULL
+          AND receipt_date >= date_trunc('month', CURRENT_DATE)
+          AND receipt_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
+    ),
+  ]);
+  const byStatus = Object.fromEntries(counts.rows.map((r) => [r.status, r.n]));
+  return {
+    by_status: byStatus,
+    this_month_admissions: monthCounts.rows[0].n,
+    this_month_collection: monthMoney.rows[0].month_collection,
+    pending_approval: byStatus.pending_approval || 0,
+    attending: byStatus.attending || 0,
+    on_break: byStatus.on_break || 0,
+  };
+};

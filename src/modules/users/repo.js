@@ -146,6 +146,30 @@ export const getUpdatedAt = async (tenant, id) => {
   return rows[0]?.updated_at ?? null;
 };
 
+// Walk the reporting chain UPWARD from a user: returns every manager_id
+// above them, plus all super_admins as a final "umbrella" layer. Used by
+// follow-up cancellation notifications so the full org sees the action.
+// The returned array does NOT include the user themselves.
+export const managerChain = async (tenant, user_id) => {
+  if (!user_id) return [];
+  const { rows } = await tenantQuery(
+    tenant,
+    `WITH RECURSIVE chain AS (
+       SELECT manager_id AS id FROM users
+        WHERE id = $1 AND deleted_at IS NULL AND manager_id IS NOT NULL
+       UNION
+       SELECT u.manager_id FROM users u JOIN chain c ON u.id = c.id
+        WHERE u.deleted_at IS NULL AND u.manager_id IS NOT NULL
+     )
+     SELECT id FROM chain WHERE id IS NOT NULL
+     UNION
+     SELECT id FROM users
+      WHERE role = 'super_admin' AND deleted_at IS NULL AND is_active = true`,
+    [user_id],
+  );
+  return rows.map((r) => r.id);
+};
+
 // Recursive CTE for my-team (manager hierarchy).
 export const teamHierarchy = async (tenant, root_user_id) => {
   const { rows } = await tenantQuery(

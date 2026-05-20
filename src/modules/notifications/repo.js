@@ -37,3 +37,11 @@ export const markRead = async (tenant, user_id, id) => {
 export const markAllRead = async (tenant, user_id) => {
   await tenantQuery(tenant, `UPDATE notifications SET is_read = true WHERE user_id = $1 AND is_read = false`, [user_id]);
 };
+
+// Hard-delete every notification row for this user. Triggered from the
+// "Delete all" button in the bell popover (Live tab). Notification rows
+// are append-only audit, so wiping a user's own copy is safe — the
+// underlying lead activity row is untouched.
+export const deleteAll = async (tenant, user_id) => {
+  await tenantQuery(tenant, `DELETE FROM notifications WHERE user_id = $1`, [user_id]);
+};

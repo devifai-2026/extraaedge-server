@@ -359,7 +359,18 @@ const buildInsertPayload = (resolved) => {
   // Pass through sources[] if the resolver built one (channel/source/etc).
   if (resolved.sources) lead.sources = resolved.sources;
   // Pass through followups[] built by validateRow (past + upcoming).
-  if (resolved.followups) lead.followups = resolved.followups;
+  // Stamp each row with the resolved stage_id / sub_stage_id so per-stage
+  // slot scoping holds: slot rows MUST carry stage_id (DB CHECK), and
+  // we treat the row's resolved stage as the scope for all 5 slots.
+  // insertLead skips followups whose stage_id resolves to is_success,
+  // so Converted stages auto-drop their followups during import.
+  if (resolved.followups) {
+    lead.followups = resolved.followups.map((f) => ({
+      ...f,
+      stage_id: f.stage_id ?? resolved.stage_id ?? null,
+      sub_stage_id: f.sub_stage_id ?? resolved.sub_stage_id ?? null,
+    }));
+  }
   return lead;
 };
 

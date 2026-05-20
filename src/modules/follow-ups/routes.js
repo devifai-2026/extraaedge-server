@@ -10,6 +10,7 @@ import { isValidRRule } from '../../lib/rrule.js';
 import { publish } from '../../lib/queue.js';
 import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
+import { notifyChain } from '../../lib/socket.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -382,19 +383,39 @@ router.put(
   },
 );
 
-router.post('/:id/complete', validate({ params: idParam }), async (req, res, next) => {
+router.post(
+  '/:id/complete',
+  validate({
+    params: idParam,
+    body: z.object({ completion_reason: z.string().max(1000).optional() }).optional(),
+  }),
+  async (req, res, next) => {
   try {
+    const completionReason = req.body?.completion_reason?.trim() || null;
     const result = await tenantTx(req.tenant, async (client) => {
       const { rows } = await client.query(
         `UPDATE lead_followups
-            SET status = 'done', completed_at = now(), completed_by = $2
+            SET status = 'done',
+                completed_at = now(),
+                completed_by = $2,
+                completion_reason = $3,
+                updated_at = now()
           WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
-        [req.params.id, req.user.id],
+        [req.params.id, req.user.id, completionReason],
       );
       if (!rows[0]) throw notFound('Follow-up not found');
+      // Surface the reason on the timeline so leadership + the future-you
+      // can see WHY the follow-up was closed, not just that it was.
+      const summary = completionReason
+        ? `Follow-up completed — ${completionReason}`
+        : 'Follow-up completed';
       await client.query(
-        `INSERT INTO lead_activities (lead_id, user_id, type, summary) VALUES ($1,$2,'follow_up_completed',$3)`,
-        [rows[0].lead_id, req.user.id, 'Follow-up completed'],
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+         VALUES ($1, $2, 'follow_up_completed', $3, $4::jsonb)`,
+        [rows[0].lead_id, req.user.id, summary, JSON.stringify({
+          follow_up_id: rows[0].id,
+          completion_reason: completionReason,
+        })],
       );
       return rows[0];
     });
@@ -409,7 +430,8 @@ router.post('/:id/complete', validate({ params: idParam }), async (req, res, nex
     });
     res.json({ data: result, meta: { requestId: req.id } });
   } catch (err) { next(err); }
-});
+  },
+);
 
 router.post('/:id/reschedule', validate({ params: idParam, body: z.object({ next_action_datetime: z.coerce.date() }) }), async (req, res, next) => {
   try {
@@ -441,28 +463,46 @@ router.post('/:id/reschedule', validate({ params: idParam, body: z.object({ next
   } catch (err) { next(err); }
 });
 
-// Explicit cancel — open to all 3 tenant roles. We DON'T soft-delete
-// (DELETE /:id below still does that); cancelling sets status='cancelled'
-// but leaves the row visible so the timeline / reports still show that
-// a follow-up was scheduled-then-cancelled.
+// Explicit cancel — open to all 3 tenant roles. Sets status='cancelled'
+// but keeps the row alive (deleted_at = NULL) so list / calendar queries
+// still surface it under the "Cancelled" tab and the grey calendar dot.
+// Hard removal is the separate DELETE /:id route below.
+//
+// Notification: fans out up the full manager chain (direct manager →
+// grand-manager → … → super_admins) so leadership has visibility into
+// counsellors cancelling commitments.
 router.post('/:id/cancel', validate({ params: idParam, body: z.object({ reason: z.string().max(500).optional() }).optional() }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
       `UPDATE lead_followups
-          SET status = 'cancelled', completed_at = now(), completed_by = $2
+          SET status = 'cancelled',
+              completed_at = now(),
+              completed_by = $2,
+              updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL AND status IN ('planned', 'missed')
         RETURNING *`,
       [req.params.id, req.user.id],
     );
     if (!rows[0]) throw notFound('Follow-up not found or already finalised');
+    const followup = rows[0];
+    const reason = req.body?.reason?.trim() || null;
+    const summary = reason ? `Follow-up cancelled — ${reason}` : 'Follow-up cancelled';
     await tenantQuery(
       req.tenant,
       `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-       VALUES ($1, $2, 'follow_up_cancelled', 'Follow-up cancelled', $3::jsonb)`,
-      [rows[0].lead_id, req.user.id, JSON.stringify({ follow_up_id: rows[0].id, reason: req.body?.reason ?? null })],
+       VALUES ($1, $2, 'follow_up_cancelled', $3, $4::jsonb)`,
+      [followup.lead_id, req.user.id, summary, JSON.stringify({ follow_up_id: followup.id, reason })],
     );
-    res.json({ data: rows[0], meta: { requestId: req.id } });
+    // Fan up the org tree. Best-effort — never block the API on socket.
+    notifyChain(req.tenant, req.user.id, 'follow_up.cancelled', {
+      follow_up_id: followup.id,
+      lead_id: followup.lead_id,
+      next_action_datetime: followup.next_action_datetime,
+      cancelled_by_user_id: req.user.id,
+      reason: req.body?.reason ?? null,
+    }).catch(() => {});
+    res.json({ data: followup, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

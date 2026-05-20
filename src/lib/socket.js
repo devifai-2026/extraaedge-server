@@ -138,6 +138,32 @@ export const notifyAdmins = (tenantId, type, payload) => {
   io.to(adminRoom(tenantId)).emit('notification', wrap(type, payload));
 };
 
+// Walk the full manager chain from a user upward (direct manager →
+// grand-manager → … → super_admins) and emit to every user room along
+// the way. Use when an event needs maximum org-wide oversight, such as
+// a counsellor cancelling a scheduled follow-up.
+//
+// Imports usersRepo lazily to avoid a circular dep at module load.
+export const notifyChain = async (tenant, userId, type, payload) => {
+  if (!io || !tenant?.id || !userId) return;
+  try {
+    const { managerChain } = await import('../modules/users/repo.js');
+    const ids = await managerChain(tenant, userId);
+    const evt = wrap(type, payload);
+    const seen = new Set();
+    for (const id of ids) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      io.to(userRoom(tenant.id, id)).emit('notification', evt);
+    }
+    // Admin room delivery covers any super_admin who isn't in `ids`
+    // (e.g. tenants where super_admins aren't on the manager_id tree).
+    io.to(adminRoom(tenant.id)).emit('notification', evt);
+  } catch (err) {
+    logger.warn({ err: err.message }, 'notifyChain failed');
+  }
+};
+
 // Convenience: emit a "lead change" to the right audiences in one call.
 //   - the assigned counsellor (so they see new/reassigned leads)
 //   - the counsellor's managers (manager chain + admins)

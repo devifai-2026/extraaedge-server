@@ -11,6 +11,7 @@ const key = (tenantId, userId) => `${tenantId}:${userId}`;
 export const listMine = (tenant, user_id, query) => repo.list(tenant, user_id, query);
 export const markRead = (tenant, user_id, id) => repo.markRead(tenant, user_id, id);
 export const markAllRead = (tenant, user_id) => repo.markAllRead(tenant, user_id);
+export const deleteAll = (tenant, user_id) => repo.deleteAll(tenant, user_id);
 
 export const pushNotification = async (tenant, input) => {
   const row = await repo.insert(tenant, input);

@@ -170,12 +170,33 @@ export const updateLead = async (tenant, actor, id, updates) => {
       throw forbidden('Lead not in your scope');
     }
   }
-  const lead = await repo.updateLead(tenant, id, updates);
+  // Pull `followups` out of the scalar updates — repo.updateLead is for
+  // scalar lead columns + family/sources/custom_values; followup edits go
+  // through replaceFollowupsForStage so each (lead, stage) group is
+  // upserted/soft-deleted atomically.
+  const { followups, ...scalarUpdates } = updates ?? {};
+  const lead = await repo.updateLead(tenant, id, scalarUpdates);
+
+  if (Array.isArray(followups) && followups.length) {
+    // Group incoming rows by stage_id. Each group is processed as a full
+    // replace for that (lead, stage) — slots not present in the payload
+    // get soft-deleted (see replaceFollowupsForStage).
+    const byStage = new Map();
+    for (const f of followups) {
+      if (!f?.stage_id || !Number.isInteger(f.slot_index)) continue;
+      if (!byStage.has(f.stage_id)) byStage.set(f.stage_id, []);
+      byStage.get(f.stage_id).push(f);
+    }
+    for (const [stageId, rows] of byStage) {
+      await repo.replaceFollowupsForStage(tenant, id, stageId, rows, actor?.id);
+    }
+  }
+
   emit(tenant, EVENT_TYPES.LEAD_UPDATED, {
     actorUserId: actor?.id ?? null,
     entityType: 'lead',
     entityId: id,
-    payload: { changes: Object.keys(updates) },
+    payload: { changes: Object.keys(scalarUpdates).concat(followups ? ['followups'] : []) },
   });
   return lead;
 };
@@ -218,6 +239,15 @@ export const bulkDeleteLeads = async (tenant, actor, ids) => {
 };
 
 export const changeStage = async (tenant, actor, id, stageChange) => {
+  // Capture the outgoing stage BEFORE repo.changeStage flips it — we need it
+  // to scope the planned-followup auto-complete sweep.
+  const { rows: preRows } = await tenantQuery(
+    tenant,
+    `SELECT stage_id FROM leads WHERE id = $1 AND deleted_at IS NULL`,
+    [id],
+  );
+  const outgoingStageId = preRows[0]?.stage_id ?? null;
+
   const result = await repo.changeStage(tenant, id, stageChange, actor?.id);
   if (!result) throw notFound('Lead not found');
   // Recompute the score authoritatively so the new stage's `score` column +
@@ -226,19 +256,20 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
   // truth.
   await recalcScore(tenant, id).catch(() => {});
 
-  // When a stage moves, every PLANNED follow-up on this lead becomes
-  // 'done' — the counsellor's action of progressing the stage IS the
-  // follow-up they had scheduled. We don't touch already-cancelled or
-  // already-missed rows; only flip live planned ones. This is the
-  // "if stage moved, mark follow-up done" half of the spec.
+  // When a stage moves, planned follow-ups SCOPED TO THE OUTGOING STAGE
+  // become 'done' — moving the lead off that stage means the planned
+  // follow-up on that stage is no longer relevant. Followups belonging to
+  // other stages are left alone. Ad-hoc planned rows (stage_id NULL) also
+  // get completed since they're not tied to any particular stage.
   try {
     const { rows: completed } = await tenantQuery(
       tenant,
       `UPDATE lead_followups
           SET status = 'done', completed_at = now(), completed_by = $2
         WHERE lead_id = $1 AND deleted_at IS NULL AND status = 'planned'
+          AND (stage_id = $3 OR stage_id IS NULL)
         RETURNING id`,
-      [id, actor?.id ?? null],
+      [id, actor?.id ?? null, outgoingStageId],
     );
     for (const f of completed) {
       // Audit trail: drop a timeline activity so reports / the timeline
@@ -258,7 +289,16 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
   // a "Followup" stage), drop a lead_followups row so it surfaces in the
   // Follow-up Manager for the assigned counsellor. The follow-ups module
   // owns its own list/scope queries; we just write the row here.
+  // Skip if the destination stage is is_success (Converted owns no followups).
   if (stageChange.next_action_datetime) {
+    const { rows: destStage } = await tenantQuery(
+      tenant,
+      `SELECT is_success FROM lead_stages WHERE id = $1`,
+      [stageChange.stage_id],
+    );
+    if (destStage[0]?.is_success) {
+      // No-op: Converted stage doesn't carry followups.
+    } else {
     await tenantQuery(
       tenant,
       `INSERT INTO lead_followups (lead_id, next_action_datetime, comment, stage_id, sub_stage_id, created_by, status)
@@ -278,6 +318,7 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
        VALUES ($1, $2, 'followup_scheduled', 'Follow-up scheduled', $3::jsonb)`,
       [id, actor?.id ?? null, JSON.stringify({ at: stageChange.next_action_datetime })],
     );
+    }
   }
   const updated = (await repo.findById(tenant, id)) ?? result;
   emit(tenant, EVENT_TYPES.LEAD_STAGE_CHANGED, {
@@ -295,6 +336,19 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
     actor_id: actor?.id,
     payload: { stage_id: stageChange.stage_id, sub_stage_id: stageChange.sub_stage_id },
   }).catch(() => {});
+
+  // Hook: if the lead just landed in an is_success stage, seed a stub
+  // admission row so the accounts team sees it under "Pending approval".
+  // Lazy import to avoid a circular dep on module load.
+  if (updated.converted_at) {
+    try {
+      const { ensureFromConvertedLead } = await import('../admissions/service.js');
+      await ensureFromConvertedLead(tenant, updated);
+    } catch {
+      // Non-fatal: the lead conversion succeeded regardless; accounts
+      // can manually create the admission later if this fails.
+    }
+  }
   return updated;
 };
 
@@ -342,11 +396,17 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
             sst.name AS to_sub_stage_name,
             -- For assignment events, resolve the assignee + their manager
             -- so the timeline can show "Assigned to Foo (foo@bar.com),
-            -- reporting to Manager (manager@bar.com)".
+            -- reporting to Manager (manager@bar.com)". Reassign events use
+            -- 'to' / 'from' in metadata_json; auto-assign / referral use
+            -- 'assigned_to'. COALESCE picks whichever shape the row has.
             au.name  AS assignee_name,
             au.email AS assignee_email,
             mu.name  AS assignee_manager_name,
-            mu.email AS assignee_manager_email
+            mu.email AS assignee_manager_email,
+            -- For reassign events, the prior owner so the UI can show
+            -- "Reassigned from Foo (foo@bar.com) → Bar (bar@bar.com)".
+            fu.name  AS from_user_name,
+            fu.email AS from_user_email
        FROM events e
        LEFT JOIN users u  ON u.id  = e.user_id
        LEFT JOIN lead_stages     sf  ON e.kind = 'activity' AND e.subtype = 'stage_changed'
@@ -359,8 +419,14 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
                                     AND sst.id = (e.metadata_json->>'to_sub')::uuid
        LEFT JOIN users au ON e.kind = 'activity'
                          AND e.subtype IN ('assigned', 'reassign', 'auto_assign', 'refer')
-                         AND au.id = (e.metadata_json->>'assigned_to')::uuid
+                         AND au.id = COALESCE(
+                                       (e.metadata_json->>'assigned_to')::uuid,
+                                       (e.metadata_json->>'to')::uuid
+                                     )
        LEFT JOIN users mu ON au.manager_id = mu.id
+       LEFT JOIN users fu ON e.kind = 'activity'
+                         AND e.subtype = 'reassign'
+                         AND fu.id = (e.metadata_json->>'from')::uuid
       ORDER BY created_at DESC
       LIMIT ${Number(limit)}`,
     params,

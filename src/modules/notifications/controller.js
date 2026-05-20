@@ -17,6 +17,11 @@ export const readAll = async (req, res, next) => {
   catch (err) { next(err); }
 };
 
+export const deleteAll = async (req, res, next) => {
+  try { await service.deleteAll(req.tenant, req.user.id); res.status(204).end(); }
+  catch (err) { next(err); }
+};
+
 // SSE stream — survives Nginx `proxy_buffering off`
 export const stream = async (req, res, next) => {
   try {
