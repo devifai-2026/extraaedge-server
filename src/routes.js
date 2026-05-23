@@ -58,6 +58,9 @@ import analyticsRouter from './modules/analytics/routes.js';
 import reportsRouter from './modules/reports/routes.js';
 import workSessionsRouter from './modules/work-sessions/routes.js';
 import admissionsRouter from './modules/admissions/routes.js';
+import publicAdmissionsRouter from './modules/public-admissions/routes.js';
+import publicReceiptsRouter from './modules/public-receipts/routes.js';
+import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 
 // ---- Pending modules (wired as these passes complete) ----
 // Pass 7: follow-ups, quick-add
@@ -154,6 +157,18 @@ export const mountRoutes = (app) => {
 
   // Accounts / admissions module (account_manager + super_admin)
   api.use('/admissions', admissionsRouter);
+  // Per-lead customised fee offer — accounts team's tweak of the
+  // program-level defaults for a specific converted lead.
+  api.use('/lead-fee-offers', leadFeeOffersRouter);
+
+  // Unauthenticated public surface for student-facing admission share-links.
+  // Token in the URL is the credential; this router lives OUTSIDE the
+  // authRequired/tenantRequired chain on purpose.
+  api.use('/public/admissions', publicAdmissionsRouter);
+  // Receipt share-links: same trust model as admissions (URL token IS
+  // the credential). Lets accounts share a printable receipt URL with
+  // the student / parent without forcing them to sign in.
+  api.use('/public/receipts', publicReceiptsRouter);
 
   app.use('/api/v1', api);
 };

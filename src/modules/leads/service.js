@@ -12,7 +12,10 @@ const emit = (tenant, type, payload) =>
 
 const computeScope = async (tenant, actor) => {
   // counsellor:      own leads only.
-  // sales_manager:   team (recursive manager_id).
+  // sales_manager:   team (recursive manager_id) PLUS any unassigned leads
+  //                  tagged with their own team_id (so quick-add leads they
+  //                  create — which land in Unassigned — still show on
+  //                  their dashboard until they're routed to a counsellor).
   // super_admin:     no filter.
   // account_manager: every converted lead in the tenant, regardless of
   //                  owner. They handle post-conversion account work and
@@ -20,8 +23,11 @@ const computeScope = async (tenant, actor) => {
   if (!actor || !actor.id) return { user_ids: [] };
   if (actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
   if (actor.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
-    const ids = await usersRepo.teamHierarchy(tenant, actor.id);
-    return { user_ids: ids };
+    const [ids, me] = await Promise.all([
+      usersRepo.teamHierarchy(tenant, actor.id),
+      usersRepo.findById(tenant, actor.id),
+    ]);
+    return { user_ids: ids, include_unassigned_team_id: me?.team_id ?? null };
   }
   if (actor.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) {
     return { converted_only: true };
@@ -105,6 +111,19 @@ export const getLead = async (tenant, actor, id) => {
     if (scope.user_ids && !scope.user_ids.includes(row.assigned_to) && row.assigned_to !== null) {
       if (actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) throw forbidden('Lead not in your scope');
     }
+    // sales_manager extension: unassigned leads on the manager's team are
+    // in scope. Without an explicit team_id match an unassigned lead from
+    // ANOTHER team would otherwise also slip through because of the
+    // assigned_to=null short-circuit above. Tighten that here.
+    if (
+      scope.user_ids
+      && row.assigned_to === null
+      && scope.include_unassigned_team_id !== undefined
+      && row.team_id !== scope.include_unassigned_team_id
+      && actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN
+    ) {
+      throw forbidden('Lead not in your scope');
+    }
   }
   return row;
 };
@@ -167,7 +186,14 @@ export const updateLead = async (tenant, actor, id, updates) => {
       throw forbidden('Lead not in your scope');
     }
     if (scope.user_ids && !scope.user_ids.includes(existing.assigned_to)) {
-      throw forbidden('Lead not in your scope');
+      // Allow managers to edit unassigned leads on their own team
+      // (mirrors the list/getLead widening).
+      const isUnassignedOnMyTeam = existing.assigned_to === null
+        && scope.include_unassigned_team_id
+        && existing.team_id === scope.include_unassigned_team_id;
+      if (!isUnassignedOnMyTeam) {
+        throw forbidden('Lead not in your scope');
+      }
     }
   }
   // Pull `followups` out of the scalar updates — repo.updateLead is for
@@ -175,7 +201,9 @@ export const updateLead = async (tenant, actor, id, updates) => {
   // through replaceFollowupsForStage so each (lead, stage) group is
   // upserted/soft-deleted atomically.
   const { followups, ...scalarUpdates } = updates ?? {};
-  const lead = await repo.updateLead(tenant, id, scalarUpdates);
+  // Pass the actor through so the new stage_changed audit row in
+  // repo.updateLead is attributed correctly.
+  const lead = await repo.updateLead(tenant, id, scalarUpdates, actor?.id ?? null);
 
   if (Array.isArray(followups) && followups.length) {
     // Group incoming rows by stage_id. Each group is processed as a full
@@ -337,22 +365,26 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
     payload: { stage_id: stageChange.stage_id, sub_stage_id: stageChange.sub_stage_id },
   }).catch(() => {});
 
-  // Hook: if the lead just landed in an is_success stage, seed a stub
-  // admission row so the accounts team sees it under "Pending approval".
-  // Lazy import to avoid a circular dep on module load.
-  if (updated.converted_at) {
-    try {
-      const { ensureFromConvertedLead } = await import('../admissions/service.js');
-      await ensureFromConvertedLead(tenant, updated);
-    } catch {
-      // Non-fatal: the lead conversion succeeded regardless; accounts
-      // can manually create the admission later if this fails.
-    }
-  }
+  // Lead conversion no longer auto-creates an admission stub. The
+  // public share-link flow is the real seam now:
+  //   1. Accounts sees the converted lead in the Pending queue (Source 1
+  //      branch of pendingAdmissions — leads with no admission row).
+  //   2. They Configure Offer → Copy link → student submits the public
+  //      form → THAT creates the admission row with real data.
+  //   3. Only THEN does the row flip to "Verify & Approve".
+  //
+  // The old stub created a confusing intermediate state where accounts
+  // saw a "Verify & Approve" CTA on a row that had no submitted data.
+  // The ensureFromConvertedLead helper is kept in admissions/service.js
+  // for any future re-use (e.g. a one-shot backfill script) but it's no
+  // longer invoked from the conversion path.
   return updated;
 };
 
-// Unified timeline = activities + notes + messages + calls, merged by time.
+// Unified timeline = activities + notes + messages + calls + admission
+// events (so accounts-side actions like "Receipt added", "Status changed
+// to attending", "Field edited" surface in the same modal counsellors
+// already use).
 export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
   const params = [id];
   let beforeClause = '';
@@ -384,6 +416,25 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
                 jsonb_build_object('status', status, 'duration_seconds', duration_seconds, 'disposition_code', disposition_code, 'recording_r2_key', recording_r2_key) AS metadata_json,
                 COALESCE(ended_at, started_at, created_at) AS created_at, user_id
            FROM calls WHERE lead_id = $1 AND deleted_at IS NULL ${beforeClause.replace('created_at', 'COALESCE(ended_at, started_at, created_at)')}
+       )
+       UNION ALL
+       (
+         -- Admission events. lead_id is denormalised on the row so we don't
+         -- have to chase admissions table. event_type lands in the subtype
+         -- column so the FE can switch on it; prev/next status are bundled
+         -- into metadata_json alongside whatever the emit-site already wrote.
+         SELECT ae.id, 'admission' AS kind, ae.event_type AS subtype,
+                ae.summary AS body,
+                COALESCE(ae.metadata, '{}'::jsonb)
+                  || jsonb_build_object(
+                       'prev_status', ae.prev_status,
+                       'next_status', ae.next_status,
+                       'actor_kind',  ae.actor_kind
+                     ) AS metadata_json,
+                ae.occurred_at AS created_at,
+                ae.actor_user_id AS user_id
+           FROM admission_events ae
+          WHERE ae.lead_id = $1 ${beforeClause.replace('created_at', 'ae.occurred_at')}
        )
      )
      SELECT e.*,
@@ -427,7 +478,12 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
        LEFT JOIN users fu ON e.kind = 'activity'
                          AND e.subtype = 'reassign'
                          AND fu.id = (e.metadata_json->>'from')::uuid
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC,
+               -- Deterministic tiebreaker when two events land on the same
+               -- millisecond: keep 'lead_created' last so the post-creation
+               -- 'assign' / 'auto_assign' row sorts above it.
+               CASE WHEN e.kind = 'activity' AND e.subtype = 'lead_created' THEN 1 ELSE 0 END,
+               id DESC
       LIMIT ${Number(limit)}`,
     params,
   );

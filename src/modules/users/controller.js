@@ -1,4 +1,20 @@
 import * as service from './service.js';
+import * as authService from '../auth/service.js';
+
+// Org-admin "Login as user" — mints a normal token pair for the target
+// user with no password check. See auth/service.sudoLoginAs for the full
+// caveats; route gating to super_admin lives on the router.
+export const sudoLogin = async (req, res, next) => {
+  try {
+    const data = await authService.sudoLoginAs({
+      tenantSlug: req.tenant.slug,
+      target_user_id: req.params.id,
+      ip: req.ip,
+      user_agent: req.headers['user-agent'],
+    });
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
 
 export const list = async (req, res, next) => {
   try {
@@ -86,6 +102,13 @@ export const orgTree = async (req, res, next) => {
 export const updateMyTheme = async (req, res, next) => {
   try {
     const data = await service.updateMyTheme(req.tenant, req.user, req.body);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const updateMyAvatar = async (req, res, next) => {
+  try {
+    const data = await service.updateMyAvatar(req.tenant, req.user, req.body);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

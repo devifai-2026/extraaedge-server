@@ -72,3 +72,12 @@ export const updateThemeSchema = z.object({
   theme_primary_dark: optionalHex,
   theme_primary_light: optionalHex,
 });
+
+// Avatar update for the currently-logged-in user.
+//   avatar_r2_key: GCS object key returned by /uploads/confirm.
+//                  Pass null to clear the avatar (initials fallback).
+// The key is opaque to us — we don't try to validate it against a regex
+// because the uploads/* flow has already verified the object exists.
+export const updateAvatarSchema = z.object({
+  avatar_r2_key: z.union([z.string().min(1).max(512), z.null()]),
+});

@@ -3,8 +3,18 @@ import { tenantQuery } from '../../db/tenant.js';
 const COLS = `
   id, name, code, description, category, type, price, currency, discount_price,
   duration_value, duration_unit, eligibility, intake_month, country,
-  is_active, is_featured, brochure_url, image_url, created_at, updated_at
+  is_active, is_featured, brochure_url, image_url,
+  course_fees, registration_amount, payment_mode, fee_installments,
+  created_at, updated_at
 `;
+
+// Columns that should be written as jsonb (need JSON.stringify + ::jsonb
+// cast in the placeholder). Only fee_installments today; the helper
+// keeps insert/update generic in case more land later.
+const JSONB_COLS = new Set(['fee_installments']);
+
+const renderValue = (col, v) => (JSONB_COLS.has(col) ? JSON.stringify(v) : v);
+const renderPlaceholder = (col, i) => (JSONB_COLS.has(col) ? `$${i}::jsonb` : `$${i}`);
 
 export const list = async (tenant, { q, category, is_active, is_featured, page, limit }) => {
   const conds = ['deleted_at IS NULL'];
@@ -32,8 +42,8 @@ export const findById = async (tenant, id) => {
 
 export const insert = async (tenant, input) => {
   const cols = Object.keys(input);
-  const vals = Object.values(input);
-  const placeholders = cols.map((_, i) => `$${i + 1}`);
+  const vals = cols.map((c) => renderValue(c, input[c]));
+  const placeholders = cols.map((c, i) => renderPlaceholder(c, i + 1));
   const { rows } = await tenantQuery(
     tenant,
     `INSERT INTO programs (${cols.join(',')}) VALUES (${placeholders.join(',')}) RETURNING ${COLS}`,
@@ -47,8 +57,8 @@ export const update = async (tenant, id, updates) => {
   const params = [];
   let i = 1;
   for (const [k, v] of Object.entries(updates)) {
-    fields.push(`${k} = $${i}`);
-    params.push(v);
+    fields.push(`${k} = ${renderPlaceholder(k, i)}`);
+    params.push(renderValue(k, v));
     i += 1;
   }
   if (!fields.length) return findById(tenant, id);

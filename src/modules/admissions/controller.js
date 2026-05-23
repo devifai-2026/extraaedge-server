@@ -1,4 +1,5 @@
 import * as service from './service.js';
+import * as publicService from '../public-admissions/service.js';
 
 // ---------- Admissions ----------
 export const list = async (req, res, next) => {
@@ -22,10 +23,46 @@ export const create = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// Mint (or re-mint) a 24h public share-link for a converted lead's
+// admission form. Returns just the token + expiry; the FE assembles the
+// final URL using its own origin so this works across environments.
+export const generateShareLink = async (req, res, next) => {
+  try {
+    const data = await publicService.generateLink(req.tenant, req.user, req.params.leadId);
+    res.status(201).json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const update = async (req, res, next) => {
   try {
-    const row = await service.update(req.tenant, req.params.id, req.body);
+    const row = await service.update(req.tenant, req.params.id, req.body, req.user);
     res.json({ data: row, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// Timeline for a single admission. Open to the same role gate as the
+// rest of the admissions router (account_manager + super_admin).
+export const timeline = async (req, res, next) => {
+  try {
+    const data = await service.timeline(req.tenant, req.params.id);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// Lookup helper for the lead drawer.
+export const timelineByLead = async (req, res, next) => {
+  try {
+    const data = await service.timelineByLead(req.tenant, req.params.leadId);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// Tenant-wide admission status snapshot — powers the new Admission
+// Pipeline sidebar page + the dashboard cards.
+export const leadStatusSnapshot = async (req, res, next) => {
+  try {
+    const data = await service.leadStatusSnapshot(req.tenant);
+    res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
@@ -41,23 +78,30 @@ export const approve = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const reject = async (req, res, next) => {
+  try {
+    const row = await service.reject(req.tenant, req.user, req.params.id, req.body?.reason);
+    res.json({ data: row, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const markBreak = async (req, res, next) => {
   try {
-    const row = await service.setStatus(req.tenant, req.params.id, 'on_break', { break_reason: req.body?.reason });
+    const row = await service.setStatus(req.tenant, req.params.id, 'on_break', { break_reason: req.body?.reason }, req.user);
     res.json({ data: row, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
 export const resume = async (req, res, next) => {
   try {
-    const row = await service.setStatus(req.tenant, req.params.id, 'attending');
+    const row = await service.setStatus(req.tenant, req.params.id, 'attending', undefined, req.user);
     res.json({ data: row, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
 export const complete = async (req, res, next) => {
   try {
-    const row = await service.setStatus(req.tenant, req.params.id, 'completed');
+    const row = await service.setStatus(req.tenant, req.params.id, 'completed', undefined, req.user);
     res.json({ data: row, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -119,6 +163,16 @@ export const pendingAdmissionsCount = async (req, res, next) => {
   try {
     const pending = await service.pendingAdmissionsCount(req.tenant);
     res.json({ data: { pending }, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// Upcoming + overdue installments for the Accounts Dashboard EMI widgets.
+// `?days=N` controls the upcoming window; defaults to 7.
+export const emiDigest = async (req, res, next) => {
+  try {
+    const upcomingDays = Math.max(1, Math.min(30, Number(req.query?.days) || 7));
+    const rows = await service.emiDigest(req.tenant, upcomingDays);
+    res.json({ data: rows, meta: { requestId: req.id, upcomingDays, total: rows.length } });
   } catch (err) { next(err); }
 };
 

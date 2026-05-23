@@ -143,10 +143,14 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     );
   }
 
-  // Initial activity
+  // Initial activity. Force created_at to clock_timestamp() (live wall time
+  // inside the txn) so the follow-up 'assign' row below — written in the
+  // same statement-time tick — sorts strictly after this one in the
+  // timeline. Without this, both rows take statement_timestamp() and end
+  // up at the exact same millisecond, which makes the UI flip them.
   await client.query(
-    `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-     VALUES ($1,$2,'lead_created','Lead created',$3::jsonb)`,
+    `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json, created_at)
+     VALUES ($1,$2,'lead_created','Lead created',$3::jsonb, clock_timestamp())`,
     [lead.id, created_by ?? null, JSON.stringify({ source: 'api' })],
   );
 
@@ -155,8 +159,8 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
   // sees it (mirrors the auto_assign row dropped by the worker).
   if (input.assigned_to) {
     await client.query(
-      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-       VALUES ($1,$2,'assign','Assigned on creation',$3::jsonb)`,
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json, created_at)
+       VALUES ($1,$2,'assign','Assigned on creation',$3::jsonb, clock_timestamp())`,
       [lead.id, created_by ?? null, JSON.stringify({ assigned_to: input.assigned_to })],
     );
   }
@@ -236,6 +240,19 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
 export const findById = async (tenant, id) => {
   const { rows } = await tenantQuery(tenant, `SELECT ${LEAD_COLUMNS} FROM leads WHERE id = $1 AND deleted_at IS NULL`, [id]);
   return rows[0] ?? null;
+};
+
+// Override the snapshot `manager_id` set by insertLead (which uses the
+// assignee's primary `users.manager_id`). Quick-add by a counsellor with
+// multiple managers needs to point at the *first* row in user_managers
+// instead — done here rather than in insertLead so the regular create
+// path stays unchanged.
+export const setManagerId = async (tenant, id, manager_id) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE leads SET manager_id = $2 WHERE id = $1 AND deleted_at IS NULL`,
+    [id, manager_id],
+  );
 };
 
 export const findByIdWithRelations = async (tenant, id) => {
@@ -339,11 +356,27 @@ export const findByIdWithRelations = async (tenant, id) => {
   };
 };
 
-export const updateLead = async (tenant, id, updates) => tenantTx(tenant, async (client) => {
+export const updateLead = async (tenant, id, updates, actorId = null) => tenantTx(tenant, async (client) => {
   const fields = [];
   const params = [];
   let i = 1;
   const { family, custom_values, sources, ...scalar } = updates;
+
+  // Snapshot stage/sub-stage BEFORE the UPDATE so we can detect a real
+  // transition and log a `stage_changed` activity. Historically only the
+  // POST /leads/:id/stage endpoint wrote this row, so any PUT that
+  // touched stage_id (the AddNewLead dialog on Save) silently moved the
+  // column without leaving an audit trail — which is why the timeline
+  // showed nothing after admin stage edits. Capture the old values once.
+  let preStage = null;
+  if (scalar.stage_id !== undefined || scalar.sub_stage_id !== undefined) {
+    const { rows: pre } = await client.query(
+      `SELECT stage_id, sub_stage_id FROM leads WHERE id = $1 AND deleted_at IS NULL`,
+      [id],
+    );
+    preStage = pre[0] ?? null;
+  }
+
   for (const [k, v] of Object.entries(scalar)) {
     if (v === undefined) continue;
     fields.push(`${k} = $${i}`);
@@ -363,6 +396,49 @@ export const updateLead = async (tenant, id, updates) => tenantTx(tenant, async 
       await client.query(`UPDATE leads SET converted_at = COALESCE(converted_at, now()) WHERE id = $1`, [id]);
     } else {
       await client.query(`UPDATE leads SET converted_at = NULL WHERE id = $1`, [id]);
+    }
+  }
+
+  // Emit a `stage_changed` audit activity when the PUT actually moved
+  // stage or sub-stage. Two callers can hit this path right now:
+  //   - The AddNewLead dialog Save (FE then also fires POST /stage when
+  //     it sees a delta; the repo.changeStage no-op short-circuit means
+  //     that second call won't double-log).
+  //   - Any other PUT caller (Postman, future inline edit). They no
+  //     longer slip past the timeline.
+  if (preStage) {
+    const newStageId  = scalar.stage_id !== undefined ? scalar.stage_id : preStage.stage_id;
+    const newSubId    = scalar.sub_stage_id !== undefined ? scalar.sub_stage_id : preStage.sub_stage_id;
+    const stageMoved  = String(preStage.stage_id ?? '')     !== String(newStageId ?? '');
+    const subMoved    = String(preStage.sub_stage_id ?? '') !== String(newSubId ?? '');
+    if (stageMoved || subMoved) {
+      // Match the converted-flag shape that POST /stage writes so the
+      // FE's stage_changed card renders the same way regardless of which
+      // path actually emitted the row.
+      let converted = null;
+      if (stageMoved) {
+        const [wasS, willS] = await Promise.all([
+          preStage.stage_id
+            ? client.query(`SELECT is_success FROM lead_stages WHERE id = $1`, [preStage.stage_id])
+            : Promise.resolve({ rows: [] }),
+          newStageId
+            ? client.query(`SELECT is_success FROM lead_stages WHERE id = $1`, [newStageId])
+            : Promise.resolve({ rows: [] }),
+        ]);
+        const wasSuccess  = wasS.rows[0]?.is_success === true;
+        const willSuccess = willS.rows[0]?.is_success === true;
+        if (!wasSuccess && willSuccess) converted = true;
+        else if (wasSuccess && !willSuccess) converted = false;
+      }
+      await client.query(
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+         VALUES ($1,$2,'stage_changed','Stage changed',$3::jsonb)`,
+        [id, actorId, JSON.stringify({
+          from: preStage.stage_id, to: newStageId,
+          from_sub: preStage.sub_stage_id, to_sub: newSubId,
+          converted,
+        })],
+      );
     }
   }
 
@@ -536,6 +612,24 @@ export const changeStage = async (tenant, id, { stage_id, sub_stage_id, remarks 
   const old = oldRows[0];
   if (!old) return null;
 
+  // No-op short-circuit: callers (the lead-edit dialog, public forms, the
+  // bulk-action endpoint) sometimes re-submit the same stage/sub-stage on
+  // save. Don't write a `stage_changed` activity row for that — it pollutes
+  // the timeline with "Enrolled → Enrolled" cards. The remark below is still
+  // applied so a user editing only the remark on the same stage isn't lost.
+  const stageUnchanged = String(old.stage_id) === String(stage_id);
+  const subUnchanged = String(old.sub_stage_id ?? '') === String(sub_stage_id ?? '');
+  if (stageUnchanged && subUnchanged) {
+    if (remarks !== undefined && remarks !== null) {
+      await client.query(
+        `UPDATE leads SET remarks = $2, last_activity_at = now() WHERE id = $1`,
+        [id, remarks],
+      );
+    }
+    const { rows } = await client.query(`SELECT ${LEAD_COLUMNS} FROM leads WHERE id = $1`, [id]);
+    return rows[0];
+  }
+
   // Resolve the success-flag of both old and new stages so we can flip
   // converted_at on/off when the lead crosses a "success" boundary.
   const isSuccess = async (sId) => {
@@ -653,8 +747,30 @@ export const list = async (tenant, opts, scope) => {
   if (lead_score_from != null) { params.push(lead_score_from); conds.push(`l.lead_score >= $${params.length}`); }
   if (lead_score_to != null) { params.push(lead_score_to); conds.push(`l.lead_score <= $${params.length}`); }
   if (q) {
+    // Global search matches name, email, and every phone-like field
+    // (phone / whatsapp_number / alternate_contact). For numeric queries we
+    // also match against the digits-only form of those fields so that
+    // "9876543210" finds rows stored as "+91 98765-43210".
     params.push(`%${q}%`);
-    conds.push(`(l.name ILIKE $${params.length} OR l.email::text ILIKE $${params.length} OR l.phone ILIKE $${params.length})`);
+    const likeIdx = params.length;
+    const digits = String(q).replace(/\D+/g, '');
+    const branches = [
+      `l.name ILIKE $${likeIdx}`,
+      `l.email::text ILIKE $${likeIdx}`,
+      `l.phone ILIKE $${likeIdx}`,
+      `l.whatsapp_number ILIKE $${likeIdx}`,
+      `l.alternate_contact ILIKE $${likeIdx}`,
+    ];
+    if (digits.length >= 4) {
+      params.push(`%${digits}%`);
+      const digitsIdx = params.length;
+      branches.push(
+        `regexp_replace(coalesce(l.phone,''),             '\\D', '', 'g') ILIKE $${digitsIdx}`,
+        `regexp_replace(coalesce(l.whatsapp_number,''),   '\\D', '', 'g') ILIKE $${digitsIdx}`,
+        `regexp_replace(coalesce(l.alternate_contact,''), '\\D', '', 'g') ILIKE $${digitsIdx}`,
+      );
+    }
+    conds.push(`(${branches.join(' OR ')})`);
   }
   if (channel_id || source_id || campaign_id || medium_id) {
     const subConds = [];
@@ -695,8 +811,18 @@ export const list = async (tenant, opts, scope) => {
     )`);
   }
   if (scope && scope.user_ids) {
+    // sales_manager extension: include unassigned leads tagged with the
+    // manager's team_id so quick-add leads they create still appear on
+    // their dashboard until routed to a counsellor. See computeScope().
     params.push(scope.user_ids);
-    conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
+    const userIdsIdx = params.length;
+    if (scope.include_unassigned_team_id) {
+      params.push(scope.include_unassigned_team_id);
+      const teamIdx = params.length;
+      conds.push(`(l.assigned_to = ANY($${userIdsIdx}::uuid[]) OR (l.assigned_to IS NULL AND l.team_id = $${teamIdx}))`);
+    } else {
+      conds.push(`l.assigned_to = ANY($${userIdsIdx}::uuid[])`);
+    }
   }
   // account_manager scope: see every converted lead across the tenant,
   // ignore owner. Set by computeScope() in leads/service.js.
@@ -786,13 +912,26 @@ export const list = async (tenant, opts, scope) => {
 export const stageCounts = async (tenant, scope) => {
   const params = [];
   const conds = ['l.deleted_at IS NULL'];
+  let scopeJoinClause = '';
   if (scope && scope.user_ids) {
     params.push(scope.user_ids);
-    conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
+    const userIdsIdx = params.length;
+    if (scope.include_unassigned_team_id) {
+      params.push(scope.include_unassigned_team_id);
+      const teamIdx = params.length;
+      const expr = `(l.assigned_to = ANY($${userIdsIdx}::uuid[]) OR (l.assigned_to IS NULL AND l.team_id = $${teamIdx}))`;
+      conds.push(expr);
+      scopeJoinClause = `AND ${expr}`;
+    } else {
+      const expr = `l.assigned_to = ANY($${userIdsIdx}::uuid[])`;
+      conds.push(expr);
+      scopeJoinClause = `AND ${expr}`;
+    }
   }
   // account_manager: limit to converted leads.
   if (scope && scope.converted_only) {
     conds.push(`l.converted_at IS NOT NULL`);
+    scopeJoinClause += ` AND l.converted_at IS NOT NULL`;
   }
   const where = `WHERE ${conds.join(' AND ')}`;
   const { rows } = await tenantQuery(
@@ -801,8 +940,7 @@ export const stageCounts = async (tenant, scope) => {
             COUNT(l.id)::int AS count
        FROM lead_stages s
        LEFT JOIN leads l ON l.stage_id = s.id AND l.deleted_at IS NULL
-            ${scope && scope.user_ids ? `AND l.assigned_to = ANY($1::uuid[])` : ''}
-            ${scope && scope.converted_only ? `AND l.converted_at IS NOT NULL` : ''}
+            ${scopeJoinClause}
       WHERE s.is_active = true
       GROUP BY s.id, s.name, s.order_index
       ORDER BY COALESCE(s.order_index, 0), s.name`,
@@ -854,7 +992,17 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
     if (filter?.assigned_to) { params.push(filter.assigned_to); conds.push(`assigned_to = $${params.length}`); }
     if (filter?.team_id) { params.push(filter.team_id); conds.push(`team_id = $${params.length}`); }
     if (filter?.q) { params.push(`%${filter.q}%`); conds.push(`(name ILIKE $${params.length} OR email::text ILIKE $${params.length} OR phone ILIKE $${params.length})`); }
-    if (scope && scope.user_ids) { params.push(scope.user_ids); conds.push(`assigned_to = ANY($${params.length}::uuid[])`); }
+    if (scope && scope.user_ids) {
+      params.push(scope.user_ids);
+      const userIdsIdx = params.length;
+      if (scope.include_unassigned_team_id) {
+        params.push(scope.include_unassigned_team_id);
+        const teamIdx = params.length;
+        conds.push(`(assigned_to = ANY($${userIdsIdx}::uuid[]) OR (assigned_to IS NULL AND team_id = $${teamIdx}))`);
+      } else {
+        conds.push(`assigned_to = ANY($${userIdsIdx}::uuid[])`);
+      }
+    }
     if (scope && scope.converted_only) { conds.push(`converted_at IS NOT NULL`); }
     const r = await client.query(`SELECT id FROM leads WHERE ${conds.join(' AND ')}`, params);
     ids = r.rows.map((x) => x.id);

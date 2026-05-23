@@ -4,6 +4,7 @@ import * as roleRepo from '../custom-roles/repo.js';
 import { conflict, forbidden, notFound } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
+import { getDownloadSignedUrl } from '../../lib/r2.js';
 
 const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
 
@@ -258,6 +259,30 @@ export const orgTree = async (tenant, actor) => {
   );
 
   return { nodes, edges };
+};
+
+// Persist the current user's avatar object key (GCS). Pass null to clear.
+// Returns the new key + a short-lived signed URL so the FE can swap the
+// nav-bar avatar without a re-fetch.
+export const updateMyAvatar = async (tenant, actor, body) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE users SET avatar_r2_key = $2, updated_at = now()
+       WHERE id = $1
+   RETURNING avatar_r2_key`,
+    [actor.id, body.avatar_r2_key ?? null],
+  );
+  const updated = rows[0] ?? { avatar_r2_key: null };
+  let avatar_url = null;
+  if (updated.avatar_r2_key) {
+    try {
+      avatar_url = await getDownloadSignedUrl({ key: updated.avatar_r2_key });
+    } catch {
+      // Signed URL is best-effort; clients can fall back to the initials avatar
+      // if it ever fails to generate.
+    }
+  }
+  return { avatar_r2_key: updated.avatar_r2_key, avatar_url };
 };
 
 // Persist a user's chosen theme. Any field omitted leaves the existing

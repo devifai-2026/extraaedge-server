@@ -10,7 +10,21 @@ const educationRow = z.object({
   college_name: z.string().optional().nullable(),
   board_university: z.string().optional().nullable(),
   year_of_passing: z.coerce.number().int().min(1900).max(2100).optional().nullable(),
+  // Grade value lives in `percentage` regardless of the unit; the cap
+  // is unit-aware (100 for %, 10 for CGPA). We accept 0–100 at the
+  // base level and tighten via superRefine so a CGPA of 12.5 is rejected.
   percentage: z.coerce.number().min(0).max(100).optional().nullable(),
+  grade_unit: z.enum(['percent', 'cgpa']).optional().default('percent'),
+}).superRefine((row, ctx) => {
+  if (row.percentage == null) return;
+  const cap = row.grade_unit === 'cgpa' ? 10 : 100;
+  if (row.percentage > cap) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['percentage'],
+      message: `Value must be ≤ ${cap} for ${row.grade_unit === 'cgpa' ? 'CGPA' : 'percent'}.`,
+    });
+  }
 });
 
 const feeInstallment = z.object({
@@ -80,6 +94,10 @@ export const reportQuery = z.object({
 export const idParam = z.object({ id: z.string().uuid() });
 
 // Receipt creation. amount + mode_of_payment + receipt_date required.
+// receipt_kind tags what the money pays for:
+//   'installment'  → must also supply installment_no (1..N from the offer).
+//   'registration' → one-time per admission (DB enforces uniqueness).
+//   'misc'         → catch-all (default).
 export const createReceiptSchema = z.object({
   receipt_no: z.string().optional(), // server auto-generates if absent
   receipt_date: z.coerce.date(),
@@ -87,6 +105,22 @@ export const createReceiptSchema = z.object({
   mode_of_payment: z.string().min(1),
   transaction_details: z.string().optional().nullable(),
   is_old_collection: z.coerce.boolean().optional(),
+  receipt_kind: z.enum(['installment', 'registration', 'misc']).optional().default('misc'),
+  installment_no: z.coerce.number().int().min(1).max(20).optional().nullable(),
+  // Optional GCS key for a payment screenshot the accounts user
+  // attached when capturing the receipt (UPI / bank screenshot, etc.).
+  // The FE uploads via /uploads/presign and posts the resulting r2_key.
+  payment_screenshot_r2_key: z.string().optional().nullable(),
+}).superRefine((data, ctx) => {
+  // Cross-field rule: installment_no must be present iff
+  // receipt_kind = 'installment'. Mirrors the FE picker which only shows
+  // the slot dropdown when the kind is Installment.
+  if (data.receipt_kind === 'installment' && data.installment_no == null) {
+    ctx.addIssue({ code: 'custom', path: ['installment_no'], message: 'Pick which installment this receipt pays for.' });
+  }
+  if (data.receipt_kind !== 'installment' && data.installment_no != null) {
+    ctx.addIssue({ code: 'custom', path: ['installment_no'], message: 'installment_no only applies when receipt_kind = installment.' });
+  }
 });
 
 // Center CRUD (admin-only)

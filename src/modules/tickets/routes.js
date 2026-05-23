@@ -3,9 +3,11 @@
 // Routing rules (the FE picker is *informational* — the raiser tags a
 // reporting-chain colleague, but the ticket also fans out to the audiences
 // below for visibility):
-//   - counsellor   → primary + secondary managers, all super_admins
-//   - manager      → all super_admins
-//   - super_admin  → all super_admins (Stage 2 will replicate to PO too)
+//   - counsellor      → primary + secondary managers, all super_admins
+//   - manager         → all super_admins
+//   - account_manager → all super_admins (no team, no reporting manager —
+//                       tickets route straight to org admins)
+//   - super_admin     → all super_admins (Stage 2 will replicate to PO too)
 //
 // The picker options come from /tickets/contacts: each role's contacts are
 // limited to their reporting chain (managers above + team below + admins).
@@ -61,6 +63,14 @@ const allowedContactIds = async (tenant, actor) => {
     for (const t of team) ids.add(t);
     const mgrs = await getManagerIds(tenant, actor.id);
     for (const m of mgrs) ids.add(m);
+    const { rows: admins } = await tenantQuery(
+      tenant,
+      `SELECT id FROM users WHERE role = 'super_admin' AND deleted_at IS NULL AND is_active = true`,
+    );
+    for (const a of admins) ids.add(a.id);
+  } else if (actor.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) {
+    // Account managers are tenant-level standalone users (no team / no
+    // reporting manager). Their tickets always go to org admins.
     const { rows: admins } = await tenantQuery(
       tenant,
       `SELECT id FROM users WHERE role = 'super_admin' AND deleted_at IS NULL AND is_active = true`,

@@ -1,4 +1,5 @@
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
+import { randomToken } from '../../lib/crypto.js';
 
 // ---------- Centers --------------------------------------------------------
 
@@ -67,7 +68,7 @@ export const softDeleteCenter = async (tenant, id) => {
 // ---------- Admissions ----------------------------------------------------
 
 const ADMISSION_COLS = `
-  a.id, a.lead_id, a.admission_date,
+  a.id, a.admission_code, a.lead_id, a.admission_date,
   a.first_name, a.middle_name, a.last_name,
   a.email, a.whatsapp_number, a.alternate_contact, a.address,
   a.program_id, a.mode_of_training, a.center_id,
@@ -149,18 +150,48 @@ export const findById = async (tenant, id) => {
 export const findByIdWithRelations = async (tenant, id) => {
   const adm = await findById(tenant, id);
   if (!adm) return null;
-  const [edu, fees, receipts] = await Promise.all([
+  const [edu, fees, receipts, offer] = await Promise.all([
     tenantQuery(tenant, `SELECT * FROM admission_education WHERE admission_id = $1 ORDER BY sort_order, created_at`, [id]),
     tenantQuery(tenant, `SELECT * FROM admission_fee_schedule WHERE admission_id = $1 ORDER BY installment_no`, [id]),
     tenantQuery(tenant, `SELECT * FROM admission_receipts WHERE admission_id = $1 AND deleted_at IS NULL ORDER BY receipt_date DESC, created_at DESC`, [id]),
+    // Per-lead fee offer carries registration_amount + installments. The
+    // admission row itself only has total_fees, so without this join the
+    // FE has no way to know how the total breaks down.
+    adm.lead_id
+      ? tenantQuery(
+          tenant,
+          `SELECT id, lead_id, program_id, course_fees, registration_amount,
+                  payment_mode, fee_installments, created_at, updated_at
+             FROM lead_fee_offers WHERE lead_id = $1 LIMIT 1`,
+          [adm.lead_id],
+        )
+      : Promise.resolve({ rows: [] }),
   ]);
+  const feeOffer = offer.rows[0] ?? null;
   // Aggregate the money side so the FE doesn't have to.
   const paid_till_date = receipts.rows.reduce((s, r) => s + Number(r.amount || 0), 0);
+  // Registration amount precedence:
+  //   1. lead_fee_offers.registration_amount (authoritative — set by
+  //      accounts when minting the offer).
+  //   2. total_fees − Σ admission_fee_schedule.amount (legacy fallback
+  //      for installment-mode admissions created before offers existed).
+  //   3. null when neither is computable (e.g. Full-mode admission with
+  //      no offer).
+  let registration_amount = null;
+  if (feeOffer && feeOffer.registration_amount != null) {
+    registration_amount = Number(feeOffer.registration_amount);
+  } else if (fees.rows.length) {
+    const sumInst = fees.rows.reduce((s, r) => s + Number(r.amount || 0), 0);
+    const synth = Number(adm.total_fees || 0) - sumInst;
+    if (synth > 0.01) registration_amount = synth;
+  }
   return {
     ...adm,
     education: edu.rows,
     fee_schedule: fees.rows,
     receipts: receipts.rows,
+    fee_offer: feeOffer,
+    registration_amount,
     paid_till_date,
     pending_fees: Number(adm.total_fees || 0) - paid_till_date,
   };
@@ -202,7 +233,38 @@ export const insert = async (tenant, input, created_by) =>
         created_by ?? null,
       ],
     );
-    const admission = rows[0];
+    let admission = rows[0];
+
+    // Mint the friendly ADM-YYYY-NNNN code. Sequence resets per calendar
+    // year, based on the admission's own created_at (now()). We compute
+    // MAX(seq)+1 inside the same transaction; the partial unique index
+    // catches the rare race where two inserts pick the same sequence —
+    // a retry from the caller (or a regenerate call) would resolve it.
+    {
+      const year = new Date(admission.created_at).getFullYear();
+      const prefix = `ADM-${year}-`;
+      const { rows: maxRows } = await client.query(
+        `SELECT admission_code
+           FROM admissions
+          WHERE admission_code LIKE $1
+            AND deleted_at IS NULL
+          ORDER BY admission_code DESC
+          LIMIT 1`,
+        [`${prefix}%`],
+      );
+      // Parse the trailing sequence; defaults to 0 when this is the
+      // year's first admission. We slice the suffix and Number() it —
+      // tolerant of any non-numeric tail just in case (returns NaN → 0).
+      const lastSeq = maxRows[0]?.admission_code
+        ? Number(maxRows[0].admission_code.slice(prefix.length)) || 0
+        : 0;
+      const nextCode = `${prefix}${String(lastSeq + 1).padStart(4, '0')}`;
+      const { rows: codeRows } = await client.query(
+        `UPDATE admissions SET admission_code = $2 WHERE id = $1 RETURNING *`,
+        [admission.id, nextCode],
+      );
+      admission = codeRows[0] ?? admission;
+    }
 
     if (Array.isArray(input.education) && input.education.length) {
       for (let i = 0; i < input.education.length; i += 1) {
@@ -210,10 +272,11 @@ export const insert = async (tenant, input, created_by) =>
         await client.query(
           `INSERT INTO admission_education
              (admission_id, examination, stream, college_name, board_university,
-              year_of_passing, percentage, sort_order)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+              year_of_passing, percentage, grade_unit, sort_order)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
           [admission.id, e.examination, e.stream ?? null, e.college_name ?? null,
-           e.board_university ?? null, e.year_of_passing ?? null, e.percentage ?? null, i],
+           e.board_university ?? null, e.year_of_passing ?? null, e.percentage ?? null,
+           e.grade_unit ?? 'percent', i],
         );
       }
     }
@@ -257,10 +320,11 @@ export const updateRow = async (tenant, id, patch) =>
         await client.query(
           `INSERT INTO admission_education
              (admission_id, examination, stream, college_name, board_university,
-              year_of_passing, percentage, sort_order)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+              year_of_passing, percentage, grade_unit, sort_order)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
           [id, e.examination, e.stream ?? null, e.college_name ?? null,
-           e.board_university ?? null, e.year_of_passing ?? null, e.percentage ?? null, n],
+           e.board_university ?? null, e.year_of_passing ?? null, e.percentage ?? null,
+           e.grade_unit ?? 'percent', n],
         );
       }
     }
@@ -291,6 +355,25 @@ export const approve = async (tenant, id, user_id) => {
     tenant,
     `UPDATE admissions
         SET status = 'attending',
+            approved_by = $2,
+            approved_at = now(),
+            updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL AND status = 'pending_approval'
+      RETURNING *`,
+    [id, user_id],
+  );
+  return rows[0] || null;
+};
+
+// Reject a pending admission. Sets status='rejected' so the lead becomes
+// eligible for a fresh share-link mint (the link-gate query in
+// public-admissions/service.js explicitly excludes rejected rows).
+// `reason` is optional free-text the accounts user can supply.
+export const reject = async (tenant, id, user_id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE admissions
+        SET status = 'rejected',
             approved_by = $2,
             approved_at = now(),
             updated_at = now()
@@ -357,15 +440,25 @@ export const insertReceipt = async (tenant, admission_id, input, created_by) => 
     );
     receipt_no = `RC-${stamp}-${String((c[0]?.n || 0) + 1).padStart(4, '0')}`;
   }
+  // share_token is a 32-byte random URL-safe token. Stamped at create
+  // time so the public URL is stable; rotating it would invalidate any
+  // links the accounts user has already shared with the student.
+  const share_token = randomToken(32);
   const { rows } = await tenantQuery(
     tenant,
     `INSERT INTO admission_receipts
        (admission_id, receipt_no, receipt_date, amount, mode_of_payment,
-        transaction_details, is_old_collection, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        transaction_details, is_old_collection, receipt_kind, installment_no,
+        share_token, payment_screenshot_r2_key, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING *`,
     [admission_id, receipt_no, input.receipt_date, input.amount, input.mode_of_payment,
-     input.transaction_details ?? null, input.is_old_collection ?? false, created_by ?? null],
+     input.transaction_details ?? null, input.is_old_collection ?? false,
+     input.receipt_kind ?? 'misc',
+     input.receipt_kind === 'installment' ? (input.installment_no ?? null) : null,
+     share_token,
+     input.payment_screenshot_r2_key ?? null,
+     created_by ?? null],
   );
   return rows[0];
 };
@@ -502,7 +595,12 @@ export const pendingAdmissions = async (tenant) => {
          p.name              AS program_name,
          l.converted_at      AS event_at,
          l.assigned_to       AS owner_id,
-         u.name              AS owner_name
+         u.name              AS owner_name,
+         EXISTS (
+           SELECT 1 FROM lead_fee_offers o WHERE o.lead_id = l.id
+         )                   AS has_fee_offer,
+         NULL::text          AS admission_status,
+         NULL::text          AS break_reason
        FROM leads l
        LEFT JOIN programs p ON p.id = l.program_id
        LEFT JOIN users u    ON u.id = l.assigned_to
@@ -516,6 +614,8 @@ export const pendingAdmissions = async (tenant) => {
        UNION ALL
 
        -- Source 2: admissions in pending_approval (stub exists, accounts to verify)
+       --   OR on_break (the student stepped away — accounts wants to see
+       --   these on the same queue so they don't fall out of memory).
        SELECT
          a.id                AS source_id,
          'admission'         AS source_kind,
@@ -525,18 +625,85 @@ export const pendingAdmissions = async (tenant) => {
          a.email             AS email,
          a.whatsapp_number   AS whatsapp_number,
          p.name              AS program_name,
-         a.created_at        AS event_at,
+         -- For pending_approval rows the natural sort key is created_at
+         -- (newest stub first). For on_break rows we use updated_at as
+         -- the proxy "when did the break start" (markBreak is the only
+         -- mutation that flips status → on_break in this flow). Falling
+         -- back across the COALESCE keeps a unified event_at column.
+         CASE WHEN a.status = 'on_break' THEN a.updated_at ELSE a.created_at END AS event_at,
          a.guided_by_counsellor_id AS owner_id,
-         u.name              AS owner_name
+         u.name              AS owner_name,
+         -- Admission rows: an admission already exists, so the offer
+         -- gate isn't relevant for this branch. Default to true so the
+         -- FE doesn't gate the row buttons.
+         true                AS has_fee_offer,
+         a.status            AS admission_status,
+         a.break_reason      AS break_reason
        FROM admissions a
        LEFT JOIN programs p ON p.id = a.program_id
        LEFT JOIN users u    ON u.id = a.guided_by_counsellor_id
        WHERE a.deleted_at IS NULL
-         AND a.status = 'pending_approval'
+         AND a.status IN ('pending_approval', 'on_break')
      )
      SELECT * FROM unified ORDER BY event_at DESC NULLS LAST`,
   );
   return rows;
+};
+
+// ---------------- EMI digest for the Accounts Dashboard ----------------
+//
+// Two buckets:
+//   • upcoming → installments due in the next `upcomingDays` days that
+//                don't yet have a paid receipt tagged to that slot.
+//   • overdue  → installments past their due_date with no paid receipt.
+//                The Accounts team typically wants to see "24h+ overdue"
+//                separately from "due today" so we expose both via the
+//                same query and let the FE bucket.
+//
+// We join receipts with a LATERAL filter so "paid for this slot" is a
+// boolean per fee_schedule row (not just any receipt on the admission).
+export const emiDigest = async (tenant, upcomingDays = 7) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `
+    SELECT
+      fs.admission_id,
+      fs.installment_no,
+      fs.due_date,
+      fs.amount,
+      a.status AS admission_status,
+      TRIM(COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) AS student_name,
+      a.whatsapp_number,
+      a.email,
+      p.name AS program_name,
+      a.guided_by_counsellor_id AS owner_id,
+      u.name AS owner_name,
+      (fs.due_date - CURRENT_DATE)::int AS days_until_due,
+      EXISTS (
+        SELECT 1 FROM admission_receipts r
+         WHERE r.admission_id = fs.admission_id
+           AND r.deleted_at IS NULL
+           AND r.receipt_kind = 'installment'
+           AND r.installment_no = fs.installment_no
+      ) AS is_paid
+    FROM admission_fee_schedule fs
+    JOIN admissions a ON a.id = fs.admission_id AND a.deleted_at IS NULL
+    LEFT JOIN programs p ON p.id = a.program_id
+    LEFT JOIN users u    ON u.id = a.guided_by_counsellor_id
+    WHERE a.status IN ('attending', 'on_break', 'pending_approval')
+      AND (
+        -- Upcoming: due_date in [today, today + upcomingDays]
+        (fs.due_date >= CURRENT_DATE AND fs.due_date <= CURRENT_DATE + ($1::int) * INTERVAL '1 day')
+        OR
+        -- Overdue: any due_date in the past with no receipt
+        (fs.due_date < CURRENT_DATE)
+      )
+    ORDER BY fs.due_date ASC
+    `,
+    [upcomingDays],
+  );
+  // Drop already-paid rows in the result set so the FE doesn't have to.
+  return rows.filter((r) => !r.is_paid);
 };
 
 // Lightweight count query for the sidebar badge — same WHERE shape as

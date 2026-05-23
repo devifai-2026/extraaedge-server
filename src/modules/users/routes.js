@@ -7,7 +7,7 @@ import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
-import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema } from './schema.js';
+import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema } from './schema.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -22,6 +22,12 @@ router.get('/team', controller.myTeam);
 // route lives before /:id so the literal "me" doesn't match the UUID
 // validator on the catch-all.
 router.put('/me/theme', validate({ body: updateThemeSchema }), controller.updateMyTheme);
+
+// Set / clear the current user's avatar. The actual image is uploaded
+// via /uploads/presign + /uploads/confirm; this route only swaps the
+// stored GCS key on the users row and returns a fresh signed URL for
+// immediate render.
+router.put('/me/avatar', validate({ body: updateAvatarSchema }), controller.updateMyAvatar);
 
 // /users/org-tree — flat list of nodes + edges for the Org Tree canvas.
 //   super_admin → entire tenant
@@ -70,6 +76,16 @@ router.post(
   requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN),
   validate({ params: idParam, body: resetPasswordSchema }),
   controller.resetPassword,
+);
+
+// "Login as user" — org-admin only, no password required. Returns the
+// same shape as POST /auth/login so the FE can swap tokens with a
+// single auth.setSession() call. See auth/service.sudoLoginAs.
+router.post(
+  '/:id/sudo-login',
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN),
+  validate({ params: idParam }),
+  controller.sudoLogin,
 );
 
 router.put(

@@ -162,4 +162,9 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'accounts.report',
   'accounts.pay_schedule',
   'accounts.collection_receipt_wise',
+  // Tenant-wide admission pipeline view for admins. Lives in the main
+  // sidebar (not the Accounts module) so super_admins can see every
+  // converted lead's admission status without leaving their normal
+  // surfaces. Defaulted to super_admin only at provisioning time.
+  'admissions.pipeline',
 ]);
