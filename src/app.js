@@ -9,6 +9,7 @@ import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { globalLimiter } from './middleware/rateLimit.js';
 import { mountRoutes } from './routes.js';
 import { getSystemPool } from './db/system.js';
+import { runTenantMigrations } from './lib/run-tenant-migrations.js';
 
 export const buildApp = () => {
   const app = express();
@@ -57,6 +58,27 @@ export const buildApp = () => {
       res.json({ ok: true });
     } catch (err) {
       res.status(503).json({ ok: false, error: err.message });
+    }
+  });
+
+  // TEMPORARY one-shot tenant-migration trigger. Free-tier Render has no
+  // Shell, so we can't run `node scripts/run-migrations.js` directly. Hit
+  // this once from your laptop with the MIGRATE_TOKEN env var set, then
+  // remove the route in the next commit. Returns a JSON report per tenant.
+  // Gated by a constant-time-equal token check — a missing/wrong token
+  // returns 404 so the endpoint isn't discoverable by scanners.
+  app.post('/__one_shot_migrate_tenants', async (req, res) => {
+    const expected = process.env.MIGRATE_TOKEN;
+    const provided = req.get('x-migrate-token');
+    if (!expected || !provided || expected !== provided) {
+      return res.status(404).json({ error: 'not found' });
+    }
+    try {
+      const result = await runTenantMigrations();
+      return res.json({ ok: true, result });
+    } catch (err) {
+      logger.error({ err: err.message, stack: err.stack }, 'one-shot migration failed');
+      return res.status(500).json({ ok: false, error: err.message });
     }
   });
 
