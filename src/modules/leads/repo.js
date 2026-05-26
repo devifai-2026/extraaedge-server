@@ -109,13 +109,23 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     }
   }
 
-  // Source attributions
+  // Source attributions. Null out any dictionary id whose row has been deleted
+  // — the FE may still hold a stale id from before the dropdown row was removed.
   if (input.sources && input.sources.length) {
+    const exists = async (table, val) => {
+      if (!val) return false;
+      const { rows: r } = await client.query(`SELECT 1 FROM ${table} WHERE id = $1`, [val]);
+      return r.length > 0;
+    };
     for (const [idx, s] of input.sources.entries()) {
+      const channelId = (await exists('lead_channels', s.channel_id)) ? s.channel_id : null;
+      const sourceId = (await exists('lead_sources_dict', s.source_id)) ? s.source_id : null;
+      const campaignId = (await exists('lead_campaigns_dict', s.campaign_id)) ? s.campaign_id : null;
+      const mediumId = (await exists('lead_mediums', s.medium_id)) ? s.medium_id : null;
       await client.query(
         `INSERT INTO lead_source_attributions (lead_id, channel_id, source_id, campaign_id, medium_id, is_primary)
          VALUES ($1,$2,$3,$4,$5,$6)`,
-        [lead.id, s.channel_id ?? null, s.source_id ?? null, s.campaign_id ?? null, s.medium_id ?? null, s.is_primary ?? idx === 0],
+        [lead.id, channelId, sourceId, campaignId, mediumId, s.is_primary ?? idx === 0],
       );
     }
   }
@@ -477,13 +487,25 @@ export const updateLead = async (tenant, id, updates, actorId = null) => tenantT
   }
 
   if (Array.isArray(sources)) {
-    // Replace source attributions (destructive; treat UI as authoritative for this array)
+    // Replace source attributions (destructive; treat UI as authoritative for this array).
+    // Null out any dictionary id whose row has been deleted — the FE may still hold a
+    // stale id from before the dropdown row was removed, and a blind insert would
+    // trip the channel/source/campaign/medium FK.
     await client.query(`DELETE FROM lead_source_attributions WHERE lead_id = $1`, [id]);
+    const exists = async (table, val) => {
+      if (!val) return false;
+      const { rows: r } = await client.query(`SELECT 1 FROM ${table} WHERE id = $1`, [val]);
+      return r.length > 0;
+    };
     for (const [idx, s] of sources.entries()) {
+      const channelId = (await exists('lead_channels', s.channel_id)) ? s.channel_id : null;
+      const sourceId = (await exists('lead_sources_dict', s.source_id)) ? s.source_id : null;
+      const campaignId = (await exists('lead_campaigns_dict', s.campaign_id)) ? s.campaign_id : null;
+      const mediumId = (await exists('lead_mediums', s.medium_id)) ? s.medium_id : null;
       await client.query(
         `INSERT INTO lead_source_attributions (lead_id, channel_id, source_id, campaign_id, medium_id, is_primary)
          VALUES ($1,$2,$3,$4,$5,$6)`,
-        [id, s.channel_id ?? null, s.source_id ?? null, s.campaign_id ?? null, s.medium_id ?? null, s.is_primary ?? idx === 0],
+        [id, channelId, sourceId, campaignId, mediumId, s.is_primary ?? idx === 0],
       );
     }
   }
@@ -690,7 +712,13 @@ const sortClause = (sort) => {
   }
 };
 
-export const list = async (tenant, opts, scope) => {
+// Shared WHERE-builder for `list` and `stageCounts`. Returns the params
+// array (caller may push more), the conds list (so callers can append
+// their own predicates), and the tagJoin clause (empty when no tag filter).
+// `includeFlag` controls whether the `flag` overlays are baked in — the
+// list endpoint wants them, but stageCounts builds them per-tab so it
+// passes false.
+const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
   const {
     q, stage_id, sub_stage_id, program_id, assigned_to, team_id, tag_id,
     country_id, state_id, city, district, pincode,
@@ -705,7 +733,7 @@ export const list = async (tenant, opts, scope) => {
     lead_age_from, lead_age_to,
     lead_score_from, lead_score_to,
     followup_from, followup_to,
-    date_from, date_to, sort, page, limit, flag,
+    date_from, date_to, flag,
   } = opts;
   const conds = ['l.deleted_at IS NULL'];
   const params = [];
@@ -747,10 +775,6 @@ export const list = async (tenant, opts, scope) => {
   if (lead_score_from != null) { params.push(lead_score_from); conds.push(`l.lead_score >= $${params.length}`); }
   if (lead_score_to != null) { params.push(lead_score_to); conds.push(`l.lead_score <= $${params.length}`); }
   if (q) {
-    // Global search matches name, email, and every phone-like field
-    // (phone / whatsapp_number / alternate_contact). For numeric queries we
-    // also match against the digits-only form of those fields so that
-    // "9876543210" finds rows stored as "+91 98765-43210".
     params.push(`%${q}%`);
     const likeIdx = params.length;
     const digits = String(q).replace(/\D+/g, '');
@@ -798,22 +822,21 @@ export const list = async (tenant, opts, scope) => {
         AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
     )`);
   }
-  if (flag === 'unassigned') {
-    conds.push(`l.assigned_to IS NULL`);
-  }
-  if (flag === 'fresh') {
-    conds.push(`l.created_at >= now() - interval '24 hours'`);
-  }
-  if (flag === 'untouched') {
-    conds.push(`l.assigned_to IS NOT NULL AND NOT EXISTS (
-      SELECT 1 FROM lead_activities a WHERE a.lead_id = l.id
-        AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
-    )`);
+  if (includeFlag) {
+    if (flag === 'unassigned') {
+      conds.push(`l.assigned_to IS NULL`);
+    }
+    if (flag === 'fresh') {
+      conds.push(`l.created_at >= now() - interval '24 hours'`);
+    }
+    if (flag === 'untouched') {
+      conds.push(`l.assigned_to IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM lead_activities a WHERE a.lead_id = l.id
+          AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
+      )`);
+    }
   }
   if (scope && scope.user_ids) {
-    // sales_manager extension: include unassigned leads tagged with the
-    // manager's team_id so quick-add leads they create still appear on
-    // their dashboard until routed to a counsellor. See computeScope().
     params.push(scope.user_ids);
     const userIdsIdx = params.length;
     if (scope.include_unassigned_team_id) {
@@ -824,8 +847,6 @@ export const list = async (tenant, opts, scope) => {
       conds.push(`l.assigned_to = ANY($${userIdsIdx}::uuid[])`);
     }
   }
-  // account_manager scope: see every converted lead across the tenant,
-  // ignore owner. Set by computeScope() in leads/service.js.
   if (scope && scope.converted_only) {
     conds.push(`l.converted_at IS NOT NULL`);
   }
@@ -834,6 +855,12 @@ export const list = async (tenant, opts, scope) => {
     params.push(tag_id);
     tagJoin = `JOIN lead_tags lt ON lt.lead_id = l.id AND lt.tag_id = $${params.length}`;
   }
+  return { conds, params, tagJoin };
+};
+
+export const list = async (tenant, opts, scope) => {
+  const { sort, page, limit } = opts;
+  const { conds, params, tagJoin } = buildLeadWhere(opts, scope, { includeFlag: true });
   const where = `WHERE ${conds.join(' AND ')}`;
   const offset = (page - 1) * limit;
   params.push(limit, offset);
@@ -908,48 +935,45 @@ export const list = async (tenant, opts, scope) => {
   return { rows, total: countRows[0].total };
 };
 
-// Stage counts — scoped same way as list. Returns one row per stage incl. unstaged.
-export const stageCounts = async (tenant, scope) => {
-  const params = [];
-  const conds = ['l.deleted_at IS NULL'];
-  let scopeJoinClause = '';
-  if (scope && scope.user_ids) {
-    params.push(scope.user_ids);
-    const userIdsIdx = params.length;
-    if (scope.include_unassigned_team_id) {
-      params.push(scope.include_unassigned_team_id);
-      const teamIdx = params.length;
-      const expr = `(l.assigned_to = ANY($${userIdsIdx}::uuid[]) OR (l.assigned_to IS NULL AND l.team_id = $${teamIdx}))`;
-      conds.push(expr);
-      scopeJoinClause = `AND ${expr}`;
-    } else {
-      const expr = `l.assigned_to = ANY($${userIdsIdx}::uuid[])`;
-      conds.push(expr);
-      scopeJoinClause = `AND ${expr}`;
-    }
-  }
-  // account_manager: limit to converted leads.
-  if (scope && scope.converted_only) {
-    conds.push(`l.converted_at IS NOT NULL`);
-    scopeJoinClause += ` AND l.converted_at IS NOT NULL`;
-  }
+// Stage counts — scoped same way as list, and honors the same advanced
+// filter so the tab labels (All / Unassigned / Fresh / Untouched / each
+// stage) update when the user applies filters in the LeadList. The base
+// WHERE comes from buildLeadWhere with includeFlag=false; each tab then
+// appends its own predicate (e.g. "AND l.assigned_to IS NULL" for the
+// Unassigned count). `opts` may be undefined for legacy callers.
+export const stageCounts = async (tenant, opts = {}, scope) => {
+  const { conds, params, tagJoin } = buildLeadWhere(opts, scope, { includeFlag: false });
   const where = `WHERE ${conds.join(' AND ')}`;
-  const { rows } = await tenantQuery(
+  // Per-stage breakdown: count leads grouped by stage. We can't reuse the
+  // LEFT JOIN shape from before (group-by-stage) because the advanced
+  // filter's conds reference `l.*` and depend on the JOIN being inner.
+  // Easier: list all active stages, then for each stage run a count with
+  // an extra `AND l.stage_id = $X`. Stages tend to be small (≤20), so the
+  // extra round-trip is fine and the SQL stays straightforward.
+  const { rows: stageRows } = await tenantQuery(
     tenant,
-    `SELECT s.id AS stage_id, s.name AS stage_name, s.order_index,
-            COUNT(l.id)::int AS count
-       FROM lead_stages s
-       LEFT JOIN leads l ON l.stage_id = s.id AND l.deleted_at IS NULL
-            ${scopeJoinClause}
-      WHERE s.is_active = true
-      GROUP BY s.id, s.name, s.order_index
-      ORDER BY COALESCE(s.order_index, 0), s.name`,
+    `SELECT id, name, order_index FROM lead_stages WHERE is_active = true
+      ORDER BY COALESCE(order_index, 0), name`,
+  );
+  const stageCountsByStage = await Promise.all(
+    stageRows.map(async (s) => {
+      const p = [...params, s.id];
+      const { rows: r } = await tenantQuery(
+        tenant,
+        `SELECT COUNT(*)::int AS total FROM leads l ${tagJoin} ${where} AND l.stage_id = $${p.length}`,
+        p,
+      );
+      return { stage_id: s.id, stage_name: s.name, order_index: s.order_index, count: r[0].total };
+    }),
+  );
+  const totalRow = await tenantQuery(
+    tenant,
+    `SELECT COUNT(*)::int AS total FROM leads l ${tagJoin} ${where}`,
     params,
   );
-  const totalRow = await tenantQuery(tenant, `SELECT COUNT(*)::int AS total FROM leads l ${where}`, params);
   const untouchedRow = await tenantQuery(
     tenant,
-    `SELECT COUNT(*)::int AS total FROM leads l ${where}
+    `SELECT COUNT(*)::int AS total FROM leads l ${tagJoin} ${where}
        AND l.assigned_to IS NOT NULL
        AND NOT EXISTS (
          SELECT 1 FROM lead_activities a
@@ -960,12 +984,12 @@ export const stageCounts = async (tenant, scope) => {
   );
   const freshRow = await tenantQuery(
     tenant,
-    `SELECT COUNT(*)::int AS total FROM leads l ${where} AND l.created_at >= now() - interval '24 hours'`,
+    `SELECT COUNT(*)::int AS total FROM leads l ${tagJoin} ${where} AND l.created_at >= now() - interval '24 hours'`,
     params,
   );
   const unassignedRow = await tenantQuery(
     tenant,
-    `SELECT COUNT(*)::int AS total FROM leads l ${where} AND l.assigned_to IS NULL`,
+    `SELECT COUNT(*)::int AS total FROM leads l ${tagJoin} ${where} AND l.assigned_to IS NULL`,
     params,
   );
   return {
@@ -973,7 +997,7 @@ export const stageCounts = async (tenant, scope) => {
     fresh: freshRow.rows[0].total,
     untouched: untouchedRow.rows[0].total,
     unassigned: unassignedRow.rows[0].total,
-    stages: rows,
+    stages: stageCountsByStage,
   };
 };
 

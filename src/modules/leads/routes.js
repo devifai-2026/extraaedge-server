@@ -42,7 +42,9 @@ router.post(
 );
 
 router.get('/', validate({ query: listQuery }), controller.list);
-router.get('/stage-counts', controller.stageCounts);
+// stage-counts honors the same advanced-filter query params as /leads so the
+// tab labels update when the user applies a filter in the LeadList.
+router.get('/stage-counts', validate({ query: listQuery }), controller.stageCounts);
 router.post('/bulk-assign', validate({ body: bulkAssignSchema }), controller.bulkAssign);
 
 // Bulk hard-delete. Super-admin ONLY — counsellors / managers don't even

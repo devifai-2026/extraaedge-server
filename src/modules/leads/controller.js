@@ -9,7 +9,7 @@ export const list = async (req, res, next) => {
 
 export const stageCounts = async (req, res, next) => {
   try {
-    const data = await service.stageCounts(req.tenant, req.user);
+    const data = await service.stageCounts(req.tenant, req.user, req.query);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

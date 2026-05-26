@@ -114,10 +114,10 @@ exports.up = (pgm) => {
     CREATE TABLE lead_source_attributions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       lead_id uuid NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
-      channel_id uuid REFERENCES lead_channels(id),
-      source_id uuid REFERENCES lead_sources_dict(id),
-      campaign_id uuid REFERENCES lead_campaigns_dict(id),
-      medium_id uuid REFERENCES lead_mediums(id),
+      channel_id uuid REFERENCES lead_channels(id) ON DELETE SET NULL,
+      source_id uuid REFERENCES lead_sources_dict(id) ON DELETE SET NULL,
+      campaign_id uuid REFERENCES lead_campaigns_dict(id) ON DELETE SET NULL,
+      medium_id uuid REFERENCES lead_mediums(id) ON DELETE SET NULL,
       captured_at timestamptz NOT NULL DEFAULT now(),
       is_primary boolean NOT NULL DEFAULT false
     );

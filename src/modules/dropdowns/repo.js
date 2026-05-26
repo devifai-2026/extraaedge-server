@@ -130,7 +130,7 @@ export const update = async (tenant, type, id, updates) => {
 
 export const remove = async (tenant, type, id) => {
   const info = TABLE_MAP[type];
-  await tenantQuery(tenant, `UPDATE ${info.table} SET deleted_at = now() WHERE id = $1`, [id]);
+  await tenantQuery(tenant, `DELETE FROM ${info.table} WHERE id = $1`, [id]);
 };
 
 export const reorder = async (tenant, type, orderList) => {

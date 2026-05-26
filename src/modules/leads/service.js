@@ -40,9 +40,9 @@ export const listLeads = async (tenant, actor, query) => {
   return repo.list(tenant, query, scope);
 };
 
-export const stageCounts = async (tenant, actor) => {
+export const stageCounts = async (tenant, actor, query = {}) => {
   const scope = await computeScope(tenant, actor);
-  return repo.stageCounts(tenant, scope);
+  return repo.stageCounts(tenant, query, scope);
 };
 
 // Bulk auto-assign: runs the active assignment rule against every unassigned
