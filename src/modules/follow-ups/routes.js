@@ -60,16 +60,26 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
       params.push(`%${req.query.q}%`);
       conds.push(`(l.name ILIKE $${params.length} OR l.phone ILIKE $${params.length} OR l.email::text ILIKE $${params.length})`);
     }
-    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
-      params.push(req.user.id);
-      conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
-    } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
-      // Manager sees follow-ups for any lead currently owned by their team
-      // (recursive manager_id chain) plus follow-ups they themselves created.
-      const team = await teamHierarchy(req.tenant, req.user.id);
-      params.push(team);
-      params.push(req.user.id);
-      conds.push(`(l.assigned_to = ANY($${params.length - 1}::uuid[]) OR f.created_by = $${params.length})`);
+    // Owner-scoping applies to the GLOBAL follow-up list (Follow-up Manager):
+    // a counsellor sees their own, a manager sees their team's. But when a
+    // specific lead is requested (lead_id present — e.g. the LeadCard followup
+    // tab), return that lead's COMPLETE followup history regardless of who
+    // created it, so a reassigned lead's followups carry forward to the new
+    // owner. Visibility of the lead itself is already gated upstream; if you
+    // can open the lead, you see its full followup trail. Nothing is hidden by
+    // who happened to create each row.
+    if (!req.query.lead_id) {
+      if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+        params.push(req.user.id);
+        conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
+      } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+        // Manager sees follow-ups for any lead currently owned by their team
+        // (recursive manager_id chain) plus follow-ups they themselves created.
+        const team = await teamHierarchy(req.tenant, req.user.id);
+        params.push(team);
+        params.push(req.user.id);
+        conds.push(`(l.assigned_to = ANY($${params.length - 1}::uuid[]) OR f.created_by = $${params.length})`);
+      }
     }
     const where = `WHERE ${conds.join(' AND ')}`;
     const offset = (req.query.page - 1) * req.query.limit;

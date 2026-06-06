@@ -87,6 +87,7 @@ const loginPlatformUser = async ({ email, password, ip, user_agent }) => {
 
   const claims = {
     sub: user.id,
+    email: user.email,
     tenantId: null,
     tenantSlug: null,
     role: null,
@@ -159,6 +160,7 @@ const loginTenantUser = async ({ email, password, tenant_slug, ip, user_agent })
   const allowedTabs = buildAllowedTabs(user.tab_permissions, user.role);
   const claims = {
     sub: user.id,
+    email: user.email,
     tenantId: tenant.id,
     tenantSlug: tenant.slug,
     role: user.role,
@@ -236,6 +238,7 @@ export const sudoLoginAs = async ({ tenantSlug, target_user_id, ip, user_agent }
   const allowedTabs = buildAllowedTabs(user.tab_permissions, user.role);
   const claims = {
     sub: user.id,
+    email: user.email,
     tenantId: tenant.id,
     tenantSlug: tenant.slug,
     role: user.role,
@@ -305,6 +308,7 @@ export const refresh = async ({ refresh_token, ip, user_agent }) => {
 
     const newClaims = {
       sub: user.id,
+      email: user.email,
       tenantId: tenant.id,
       tenantSlug: tenant.slug,
       role: user.role,
@@ -345,6 +349,7 @@ export const refresh = async ({ refresh_token, ip, user_agent }) => {
   });
   const newClaims = {
     sub: user.id,
+    email: user.email,
     tenantId: null,
     tenantSlug: null,
     role: null,

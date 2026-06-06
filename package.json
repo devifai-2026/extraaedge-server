@@ -10,6 +10,8 @@
   "scripts": {
     "dev": "nodemon --watch src src/index.js",
     "start": "node src/index.js",
+    "gateway": "node src/gateway/index.js",
+    "gateway:dev": "nodemon --watch src/gateway src/gateway/index.js",
     "setup": "node scripts/setup-local.js",
     "migrate:system": "node scripts/run-migrations.js --target system",
     "migrate:tenant": "node scripts/run-migrations.js --target tenant",
@@ -20,7 +22,6 @@
     "worker:all": "node src/workers/run-all.js",
     "worker:email": "node src/workers/email-sender.js",
     "worker:sms": "node src/workers/sms-sender.js",
-    "worker:whatsapp": "node src/workers/whatsapp-sender.js",
     "worker:notifications": "node src/workers/notification-worker.js",
     "worker:bulk-import": "node src/workers/bulk-import-worker.js",
     "worker:bulk-export": "node src/workers/bulk-export-worker.js",
@@ -74,6 +75,7 @@
     "rrule": "^2.8.1",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
+    "whatsapp-web.js": "^1.34.7",
     "zod": "^3.23.8"
   },
   "devDependencies": {

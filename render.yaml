@@ -1,0 +1,132 @@
+# Render Blueprint — two services that together run the CRM backend:
+#
+#   extraaedge-api      the Express API + socket.io (Node runtime, no browser)
+#   extraaedge-wa-gateway  the whatsapp-web.js gateway (Docker + Chromium, 1 instance)
+#
+# The gateway holds a live headless-Chromium WhatsApp client per connected user
+# IN MEMORY, so it MUST stay a single instance (numInstances: 1, no autoscale) —
+# otherwise the same user's client could land on different boxes. Session auth
+# is persisted to GCS (RemoteAuth), so restarts/redeploys don't force re-scans.
+#
+# Shared config lives in the `extraaedge-shared` env group so both services see
+# the same DB creds, JWT secret, GCS config, and — critically — the same
+# WA_GATEWAY_INTERNAL_SECRET (the shared secret guarding API<->gateway calls).
+#
+# After connecting this blueprint in Render, set the SECRET values in the env
+# group (they're marked sync:false so Render prompts you and never stores them
+# in git). See DEPLOY-render.md.
+
+envVarGroups:
+  - name: extraaedge-shared
+    envVars:
+      # --- shared secret for API <-> gateway internal calls (both directions) ---
+      - key: WA_GATEWAY_INTERNAL_SECRET
+        generateValue: true        # Render generates one and shares it to both services
+      # --- core secrets (fill in Render; never in git) ---
+      - key: JWT_SECRET
+        sync: false
+      - key: TENANT_SECRET_ENCRYPTION_KEY
+        sync: false
+      - key: SYSTEM_DB_HOST
+        sync: false
+      - key: SYSTEM_DB_PORT
+        value: "5432"
+      - key: SYSTEM_DB_NAME
+        sync: false
+      - key: SYSTEM_DB_USER
+        sync: false
+      - key: SYSTEM_DB_PASSWORD
+        sync: false
+      - key: SYSTEM_DB_SSL
+        value: "true"
+      - key: TENANT_DB_HOST
+        sync: false
+      - key: TENANT_DB_PORT
+        value: "5432"
+      - key: TENANT_DB_SUPERUSER
+        sync: false
+      - key: TENANT_DB_SUPERUSER_PASSWORD
+        sync: false
+      - key: TENANT_DB_SSL
+        value: "true"
+      - key: GCS_PROJECT_ID
+        sync: false
+      - key: GCS_BUCKET
+        sync: false
+      # --- provider keys (still required by env.js boot validation) ---
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        sync: false
+      - key: BREVO_SENDER_NAME
+        sync: false
+      - key: BREVO_WEBHOOK_SECRET
+        sync: false
+      - key: MESSAGECENTRAL_CUSTOMER_ID
+        sync: false
+      - key: MESSAGECENTRAL_AUTH_TOKEN
+        sync: false
+      - key: MESSAGECENTRAL_SENDER_ID
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: EXOTEL_ACCOUNT_SID
+        sync: false
+      - key: EXOTEL_API_KEY
+        sync: false
+      - key: EXOTEL_API_TOKEN
+        sync: false
+      - key: EXOTEL_CALLER_ID
+        sync: false
+      - key: EXOTEL_WEBHOOK_SECRET
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: QUEUE_DRIVER
+        value: bullmq
+
+services:
+  # ---- API + socket.io (Node runtime; no browser needed) ----
+  - type: web
+    name: extraaedge-api
+    runtime: node
+    plan: standard
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - fromGroup: extraaedge-shared
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4000"
+      # On Render, services reach each other on the PRIVATE network by service
+      # name. We set the cross-service URLs explicitly (scheme + path included)
+      # rather than via `fromService property`, which only yields host:port.
+      # The gateway is a private service listening on 4100.
+      - key: WA_GATEWAY_URL
+        value: http://extraaedge-wa-gateway:4100
+
+  # ---- WhatsApp gateway (Docker + Chromium; MUST be single instance) ----
+  - type: pserv                      # private service: no public URL, reached internally
+    name: extraaedge-wa-gateway
+    runtime: docker
+    plan: standard                   # Chromium is memory-hungry; standard+ recommended
+    branch: main
+    numInstances: 1                  # in-memory client registry — never scale past 1
+    dockerfilePath: ./Dockerfile.gateway
+    envVars:
+      - fromGroup: extraaedge-shared
+      - key: NODE_ENV
+        value: production
+      - key: WA_GATEWAY_PORT
+        value: "4100"
+      # The gateway POSTs events to `${WA_API_BASE_URL}/internal/wa/notify`, so
+      # this MUST include the /api/v1 prefix. Use the API's private hostname.
+      - key: WA_API_BASE_URL
+        value: http://extraaedge-api:4000/api/v1

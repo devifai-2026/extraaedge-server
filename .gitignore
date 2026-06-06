@@ -11,3 +11,10 @@ tmp/
 *.tsbuildinfo
 .npm/
 .eslintcache
+
+# whatsapp-web.js local runtime artifacts
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Stray lead-data exports (PII) — never commit
+/merged-leads-review.csv

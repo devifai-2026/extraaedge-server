@@ -3,7 +3,10 @@ import { QUEUE_NAMES } from '../config/constants.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { logger } from '../lib/logger.js';
 
-const channelQueue = { email: QUEUE_NAMES.EMAIL, sms: QUEUE_NAMES.SMS, whatsapp: QUEUE_NAMES.WHATSAPP };
+// WhatsApp is no longer an automated channel — it's per-user manual chat only
+// (whatsapp-web.js, personal numbers). Automated campaign/drip/workflow sends
+// over WhatsApp are disabled to avoid number bans, so there's no whatsapp queue.
+const channelQueue = { email: QUEUE_NAMES.EMAIL, sms: QUEUE_NAMES.SMS };
 
 registerWorker(QUEUE_NAMES.CAMPAIGN, async ({ data }) => {
   const tenant = await resolveTenantById(data.tenantId);
@@ -22,7 +25,9 @@ registerWorker(QUEUE_NAMES.CAMPAIGN, async ({ data }) => {
 
     await tenantQuery(tenant, `UPDATE campaigns_bulk_stats SET leads_count = $2 WHERE campaign_id = $1`, [c.id, leads.length]);
 
-    const channels = c.channel === 'multi' ? ['email', 'sms', 'whatsapp'] : [c.channel];
+    const channels = (c.channel === 'multi' ? ['email', 'sms', 'whatsapp'] : [c.channel])
+      // Automated WhatsApp is disabled (personal-number manual chat only).
+      .filter((ch) => ch !== 'whatsapp');
     for (const ch of channels) {
       const tplField = ch === 'email' ? c.email_template_id : ch === 'sms' ? c.sms_template_id : c.whatsapp_template_id;
       if (!tplField) continue;

@@ -16,6 +16,29 @@ import { logger } from './logger.js';
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(thisDir, '../db/migrations/tenant');
+const SYSTEM_MIGRATIONS_DIR = path.resolve(thisDir, '../db/migrations/system');
+
+// Run pending SYSTEM-db migrations (the shared tenants/platform tables, incl.
+// platform_request_log). Importable from the running server for the one-shot
+// HTTP trigger. Already-applied migrations are no-ops.
+export const runSystemMigrations = async () => {
+  await migrationRunner({
+    databaseUrl: {
+      host: env.SYSTEM_DB_HOST,
+      port: env.SYSTEM_DB_PORT,
+      database: env.SYSTEM_DB_NAME,
+      user: env.SYSTEM_DB_USER,
+      password: env.SYSTEM_DB_PASSWORD,
+      ssl: env.SYSTEM_DB_SSL ? { rejectUnauthorized: false } : false,
+    },
+    dir: SYSTEM_MIGRATIONS_DIR,
+    migrationsTable: 'pgmigrations',
+    direction: 'up',
+    log: (m) => logger.info(`[system-migrate] ${m}`),
+    verbose: false,
+  });
+  return { ok: true };
+};
 
 const migrateOneTenant = async (tenant) => {
   await migrationRunner({

@@ -6,6 +6,8 @@ import platformTenantsRouter from './modules/tenants/routes.js';
 import platformUsersRouter from './modules/platform-users/routes.js';
 import platformPlansRouter from './modules/plans/routes.js';
 import platformAuditRouter from './modules/platform-audit/routes.js';
+import platformRequestLogRouter from './modules/platform-requests/routes.js';
+import platformLeadInspectorRouter from './modules/platform-lead-inspector/routes.js';
 import platformTicketsRouter from './modules/platform-tickets/routes.js';
 import impersonationRouter from './modules/impersonation/routes.js';
 import customRolesRouter from './modules/custom-roles/routes.js';
@@ -37,6 +39,8 @@ import failedLeadsRouter from './modules/failed-leads/routes.js';
 import emailRouter from './modules/communications/email-routes.js';
 import smsRouter from './modules/communications/sms-routes.js';
 import whatsappRouter from './modules/communications/whatsapp-routes.js';
+import whatsappConnectionRouter from './modules/communications/whatsapp-connection-routes.js';
+import waInternalRouter from './modules/internal/wa-routes.js';
 import scheduledSendsRouter from './modules/scheduled-sends/routes.js';
 import callsRouter from './modules/calls/routes.js';
 import paymentsRouter from './modules/payments/routes.js';
@@ -83,6 +87,10 @@ export const mountRoutes = (app) => {
   api.use('/platform/users', platformUsersRouter);
   api.use('/platform/plans', platformPlansRouter);
   api.use('/platform/audit-log', platformAuditRouter);
+  // Danger Request Log — full cross-tenant API activity (product_owner only).
+  api.use('/platform/request-log', platformRequestLogRouter);
+  // Cross-tenant lead inspector — drill into any tenant's lead + bulk imports.
+  api.use('/platform/inspect', platformLeadInspectorRouter);
   api.use('/platform/tickets', platformTicketsRouter);
   api.use('/platform/impersonate', impersonationRouter);
 
@@ -125,6 +133,9 @@ export const mountRoutes = (app) => {
   // Communications
   api.use('/email', emailRouter);
   api.use('/sms', smsRouter);
+  // Per-user personal-number WhatsApp (whatsapp-web.js gateway). Mounted BEFORE
+  // the legacy /whatsapp router so /whatsapp/connection/* resolves here.
+  api.use('/whatsapp/connection', whatsappConnectionRouter);
   api.use('/whatsapp', whatsappRouter);
   api.use('/scheduled-sends', scheduledSendsRouter);
 
@@ -160,6 +171,11 @@ export const mountRoutes = (app) => {
   // Per-lead customised fee offer — accounts team's tweak of the
   // program-level defaults for a specific converted lead.
   api.use('/lead-fee-offers', leadFeeOffersRouter);
+
+  // Internal callback from the WhatsApp gateway (gateway → API). NOT behind
+  // authRequired/tenantRequired — the shared secret in the header is the
+  // credential (validated inside the router).
+  api.use('/internal/wa', waInternalRouter);
 
   // Unauthenticated public surface for student-facing admission share-links.
   // Token in the URL is the credential; this router lives OUTSIDE the

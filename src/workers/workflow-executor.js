@@ -98,17 +98,19 @@ registerWorker(QUEUE_NAMES.WORKFLOW, async ({ data }) => {
               break;
             }
             case 'send_message': {
-              if (lead && action.channel && action.template_id) {
-                const recipField = action.channel === 'email' ? 'email' : action.channel === 'whatsapp' ? 'whatsapp_number' : 'phone';
+              // Automated WhatsApp is disabled (per-user manual chat only) —
+              // skip WhatsApp workflow steps.
+              if (lead && action.channel && action.channel !== 'whatsapp' && action.template_id) {
+                const recipField = action.channel === 'email' ? 'email' : 'phone';
                 const recipient = lead[recipField] ?? lead.phone;
                 if (recipient) {
                   const { rows: [log] } = await tenantQuery(
                     tenant,
                     `INSERT INTO message_log (lead_id, channel, template_id, recipient, provider, status, workflow_run_id)
                      VALUES ($1,$2,$3,$4,$5,'queued',$6) RETURNING id`,
-                    [lead.id, action.channel, action.template_id, recipient, action.channel === 'email' ? 'brevo' : action.channel === 'sms' ? 'messagecentral' : 'wabridge', data.run_id],
+                    [lead.id, action.channel, action.template_id, recipient, action.channel === 'email' ? 'brevo' : 'messagecentral', data.run_id],
                   );
-                  const qname = action.channel === 'email' ? QUEUE_NAMES.EMAIL : action.channel === 'sms' ? QUEUE_NAMES.SMS : QUEUE_NAMES.WHATSAPP;
+                  const qname = action.channel === 'email' ? QUEUE_NAMES.EMAIL : QUEUE_NAMES.SMS;
                   await publish(qname, 'send', { tenantId: tenant.id, message_log_id: log.id, lead_id: lead.id, template_id: action.template_id });
                 }
               }

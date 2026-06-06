@@ -143,7 +143,21 @@ export const createLead = async (tenant, actor, input, { on_duplicate = 'block',
       // create_new: fall through, caller explicitly accepted
     }
   }
-  let lead = await repo.insertLead(tenant, input, actor?.id);
+  let lead;
+  try {
+    lead = await repo.insertLead(tenant, input, actor?.id);
+  } catch (err) {
+    // The leads_unique_phone_digits partial index (DB backstop) fires when a
+    // request races the app-level findDuplicates check above, or when the
+    // caller passed force/create_new but the same phone is already live.
+    // Surface it as the same friendly 409 the pre-check would have thrown,
+    // re-querying for the conflicting row(s) so the FE can show them.
+    if (err?.code === '23505' && /leads_unique_phone_digits/.test(err?.constraint ?? err?.message ?? '')) {
+      const existing = await repo.findDuplicates(tenant, { phone: input.phone });
+      throw duplicateDetected(existing);
+    }
+    throw err;
+  }
   // Quick-add leaves the lead unassigned by skipping the round-robin worker.
   // Admins / managers manually pick an owner from the dashboard's "Unassigned"
   // bucket (filter `assigned_to=null` on /leads).
@@ -476,7 +490,7 @@ export const getTimeline = async (tenant, id, { limit = 100, before } = {}) => {
                                      )
        LEFT JOIN users mu ON au.manager_id = mu.id
        LEFT JOIN users fu ON e.kind = 'activity'
-                         AND e.subtype = 'reassign'
+                         AND e.subtype IN ('reassign', 'refer')
                          AND fu.id = (e.metadata_json->>'from')::uuid
       ORDER BY created_at DESC,
                -- Deterministic tiebreaker when two events land on the same

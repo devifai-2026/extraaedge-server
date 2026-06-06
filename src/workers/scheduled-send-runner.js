@@ -5,7 +5,8 @@ import { publish } from '../lib/queue.js';
 import { nextBusinessMoment } from '../modules/calendar/repo.js';
 import { logger } from '../lib/logger.js';
 
-const channelQueue = { email: QUEUE_NAMES.EMAIL, sms: QUEUE_NAMES.SMS, whatsapp: QUEUE_NAMES.WHATSAPP };
+// Automated WhatsApp is disabled (per-user manual chat only). No whatsapp queue.
+const channelQueue = { email: QUEUE_NAMES.EMAIL, sms: QUEUE_NAMES.SMS };
 
 const tick = async () => {
   try {
@@ -18,6 +19,12 @@ const tick = async () => {
         `SELECT * FROM scheduled_sends WHERE status = 'scheduled' AND scheduled_for <= now() AND deleted_at IS NULL LIMIT 50`,
       );
       for (const s of due) {
+        // WhatsApp scheduled sends are disabled — mark skipped, no automated WA.
+        if (s.channel === 'whatsapp') {
+          await tenantQuery(tenant, `UPDATE scheduled_sends SET status = 'completed' WHERE id = $1`, [s.id]);
+          logger.info({ scheduled_send_id: s.id }, 'scheduled WhatsApp send skipped (automated WA disabled)');
+          continue;
+        }
         await tenantQuery(tenant, `UPDATE scheduled_sends SET status = 'running' WHERE id = $1`, [s.id]);
         for (const lead_id of s.lead_ids) {
           const { rows: [lead] } = await tenantQuery(tenant, `SELECT email, phone, whatsapp_number FROM leads WHERE id = $1 AND deleted_at IS NULL`, [lead_id]);

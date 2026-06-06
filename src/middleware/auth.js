@@ -15,6 +15,7 @@ export const authRequired = (req, _res, next) => {
     const claims = verifyToken(token);
     req.user = {
       id: claims.sub,
+      email: claims.email ?? null,
       tenantId: claims.tenantId ?? null,
       tenantSlug: claims.tenantSlug ?? null,
       role: claims.role ?? null,
@@ -55,6 +56,7 @@ export const authOptional = (req, _res, next) => {
     const claims = verifyToken(token);
     req.user = {
       id: claims.sub,
+      email: claims.email ?? null,
       tenantId: claims.tenantId ?? null,
       tenantSlug: claims.tenantSlug ?? null,
       role: claims.role ?? null,

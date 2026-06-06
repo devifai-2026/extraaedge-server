@@ -4,7 +4,7 @@ import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
-import { tenantQuery } from '../../db/tenant.js';
+import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
 import { QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
@@ -380,25 +380,39 @@ router.post('/status-change', validate({ body: statusChangeSchema }), async (req
 router.post('/refer', validate({ body: referSchema }), async (req, res, next) => {
   try {
     const { lead_ids, assigned_to, reason } = req.body;
-    for (const id of lead_ids) {
-      await tenantQuery(
-        req.tenant,
-        `UPDATE lead_assignments SET is_active = false WHERE lead_id = $1 AND is_active`,
-        [id],
-      );
-      await tenantQuery(
-        req.tenant,
-        `INSERT INTO lead_assignments (lead_id, assigned_to, assigned_by, assignment_type, is_active, status, reason)
-         VALUES ($1,$2,$3,'refer',true,'open',$4)`,
-        [id, assigned_to, req.user.id, reason ?? null],
-      );
-      await tenantQuery(
-        req.tenant,
-        `UPDATE leads SET assigned_to = $2 WHERE id = $1 AND deleted_at IS NULL`,
-        [id, assigned_to],
-      );
-    }
-    res.json({ data: { count: lead_ids.length }, meta: { requestId: req.id } });
+    const count = await tenantTx(req.tenant, async (client) => {
+      // Resolve the new owner's manager once so we can snap leads.manager_id
+      // (same as bulkAssign / the single-lead reassign path).
+      const { rows: mgrRow } = await client.query(`SELECT manager_id FROM users WHERE id = $1`, [assigned_to]);
+      const newManagerId = mgrRow[0]?.manager_id ?? null;
+      let referred = 0;
+      for (const id of lead_ids) {
+        // Capture the prior owner BEFORE overwriting it, so from_user_id and
+        // the timeline "from → to" chain are populated.
+        const { rows: leadRows } = await client.query(`SELECT assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`, [id]);
+        if (!leadRows[0]) continue; // skip missing/deleted leads
+        const fromUserId = leadRows[0].assigned_to;
+        if (fromUserId === assigned_to) continue; // no-op refer
+        await client.query(`UPDATE lead_assignments SET is_active = false, status = 'closed' WHERE lead_id = $1 AND is_active`, [id]);
+        await client.query(
+          `INSERT INTO lead_assignments (lead_id, from_user_id, assigned_to, assigned_by, assignment_type, is_active, status, reason, created_at)
+           VALUES ($1,$2,$3,$4,'refer',true,'open',$5, clock_timestamp())`,
+          [id, fromUserId, assigned_to, req.user.id, reason ?? null],
+        );
+        await client.query(
+          `UPDATE leads SET assigned_to = $2, manager_id = $3, last_activity_at = now() WHERE id = $1 AND deleted_at IS NULL`,
+          [id, assigned_to, newManagerId],
+        );
+        await client.query(
+          `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json, created_at)
+           VALUES ($1,$2,'refer',$3,$4::jsonb, clock_timestamp())`,
+          [id, req.user.id, 'Lead referred', JSON.stringify({ from: fromUserId, to: assigned_to, assigned_to, reason: reason ?? null })],
+        );
+        referred += 1;
+      }
+      return referred;
+    });
+    res.json({ data: { count }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

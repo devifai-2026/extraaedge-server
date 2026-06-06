@@ -102,7 +102,8 @@ export const QUEUE_NAMES = Object.freeze({
   EVENTS: 'events',
   EMAIL: 'email-send',
   SMS: 'sms-send',
-  WHATSAPP: 'whatsapp-send',
+  // WHATSAPP queue removed — automated WhatsApp is disabled; per-user manual
+  // chat runs in the whatsapp-web.js gateway, not via a job queue.
   BULK_IMPORT: 'bulk-import',
   BULK_EXPORT: 'bulk-export',
   CAMPAIGN: 'campaign-run',

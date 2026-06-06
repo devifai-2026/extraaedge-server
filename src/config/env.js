@@ -83,10 +83,22 @@ const schema = z.object({
   OTP_TTL_MINUTES: intFrom(5),
   OTP_MAX_ATTEMPTS: intFrom(3),
 
-  WABRIDGE_API_KEY: stringNonEmpty,
-  WABRIDGE_PHONE_NUMBER_ID: stringNonEmpty,
-  WABRIDGE_WEBHOOK_SECRET: stringNonEmpty,
-  WABRIDGE_BASE_URL: stringNonEmpty,
+  // WhatsApp is now driven by the self-hosted whatsapp-web.js gateway
+  // (per-user personal numbers), replacing the WABridge Business API.
+  //   WA_GATEWAY_URL          API → gateway base (internal REST)
+  //   WA_GATEWAY_PORT         gateway HTTP listen port
+  //   WA_API_BASE_URL         gateway → API base for the /internal/wa/notify callback
+  //   WA_GATEWAY_INTERNAL_SECRET  shared secret guarding both directions
+  //   WA_PUPPETEER_EXECUTABLE_PATH  optional system Chromium (else bundled puppeteer)
+  WA_GATEWAY_URL: z.string().optional().default('http://localhost:4100'),
+  WA_GATEWAY_PORT: intFrom(4100),
+  WA_API_BASE_URL: z.string().optional().default('http://localhost:4000/api/v1'),
+  WA_GATEWAY_INTERNAL_SECRET: stringNonEmpty.default('dev-wa-internal-secret-change-me'),
+  WA_PUPPETEER_EXECUTABLE_PATH: z.string().optional().default(''),
+  // Persisted whatsapp-web.js RemoteAuth session blobs land in this GCS purpose
+  // folder. Throttle how many Chromium clients we restore at once on boot.
+  WA_SESSION_RESTORE_CONCURRENCY: intFrom(3),
+  WA_SEND_RATE_PER_MINUTE: intFrom(20),
 
   RAZORPAY_KEY_ID: stringNonEmpty,
   RAZORPAY_KEY_SECRET: stringNonEmpty,

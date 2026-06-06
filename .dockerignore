@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+.git
+.env
+.env.*
+.wwebjs_auth
+.wwebjs_cache
+tests
+*.md
+.github

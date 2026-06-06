@@ -5,11 +5,12 @@ import morgan from 'morgan';
 import { env, corsOrigins } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { requestId } from './middleware/requestId.js';
+import { requestLog } from './middleware/requestLog.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { globalLimiter } from './middleware/rateLimit.js';
 import { mountRoutes } from './routes.js';
 import { getSystemPool } from './db/system.js';
-import { runTenantMigrations } from './lib/run-tenant-migrations.js';
+import { runTenantMigrations, runSystemMigrations } from './lib/run-tenant-migrations.js';
 
 export const buildApp = () => {
   const app = express();
@@ -81,6 +82,31 @@ export const buildApp = () => {
       return res.status(500).json({ ok: false, error: err.message });
     }
   });
+
+  // TEMPORARY one-shot SYSTEM-migration trigger (same trust model as the
+  // tenant one above — gated by MIGRATE_TOKEN, 404 on missing/wrong token).
+  // Runs pending migrations against the SYSTEM db (e.g. platform_request_log).
+  // Hit once after deploy, then remove in a follow-up commit.
+  app.post('/__one_shot_migrate_system', async (req, res) => {
+    const expected = process.env.MIGRATE_TOKEN;
+    const provided = req.get('x-migrate-token');
+    if (!expected || !provided || expected !== provided) {
+      return res.status(404).json({ error: 'not found' });
+    }
+    try {
+      const result = await runSystemMigrations();
+      return res.json({ ok: true, result });
+    } catch (err) {
+      logger.error({ err: err.message, stack: err.stack }, 'one-shot system migration failed');
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // Capture every API request into the cross-tenant platform_request_log
+  // (powers the product_owner "Danger Request Log"). Reads req.user/req.tenant
+  // lazily at response time, after per-route auth has populated them. Writes
+  // are fire-and-forget so this can never break a request.
+  app.use(requestLog);
 
   // All API routes
   mountRoutes(app);

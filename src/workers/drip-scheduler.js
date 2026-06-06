@@ -5,7 +5,8 @@ import { publish } from '../lib/queue.js';
 import { evaluateCondition } from '../services/rule-engine.js';
 import { logger } from '../lib/logger.js';
 
-const channelQueue = { email: QUEUE_NAMES.EMAIL, sms: QUEUE_NAMES.SMS, whatsapp: QUEUE_NAMES.WHATSAPP };
+// Automated WhatsApp is disabled (per-user manual chat only). No whatsapp queue.
+const channelQueue = { email: QUEUE_NAMES.EMAIL, sms: QUEUE_NAMES.SMS };
 
 const tick = async () => {
   try {
@@ -17,6 +18,8 @@ const tick = async () => {
       for (const drip of drips) {
         const { rows: rules } = await tenantQuery(tenant, `SELECT * FROM campaigns_drip_rules WHERE drip_id = $1 ORDER BY step_order`, [drip.id]);
         for (const rule of rules) {
+          // WhatsApp drip steps are disabled — skip them (no automated WA).
+          if (rule.channel === 'whatsapp') continue;
           // Find leads that entered eligibility `day_offset` days ago and haven't run this step yet.
           const { rows: eligible } = await tenantQuery(
             tenant,

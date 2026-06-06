@@ -1,5 +1,18 @@
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 
+// Follow-up date-window bounds normalization.
+//
+// The FE date picker sends bare `YYYY-MM-DD` strings, which Postgres coerces
+// to midnight (00:00:00). For a "from" bound that's the correct start-of-day,
+// but for a "to" bound it makes the window end at the very first instant of
+// that day — so picking "Jun 1 → Jun 1" (or any single day) matches a single
+// midnight instant and returns nothing. Expand a bare-date "to" bound to the
+// end of that day so an inclusive [from, to] range covers whole days.
+// Full timestamps (anything carrying a 'T' / time component) are passed
+// through untouched — callers that send precise instants get exact behaviour.
+const isBareDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+const followupToBound = (v) => (isBareDate(v) ? `${v}T23:59:59.999` : v);
+
 export const LEAD_COLUMNS = `
   id, name, first_name, last_name, alternate_first_name, email, alternate_email,
   phone, whatsapp_number, alternate_contact, gender, language,
@@ -18,13 +31,49 @@ export const LEAD_COLUMNS = `
   created_at, updated_at, last_activity_at
 `;
 
-// Duplicate detection by exact phone/email/whatsapp match (case-insensitive).
-export const findDuplicates = async (tenant, { phone, email, whatsapp_number }, { excludeId } = {}) => {
+// Duplicate detection by email (case-insensitive) + phone/whatsapp.
+//
+// Phone and whatsapp are matched on their DIGITS ONLY (last 10 retained, so
+// "9322994226", "+919322994226" and "0919322994226" all collide) rather than
+// raw-string equality — institutes' sheets carry the same number in wildly
+// different formats and exact-string matching let obvious dupes through.
+//
+// `matchPhone` (default true) controls whether phone participates. The manual-
+// create path leaves it true (phone is a strong dedup signal there). The bulk-
+// import path passes false because phone is noisy at scale (institutes share
+// family numbers across leads), and only flips it back to true for a given row
+// when that row carries NEITHER email NOR whatsapp — otherwise identical
+// phone-only rows have nothing to dedup on and slip in as dupes (the original
+// bug). See the bulk-import worker for that per-row decision.
+const last10Digits = (v) => {
+  const d = String(v ?? '').replace(/\D+/g, '');
+  return d.length > 10 ? d.slice(-10) : d;
+};
+
+export const findDuplicates = async (
+  tenant,
+  { phone, email, whatsapp_number },
+  { excludeId, matchPhone = true } = {},
+) => {
   const conds = [];
   const params = [];
-  if (phone) { params.push(phone); conds.push(`phone = $${params.length}`); }
   if (email) { params.push(email); conds.push(`lower(email::text) = lower($${params.length}::text)`); }
-  if (whatsapp_number) { params.push(whatsapp_number); conds.push(`whatsapp_number = $${params.length}`); }
+  // Match phone/whatsapp on the last-10 digits of the stored value against the
+  // last-10 digits of the incoming value (computed in JS, passed as a param).
+  const digitCond = (col, val) => {
+    const d = last10Digits(val);
+    if (d.length < 10) return; // too short to be a reliable phone match
+    params.push(d);
+    conds.push(`right(regexp_replace(coalesce(${col},''), '\\D', '', 'g'), 10) = $${params.length}`);
+  };
+  if (whatsapp_number) {
+    digitCond('whatsapp_number', whatsapp_number);
+    digitCond('phone', whatsapp_number); // a lead's phone may hold this number
+  }
+  if (phone && matchPhone) {
+    digitCond('phone', phone);
+    digitCond('whatsapp_number', phone); // a lead's whatsapp may hold this number
+  }
   if (!conds.length) return [];
   let q = `SELECT id, name, email, phone, whatsapp_number, stage_id, assigned_to, created_at
              FROM leads
@@ -805,9 +854,16 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
     conds.push(`EXISTS (SELECT 1 FROM lead_source_attributions lsa WHERE lsa.lead_id = l.id AND ${subConds.join(' AND ')})`);
   }
   if (followup_from || followup_to) {
-    const subConds = ['lf.lead_id = l.id', 'lf.deleted_at IS NULL', "lf.status = 'planned'"];
+    // Match a followup of ANY status (planned/missed/done) whose
+    // next_action_datetime lands in the window. The Follow-up Manager date
+    // range often covers past dates, where the only rows are completed
+    // ('done') or 'missed' attempts — restricting to 'planned' there returned
+    // an empty list even though those leads clearly had followup activity.
+    // A bare-date `to` bound is expanded to end-of-day so a single-day range
+    // (from == to) covers the whole day instead of a single midnight instant.
+    const subConds = ['lf.lead_id = l.id', 'lf.deleted_at IS NULL'];
     if (followup_from) { params.push(followup_from); subConds.push(`lf.next_action_datetime >= $${params.length}::timestamptz`); }
-    if (followup_to) { params.push(followup_to); subConds.push(`lf.next_action_datetime <= $${params.length}::timestamptz`); }
+    if (followup_to) { params.push(followupToBound(followup_to)); subConds.push(`lf.next_action_datetime <= $${params.length}::timestamptz`); }
     conds.push(`EXISTS (SELECT 1 FROM lead_followups lf WHERE ${subConds.join(' AND ')})`);
   }
   if (is_touched === true) {
@@ -859,12 +915,52 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
 };
 
 export const list = async (tenant, opts, scope) => {
-  const { sort, page, limit } = opts;
+  const { sort, page, limit, followup_from, followup_to } = opts;
   const { conds, params, tagJoin } = buildLeadWhere(opts, scope, { includeFlag: true });
   const where = `WHERE ${conds.join(' AND ')}`;
+
+  // The count query only ever needs the WHERE params (no limit/offset, and
+  // none of the matched-followups window params added below). Snapshot it now,
+  // before we append anything that's only referenced by the main SELECT.
+  const countParams = [...params];
+
+  // When the caller filtered by a follow-up date window, surface the actual
+  // follow-up rows that landed in that window per lead, so the FE can show
+  // *why* the lead matched (the LeadList followup filter now matches any
+  // status — planned/missed/done — and most past-window matches are missed/
+  // done attempts that don't otherwise appear on the collapsed card).
+  // These placeholders are referenced only by the main SELECT, so they sit
+  // after the WHERE params (and the count snapshot above excludes them).
+  let matchedFollowupsSelect = `NULL::jsonb AS matched_followups`;
+  if (followup_from || followup_to) {
+    const fwConds = ['mf.lead_id = l.id', 'mf.deleted_at IS NULL'];
+    if (followup_from) { params.push(followup_from); fwConds.push(`mf.next_action_datetime >= $${params.length}::timestamptz`); }
+    if (followup_to) { params.push(followupToBound(followup_to)); fwConds.push(`mf.next_action_datetime <= $${params.length}::timestamptz`); }
+    matchedFollowupsSelect = `
+      COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+                 'id', mf.id,
+                 'next_action_datetime', mf.next_action_datetime,
+                 'status', mf.status,
+                 'comment', mf.comment,
+                 'slot_index', mf.slot_index,
+                 'stage_id', mf.stage_id,
+                 -- Stage/sub-stage the follow-up was logged AGAINST (which may
+                 -- differ from the lead's current stage), plus their names so
+                 -- the FE can show "Missed · Followup / Warm" without a lookup.
+                 'stage_name', mfs.name,
+                 'sub_stage_id', mf.sub_stage_id,
+                 'sub_stage_name', mfss.name
+               ) ORDER BY mf.next_action_datetime)
+          FROM lead_followups mf
+          LEFT JOIN lead_stages     mfs  ON mfs.id  = mf.stage_id
+          LEFT JOIN lead_sub_stages mfss ON mfss.id = mf.sub_stage_id
+         WHERE ${fwConds.join(' AND ')}
+      ), '[]'::jsonb) AS matched_followups`;
+  }
+
   const offset = (page - 1) * limit;
   params.push(limit, offset);
-  const countParams = params.slice(0, -2);
   const [{ rows }, { rows: countRows }] = await Promise.all([
     tenantQuery(
       tenant,
@@ -907,7 +1003,8 @@ export const list = async (tenant, opts, scope) => {
                             AND cc.status IN ('missed','no_answer','failed')
                             AND cc.deleted_at IS NULL), 0) AS missed_calls_count,
               COALESCE((SELECT count(*)::int FROM message_reply mr
-                          WHERE mr.lead_id = l.id AND mr.is_read = false), 0) AS unread_messages_count
+                          WHERE mr.lead_id = l.id AND mr.is_read = false), 0) AS unread_messages_count,
+              ${matchedFollowupsSelect}
          FROM leads l ${tagJoin}
          LEFT JOIN lead_stages         s   ON s.id  = l.stage_id
          LEFT JOIN lead_sub_stages     ss  ON ss.id = l.sub_stage_id
@@ -1041,6 +1138,26 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
   const mgrRes = await client.query(`SELECT manager_id FROM users WHERE id = $1`, [assigned_to]);
   const newManagerId = mgrRes.rows[0]?.manager_id ?? null;
 
+  // Snapshot each lead's current owner BEFORE we overwrite it, so we can
+  // record `from_user_id` on the new assignment row. Without this, the
+  // ownership-history "previous → current" chain renders blank for every
+  // bulk reassignment (the single-lead path at lead-assignments/routes.js
+  // already captures from_user_id; this matches it).
+  const priorRes = await client.query(
+    `SELECT id, assigned_to FROM leads WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+    [ids],
+  );
+  const priorOwnerByLead = new Map(priorRes.rows.map((r) => [r.id, r.assigned_to]));
+
+  // Only the leads that actually change owner. Skipping no-op reassignments
+  // (lead already owned by the target) keeps us from churning the active
+  // assignment row, deactivating it, and writing a misleading from===to
+  // history row + spurious timeline event.
+  const changingIds = priorRes.rows
+    .filter((r) => r.assigned_to !== assigned_to)
+    .map((r) => r.id);
+  if (!changingIds.length) return { affected: 0, ids: [] };
+
   await client.query(
     `UPDATE leads
         SET assigned_to     = $1,
@@ -1049,20 +1166,25 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
             updated_at      = now(),
             last_activity_at = now()
       WHERE id = ANY($2::uuid[]) AND deleted_at IS NULL`,
-    [assigned_to, ids, firstStageId, newManagerId],
+    [assigned_to, changingIds, firstStageId, newManagerId],
   );
-  await client.query(`UPDATE lead_assignments SET is_active = false WHERE lead_id = ANY($1::uuid[])`, [ids]);
-  for (const id of ids) {
+  await client.query(`UPDATE lead_assignments SET is_active = false, status = 'closed' WHERE lead_id = ANY($1::uuid[]) AND is_active`, [changingIds]);
+  for (const id of changingIds) {
+    const fromUserId = priorOwnerByLead.get(id) ?? null;
+    // clock_timestamp() (not the txn-frozen now()) so each row in this loop
+    // gets a distinct, monotonic created_at. With the default now(), every
+    // bulk row shares one timestamp and the timeline's "ORDER BY created_at"
+    // ties — making a newer event appear older than an earlier one.
     await client.query(
-      `INSERT INTO lead_assignments (lead_id, assigned_to, assigned_by, assignment_type, reason, is_active, status)
-       VALUES ($1,$2,$3,'reassign',$4,true,'open')`,
-      [id, assigned_to, assigned_by ?? null, reason ?? null],
+      `INSERT INTO lead_assignments (lead_id, from_user_id, assigned_to, assigned_by, assignment_type, reason, is_active, status, created_at)
+       VALUES ($1,$2,$3,$4,'reassign',$5,true,'open', clock_timestamp())`,
+      [id, fromUserId, assigned_to, assigned_by ?? null, reason ?? null],
     );
     await client.query(
-      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-       VALUES ($1,$2,'assigned',$3,$4::jsonb)`,
-      [id, assigned_by ?? null, 'Lead reassigned', JSON.stringify({ assigned_to, reason: reason ?? null })],
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json, created_at)
+       VALUES ($1,$2,'reassign',$3,$4::jsonb, clock_timestamp())`,
+      [id, assigned_by ?? null, 'Lead reassigned', JSON.stringify({ from: fromUserId, to: assigned_to, assigned_to, reason: reason ?? null })],
     );
   }
-  return { affected: ids.length, ids };
+  return { affected: changingIds.length, ids: changingIds };
 });

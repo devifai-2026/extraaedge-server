@@ -408,11 +408,18 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
           continue;
         }
         valid += 1;
-        // Bulk-import dedup uses email + whatsapp_number only. Phone match
-        // is intentionally skipped — institutes routinely share family
-        // phone numbers across leads, which makes phone alone too noisy
-        // a signal for a 30k-row upload.
-        const matches = await findDuplicates(tenant, { email: v.normalized.email, whatsapp_number: v.normalized.whatsapp_number });
+        // Bulk-import dedup uses email + whatsapp_number, with phone as a
+        // FALLBACK only when the row has neither. Phone is normally skipped —
+        // institutes routinely share family phone numbers across leads, which
+        // makes phone alone too noisy a signal for a 30k-row upload. But a row
+        // with no email and no whatsapp has nothing else to match on, so
+        // identical phone-only rows would otherwise slip in as duplicates.
+        const hasEmailOrWa = !!(v.normalized.email || v.normalized.whatsapp_number);
+        const matches = await findDuplicates(
+          tenant,
+          { email: v.normalized.email, whatsapp_number: v.normalized.whatsapp_number, phone: v.normalized.phone },
+          { matchPhone: !hasEmailOrWa },
+        );
         if (matches.length) {
           duplicates += 1;
           if (dupSamples.length < 50) dupSamples.push({ row_number: i + 2, matches });
@@ -427,7 +434,28 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
         [data.preview_id, rows.length, valid, invalid, duplicates, JSON.stringify(errorSamples), JSON.stringify(dupSamples)],
       );
     } catch (err) {
-      logger.error({ err: err.message, preview_id: data.preview_id }, 'bulk preview failed');
+      logger.error({ err: err.message, code: err.code, preview_id: data.preview_id }, 'bulk preview failed');
+      // Record the failure on the preview row so the client stops polling and
+      // shows a real message. The dialog's waitForPreview() returns as soon as
+      // invalid_rows > 0, so a non-zero invalid count + a sample error here
+      // breaks it out of its 30s spin instead of timing out into the generic
+      // "Failed to fetch" path. file-too-large gets a tailored message; any
+      // other parse error falls back to a generic "couldn't read the file".
+      const message = err.code === 'XLSX_TOO_LARGE'
+        ? err.message
+        : 'Could not read this spreadsheet. Re-save it as a fresh .xlsx and try again.';
+      try {
+        await tenantQuery(
+          tenant,
+          `UPDATE bulk_import_previews
+              SET total_rows = 0, valid_rows = 0, invalid_rows = 1, duplicate_rows = 0,
+                  sample_errors_json = $2::jsonb
+            WHERE id = $1`,
+          [data.preview_id, JSON.stringify([{ row_number: 0, code: err.code ?? 'PARSE_ERROR', message }])],
+        );
+      } catch (updateErr) {
+        logger.error({ err: updateErr.message, preview_id: data.preview_id }, 'failed to record bulk preview error');
+      }
     }
     return;
   }
@@ -502,9 +530,15 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
         // (3) Duplicate detection. Duplicates go to bulk_import_duplicates,
         // with `resolution` reflecting how the import settings handled them.
         try {
-          // Same dedup policy as the preview pass: match on email +
-          // whatsapp_number only, never phone. See preview block above.
-          const dups = await findDuplicates(tenant, { email: resolved.email, whatsapp_number: resolved.whatsapp_number });
+          // Same dedup policy as the preview pass: email + whatsapp_number,
+          // with phone as a fallback ONLY when the row has neither (otherwise
+          // identical phone-only rows can't be deduped). See preview block above.
+          const hasEmailOrWa = !!(resolved.email || resolved.whatsapp_number);
+          const dups = await findDuplicates(
+            tenant,
+            { email: resolved.email, whatsapp_number: resolved.whatsapp_number, phone: resolved.phone },
+            { matchPhone: !hasEmailOrWa },
+          );
           if (dups.length) {
             duplicates += 1;
             const primary = dups[0];
@@ -662,6 +696,20 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             );
           }
         } catch (err) {
+          // The leads_unique_phone_digits DB backstop can fire here when the
+          // app-level dedup above missed (e.g. a row earlier in THIS same
+          // upload already inserted the phone — findDuplicates only sees
+          // committed rows, but each insert commits its own txn). Treat that
+          // as a duplicate, not a hard failure, so it lands in the duplicates
+          // bucket with the matched lead like every other dup.
+          if (err?.code === '23505' && /leads_unique_phone_digits/.test(err?.constraint ?? err?.message ?? '')) {
+            duplicates += 1;
+            const [match] = await findDuplicates(tenant, { phone: resolved.phone });
+            if (match) {
+              await recordDuplicate(tenant, import_id, rowNum, row, match, 'skipped');
+            }
+            continue;
+          }
           failed += 1;
           await tenantQuery(
             tenant,
@@ -762,10 +810,42 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
   if (name === 'retry_row' && data.failure_id) {
     const { rows: [fail] } = await tenantQuery(tenant, `SELECT * FROM bulk_import_failures WHERE id = $1`, [data.failure_id]);
     if (!fail) return;
+    const raw = fail.raw_row_json ?? {};
+    // Mark the failure row resolved with a clear reason. We reuse error_code /
+    // error_message as the post-retry outcome so the operator sees WHY a retry
+    // didn't create a lead (duplicate) instead of a silently-stuck row.
+    const resolveFailure = (code, message) =>
+      tenantQuery(
+        tenant,
+        `UPDATE bulk_import_failures SET retried_at = now(), error_code = $2, error_message = $3 WHERE id = $1`,
+        [data.failure_id, code, message],
+      );
     try {
-      await insertLead(tenant, fail.raw_row_json, null);
+      // Dedup up front — retry_row historically skipped findDuplicates and
+      // relied on nothing, so a retried row could create a duplicate. Apply the
+      // same policy as the commit path: email + whatsapp, with phone as a
+      // fallback only when the row has neither.
+      const hasEmailOrWa = !!(raw.email || raw.whatsapp_number);
+      const dups = await findDuplicates(
+        tenant,
+        { email: raw.email, whatsapp_number: raw.whatsapp_number, phone: raw.phone },
+        { matchPhone: !hasEmailOrWa },
+      );
+      if (dups.length) {
+        await resolveFailure('DUPLICATE', `Not retried — a lead with the same contact already exists (lead ${dups[0].id}).`);
+        return;
+      }
+      await insertLead(tenant, raw, null);
       await tenantQuery(tenant, `UPDATE bulk_import_failures SET retried_at = now() WHERE id = $1`, [data.failure_id]);
     } catch (err) {
+      // The leads_unique_phone_digits DB backstop can still fire if a racing
+      // insert beat us between the check and the insert. Record it as a clean
+      // duplicate resolution rather than a swallowed error.
+      if (err?.code === '23505' && /leads_unique_phone_digits/.test(err?.constraint ?? err?.message ?? '')) {
+        const [match] = await findDuplicates(tenant, { phone: raw.phone });
+        await resolveFailure('DUPLICATE', `Not retried — duplicate phone${match ? ` (lead ${match.id})` : ''}.`);
+        return;
+      }
       logger.error({ err: err.message, failure_id: data.failure_id }, 'retry_row failed');
     }
   }
