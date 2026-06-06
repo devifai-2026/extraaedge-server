@@ -543,10 +543,6 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             duplicates += 1;
             const primary = dups[0];
 
-            if (imp.duplicate_handling === 'skip') {
-              await recordDuplicate(tenant, import_id, rowNum, row, primary, 'skipped');
-              continue;
-            }
             if (imp.duplicate_handling === 'update_existing') {
               await tenantQuery(
                 tenant,
@@ -561,8 +557,14 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
               success += 1;
               continue;
             }
-            // create_new — record the duplicate AND insert a new lead below.
-            await recordDuplicate(tenant, import_id, rowNum, row, primary, 'created_anyway');
+            // Default (and legacy 'create_new' / 'skip'): NEVER insert a second
+            // lead for an existing person. 'create_new' was retired because the
+            // re-created copy collides with the uniqueness guards and later gets
+            // auto-merged, silently losing the more-progressed lead's stage and
+            // owner. Any duplicate that isn't an explicit update is skipped and
+            // recorded so the operator can see it in the import's duplicate list.
+            await recordDuplicate(tenant, import_id, rowNum, row, primary, 'skipped');
+            continue;
           }
 
           // Owner-column resolution. Three inputs from the sheet:

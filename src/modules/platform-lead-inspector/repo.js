@@ -3,10 +3,10 @@
 // tenant-side lead repo/service so the "full picture" (details + timeline of
 // creation / reassigns / followups + bulk-import origin) matches exactly what
 // the tenant app shows.
-import { resolveTenantById, tenantQuery } from '../../db/tenant.js';
+import { resolveTenantById, tenantQuery, tenantTx } from '../../db/tenant.js';
 import * as leadsRepo from '../leads/repo.js';
 import * as leadsService from '../leads/service.js';
-import { notFound, tenantNotFound } from '../../lib/errors.js';
+import { notFound, tenantNotFound, conflict } from '../../lib/errors.js';
 
 const requireTenant = async (tenantId) => {
   const tenant = await resolveTenantById(tenantId);
@@ -333,6 +333,77 @@ export const getLeadFull = async (tenantId, leadId) => {
   };
 
   return { tenant: { id: tenant.id, slug: tenant.slug, name: tenant.name }, lead, timeline, origin, stage_journey, related, siblings };
+};
+
+// Restore a soft-deleted / merged-away lead and retire the live duplicate(s)
+// that are blocking it. This is the recovery for "the lead I worked to
+// Qualified got auto-deleted by the oldest-wins phone-dedup, leaving the New
+// stub live". In ONE transaction:
+//   1. Un-delete the target (deleted_at = NULL, merged_into_id = NULL).
+//   2. Soft-delete every OTHER currently-live lead that shares the target's
+//      normalised phone — otherwise the leads_unique_phone_digits partial
+//      unique index rejects the un-delete. The retired stub stays recoverable.
+//   3. Audit both sides on lead_activities so the timeline records the swap.
+// Returns the restored lead + the ids retired to make room.
+export const restoreLead = async (tenantId, leadId, actor) => {
+  const tenant = await requireTenant(tenantId);
+  return tenantTx(tenant, async (client) => {
+    const { rows: targetRows } = await client.query(
+      `SELECT id, name, phone, deleted_at, merged_into_id FROM leads WHERE id = $1`,
+      [leadId],
+    );
+    const target = targetRows[0];
+    if (!target) throw notFound('Lead not found');
+    if (!target.deleted_at && !target.merged_into_id) {
+      throw conflict('Lead is already live — nothing to restore.');
+    }
+
+    // Find live leads that would collide on the phone-unique index.
+    let retiredIds = [];
+    if (target.phone) {
+      const { rows: conflicts } = await client.query(
+        `SELECT id FROM leads
+          WHERE id <> $1
+            AND deleted_at IS NULL
+            AND RIGHT(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10)
+              = RIGHT(regexp_replace($2, '\\D', '', 'g'), 10)
+            AND length(RIGHT(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10)) = 10`,
+        [leadId, target.phone],
+      );
+      retiredIds = conflicts.map((c) => c.id);
+      if (retiredIds.length) {
+        await client.query(
+          `UPDATE leads SET deleted_at = now() WHERE id = ANY($1::uuid[])`,
+          [retiredIds],
+        );
+        for (const rid of retiredIds) {
+          // user_id stays NULL: the actor is a PLATFORM user (product_owner),
+          // not a tenant `users` row, so it can't satisfy the user_id FK. The
+          // platform actor is recorded in metadata_json instead.
+          await client.query(
+            `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+             VALUES ($1,NULL,'lead_retired',$2,$3::jsonb)`,
+            [rid, 'Retired by product_owner to restore the original lead',
+             JSON.stringify({ restored_lead_id: leadId, by_platform_user_id: actor?.id ?? null, by_platform_user: actor?.email ?? null })],
+          );
+        }
+      }
+    }
+
+    // Bring the target back.
+    await client.query(
+      `UPDATE leads SET deleted_at = NULL, merged_into_id = NULL, last_activity_at = now() WHERE id = $1`,
+      [leadId],
+    );
+    await client.query(
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1,NULL,'lead_restored',$2,$3::jsonb)`,
+      [leadId, 'Restored by product_owner',
+       JSON.stringify({ retired_lead_ids: retiredIds, by_platform_user_id: actor?.id ?? null, by_platform_user: actor?.email ?? null })],
+    );
+
+    return { restored_lead_id: leadId, retired_lead_ids: retiredIds };
+  });
 };
 
 // Bulk imports for a tenant (status, file, row counts) — the product_owner's

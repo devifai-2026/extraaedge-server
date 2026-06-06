@@ -34,6 +34,16 @@ router.get('/:tenantId/leads/:leadId', validate({ params: tenantLeadParam }), as
   } catch (err) { next(err); }
 });
 
+// Restore a soft-deleted / merged-away lead, retiring the live duplicate that
+// blocks it. PRODUCT_OWNER only (already enforced by router.use above). This
+// MUTATES tenant data, unlike the rest of the read-only inspector.
+router.post('/:tenantId/leads/:leadId/restore', validate({ params: tenantLeadParam }), async (req, res, next) => {
+  try {
+    const data = await repo.restoreLead(req.params.tenantId, req.params.leadId, req.user);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 // Bulk imports for a tenant.
 router.get('/:tenantId/bulk-imports', validate({ params: tenantParam, query: z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }) }), async (req, res, next) => {
   try {

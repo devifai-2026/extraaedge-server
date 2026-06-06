@@ -68,7 +68,13 @@ const previewSchema = z.object({
 
 const commitSchema = z.object({
   preview_id: z.string().uuid(),
-  duplicate_handling: z.enum(['skip', 'update_existing', 'create_new']).default('skip'),
+  // 'create_new' was removed deliberately: it let an operator insert a second
+  // lead for a person who already exists, which then collides with the
+  // phone/email/whatsapp uniqueness guards (or, worse, slips in as a true
+  // duplicate for phone-less rows) and later gets auto-merged — silently
+  // losing the more-progressed copy's stage/owner. Duplicates must be either
+  // skipped (default) or used to update the existing lead. Never re-created.
+  duplicate_handling: z.enum(['skip', 'update_existing']).default('skip'),
   send_welcome_email: z.boolean().default(false),
   send_welcome_sms: z.boolean().default(false),
   // Optional human-readable file name (e.g. "april-leads.xlsx"). Stored on
