@@ -128,6 +128,87 @@ export const getLead = async (tenant, actor, id) => {
   return row;
 };
 
+// Creator-aware assignment for MANUAL single-lead adds. Routing depends on
+// who created the lead (mirrors the bulk-import assignee-resolver rules):
+//
+//   counsellor    → ALWAYS owns the lead themselves, even if they picked a
+//                   different owner in the form. assigned_to is forced to the
+//                   creator; manager_id snaps to the creator's manager.
+//   sales_manager → round-robin (the tenant's own configured rule/strategy)
+//                   across the manager's OWN counsellor team only. Empty team
+//                   → leave unassigned, tagged with the manager's team_id so
+//                   it surfaces in their Unassigned bucket.
+//   super_admin   → the tenant's configured rule across every counsellor in
+//                   the tenant (no pool restriction).
+//   anything else / no actor → tenant-wide configured rule (legacy default).
+//
+// Returns true if it fully handled assignment (caller should NOT also run the
+// generic applyAssignment), false to fall through to the legacy path.
+const assignByCreator = async (tenant, actor, lead) => {
+  if (!actor?.id || !actor.role) return false;
+
+  if (actor.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    const me = await usersRepo.findById(tenant, actor.id);
+    const managerId = me?.manager_id ?? null;
+    await tenantQuery(
+      tenant,
+      `UPDATE leads SET assigned_to = $2, manager_id = $3, last_activity_at = now() WHERE id = $1`,
+      [lead.id, actor.id, managerId],
+    );
+    await tenantQuery(
+      tenant,
+      `INSERT INTO lead_assignments (lead_id, assigned_to, assignment_type, is_active, status) VALUES ($1,$2,'auto_assign',true,'open')`,
+      [lead.id, actor.id],
+    );
+    await tenantQuery(
+      tenant,
+      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+       VALUES ($1, NULL, 'auto_assign', $2, $3::jsonb)`,
+      [lead.id, 'Auto-assigned to creator', JSON.stringify({ assigned_to: actor.id, reason: 'counsellor_creator' })],
+    );
+    return true;
+  }
+
+  if (actor.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    const [teamIds, me] = await Promise.all([
+      usersRepo.teamHierarchy(tenant, actor.id),
+      usersRepo.findById(tenant, actor.id),
+    ]);
+    // teamHierarchy includes the manager + any sub-managers; applyAssignment's
+    // pickTarget filters the pool down to active counsellors, so passing the
+    // full hierarchy is safe.
+    const pool = teamIds.filter((id) => id !== actor.id);
+    if (!pool.length) {
+      // No counsellors under this manager → leave unassigned but stamp the
+      // team so it shows in the manager's "Unassigned" dashboard bucket.
+      await tenantQuery(
+        tenant,
+        `UPDATE leads SET team_id = COALESCE(team_id, $2) WHERE id = $1`,
+        [lead.id, me?.team_id ?? null],
+      );
+      return true;
+    }
+    const r = await applyAssignment(tenant, lead, { restrictPool: pool });
+    // If the configured rule matched nobody in the team, fall back to leaving
+    // it unassigned under the team rather than leaking to the whole tenant.
+    if (!r) {
+      await tenantQuery(
+        tenant,
+        `UPDATE leads SET team_id = COALESCE(team_id, $2) WHERE id = $1`,
+        [lead.id, me?.team_id ?? null],
+      );
+    }
+    return true;
+  }
+
+  if (actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    await applyAssignment(tenant, lead); // tenant-wide pool
+    return true;
+  }
+
+  return false; // account_manager / unknown → legacy fall-through
+};
+
 export const createLead = async (tenant, actor, input, { on_duplicate = 'block', force = false, skip_auto_assign = false } = {}) => {
   if (!force) {
     const dups = await repo.findDuplicates(tenant, {
@@ -162,15 +243,20 @@ export const createLead = async (tenant, actor, input, { on_duplicate = 'block',
   // Admins / managers manually pick an owner from the dashboard's "Unassigned"
   // bucket (filter `assigned_to=null` on /leads).
   if (!skip_auto_assign) {
-    // Run round-robin synchronously when no owner was supplied so the API
-    // response already reflects the assignment. The FE refetches the list
-    // right after create and was racing the in-process queue otherwise.
-    if (!input.assigned_to) {
-      try {
+    // Creator-aware routing (counsellor → self, manager → own team RR, admin →
+    // tenant-wide RR). Runs synchronously so the create response and the FE
+    // refetch already reflect the assignment. For a counsellor creator this
+    // intentionally OVERRIDES any owner they picked in the form — their
+    // manually-added leads are always theirs.
+    try {
+      const handled = await assignByCreator(tenant, actor, lead);
+      // Legacy fall-through (no actor / account_manager): only auto-assign
+      // when the caller didn't already supply an explicit owner.
+      if (!handled && !input.assigned_to) {
         await applyAssignment(tenant, lead);
-      } catch {
-        // assignment is best-effort — don't block create on rule errors
       }
+    } catch {
+      // assignment is best-effort — don't block create on rule errors
     }
     // Score the lead synchronously so the create response and the FE refetch
     // both see the rule-derived score. The async LEAD_CREATED worker no

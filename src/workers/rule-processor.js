@@ -55,11 +55,17 @@ registerWorker(QUEUE_NAMES.EVENTS, async ({ data }) => {
 // Assignment-rules engine — picks the first matching rule and applies its
 // strategy. Exported so the leads service can run it on-demand for bulk
 // "auto-assign all unassigned" operations triggered from the UI.
-export const applyAssignment = async (tenant, lead) => {
+// `restrictPool`, when passed, is an array of user ids the assignment must
+// stay within (e.g. a manager's own counsellor team for a manager-created
+// lead). The tenant's configured rule + strategy still decide *how* to pick;
+// the pool only narrows *who* is eligible. Omit it (default) for the
+// tenant-wide behaviour used by admin creates and the bulk "auto-assign
+// unassigned" button.
+export const applyAssignment = async (tenant, lead, { restrictPool = null } = {}) => {
   const { rows: rules } = await tenantQuery(tenant, `SELECT * FROM assignment_rules WHERE is_active AND deleted_at IS NULL ORDER BY priority`);
   for (const rule of rules) {
     if (!evaluateCondition(rule.condition_json, { lead })) continue;
-    const targetUser = await pickTarget(tenant, rule);
+    const targetUser = await pickTarget(tenant, rule, restrictPool);
     if (!targetUser) continue;
     // Snap manager_id to the new counsellor's primary manager so the
     // hierarchy chip on the LeadCard reflects reality. Mirrors the manual
@@ -107,7 +113,7 @@ export const applyAssignment = async (tenant, lead) => {
   return null; // no rule matched → caller treats as "no-op"
 };
 
-const pickTarget = async (tenant, rule) => {
+const pickTarget = async (tenant, rule, restrictPool = null) => {
   const candidates = [];
   if (rule.target_team_id) {
     const { rows } = await tenantQuery(tenant, `SELECT user_id FROM team_members WHERE team_id = $1`, [rule.target_team_id]);
@@ -153,6 +159,20 @@ const pickTarget = async (tenant, rule) => {
     );
     candidates.push(...counsellors.map((u) => u.id));
   }
+
+  // Narrow to the caller-supplied pool (e.g. a manager's own counsellor
+  // team). Applied after both the explicit-target and tenant-wide-fallback
+  // paths so either source is constrained the same way. An empty intersection
+  // means none of this rule's counsellors are in the allowed set — fall
+  // through to the rule's fallback (or null) rather than leaking out of the
+  // pool.
+  if (restrictPool) {
+    const allowed = new Set(restrictPool);
+    const narrowed = candidates.filter((id) => allowed.has(id));
+    candidates.length = 0;
+    candidates.push(...narrowed);
+  }
+
   if (!candidates.length) return rule.fallback_user_id;
 
   const pool = candidates;
