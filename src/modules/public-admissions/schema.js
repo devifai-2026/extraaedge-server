@@ -49,6 +49,13 @@ export const publicSubmitSchema = z.object({
   // Photos (GCS keys returned by /public/admissions/:token/upload-confirm)
   selfie_r2_key: z.string().optional().nullable(),
   photo_r2_key:  z.string().optional().nullable(),
+  // Registration-amount payment proof. BOTH are required so the student
+  // can't submit without paying + proving it. The screenshot is uploaded
+  // via the same presign/confirm flow as the photos; payment_utr is the
+  // bank/UPI reference number the accounts team reconciles against.
+  payment_proof_r2_key: z.string().trim().min(1, { message: 'Upload your payment screenshot.' }),
+  payment_utr: z.string().trim().min(6, { message: 'Enter the UTR / reference number from your payment.' }).max(64),
+  payment_account_id: optionalUuid,
   // Education. At least one row with a real examination is required —
   // we can't usefully process an admission without qualification data,
   // and the public form gates on this client-side too. The check is on

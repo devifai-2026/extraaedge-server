@@ -28,7 +28,11 @@ export const create = async (req, res, next) => {
 // final URL using its own origin so this works across environments.
 export const generateShareLink = async (req, res, next) => {
   try {
-    const data = await publicService.generateLink(req.tenant, req.user, req.params.leadId);
+    // Optional: the accounts user picks ONE payment account to bind to the
+    // link so the student sees exactly that account on the public form.
+    const data = await publicService.generateLink(
+      req.tenant, req.user, req.params.leadId, req.body?.payment_account_id ?? null,
+    );
     res.status(201).json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -111,6 +115,22 @@ export const listReceipts = async (req, res, next) => {
   try {
     const rows = await service.listReceipts(req.tenant, req.query);
     res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// Admin Payment Details ledger — paginated/filterable/sortable/searchable.
+export const listPaymentDetails = async (req, res, next) => {
+  try {
+    const { rows, total, total_amount, pending_count, page, limit } = await service.listPaymentDetails(req.tenant, req.query);
+    res.json({ data: rows, meta: { requestId: req.id, total, total_amount, pending_count, page, limit } });
+  } catch (err) { next(err); }
+};
+
+// Payment analytics for the admin dashboard charts.
+export const paymentAnalytics = async (req, res, next) => {
+  try {
+    const data = await service.paymentAnalytics(req.tenant, { days: req.query.days ? Number(req.query.days) : undefined });
+    res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 

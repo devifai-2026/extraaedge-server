@@ -30,6 +30,12 @@ const baseShape = z.object({
   mode_of_training: z.enum(['Online', 'Offline', 'Hybrid']).nullable().optional(),
   payment_mode: z.enum(['full', 'installment']),
   fee_installments: z.array(installmentRow).max(4).nullable().optional(),
+  // The bank/UPI account the student should pay the registration amount
+  // into. Bound here so the public share-link reuses it without re-picking.
+  payment_account_id: z.string().uuid().nullable().optional(),
+  // Explicit amount the student must pay now into that account. When unset,
+  // the public form falls back to the registration amount.
+  pay_now_amount: z.coerce.number().nonnegative().nullable().optional(),
 });
 
 // Math rule: registration + Σ installments === course_fees when

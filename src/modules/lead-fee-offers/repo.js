@@ -2,8 +2,8 @@ import { tenantQuery } from '../../db/tenant.js';
 
 const COLS = `
   id, lead_id, program_id, course_fees, registration_amount, registration_date,
-  mode_of_training, payment_mode, fee_installments, created_by, updated_by,
-  created_at, updated_at
+  mode_of_training, payment_mode, fee_installments, payment_account_id, pay_now_amount,
+  created_by, updated_by, created_at, updated_at
 `;
 
 export const findByLead = async (tenant, lead_id) => {
@@ -23,8 +23,8 @@ export const upsert = async (tenant, lead_id, input, actorId) => {
     tenant,
     `INSERT INTO lead_fee_offers
        (lead_id, program_id, course_fees, registration_amount, registration_date,
-        mode_of_training, payment_mode, fee_installments, created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9)
+        mode_of_training, payment_mode, fee_installments, payment_account_id, pay_now_amount, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $11)
      ON CONFLICT (lead_id) DO UPDATE
        SET program_id = EXCLUDED.program_id,
            course_fees = EXCLUDED.course_fees,
@@ -33,6 +33,8 @@ export const upsert = async (tenant, lead_id, input, actorId) => {
            mode_of_training = EXCLUDED.mode_of_training,
            payment_mode = EXCLUDED.payment_mode,
            fee_installments = EXCLUDED.fee_installments,
+           payment_account_id = EXCLUDED.payment_account_id,
+           pay_now_amount = EXCLUDED.pay_now_amount,
            updated_by = EXCLUDED.updated_by
      RETURNING ${COLS}`,
     [
@@ -44,6 +46,8 @@ export const upsert = async (tenant, lead_id, input, actorId) => {
       input.mode_of_training ?? null,
       input.payment_mode,
       installments != null ? JSON.stringify(installments) : null,
+      input.payment_account_id ?? null,
+      input.pay_now_amount ?? null,
       actorId ?? null,
     ],
   );

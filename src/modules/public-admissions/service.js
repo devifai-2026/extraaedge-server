@@ -17,6 +17,7 @@ import * as admissionsRepo from '../admissions/repo.js';
 import * as admissionEvents from '../admissions/events-repo.js';
 import * as feeOffersRepo from '../lead-fee-offers/repo.js';
 import * as uploadsRepo from '../uploads/repo.js';
+import * as paymentAccountsRepo from '../payment-accounts/repo.js';
 import { notifyPendingAdmission } from '../admissions/service.js';
 
 // Resolve a public token to its tenant. Returns { tenant, lookup_row }
@@ -39,7 +40,7 @@ const gone = (message = 'This link has expired') =>
 // needs to assemble the URL. Each call inserts a new row — the lookup
 // path treats only the newest non-used / non-expired one as live, so
 // "Regenerate" works by simply minting another token.
-export const generateLink = async (tenant, actor, lead_id) => {
+export const generateLink = async (tenant, actor, lead_id, payment_account_id = null) => {
   // Verify the lead actually exists on this tenant AND has converted
   // (sharing the form before conversion makes no sense — there's no
   // admission stub yet).
@@ -96,12 +97,36 @@ export const generateLink = async (tenant, actor, lead_id) => {
   );
   const isRegenerate = hadPrior.length > 0;
 
+  // The account the student should pay into is configured on the fee offer
+  // (Configure / Reconfigure dialog). An explicit `payment_account_id` arg
+  // can still override it (e.g. a future per-share picker), but normally we
+  // reuse the offer's saved account. Validate whichever we land on: it must
+  // exist on this tenant and be active.
+  const chosenAccountId = payment_account_id || offer.payment_account_id || null;
+  let boundPaymentAccountId = null;
+  if (chosenAccountId) {
+    const acct = await paymentAccountsRepo.findById(tenant, chosenAccountId);
+    // Soft-fail to "no bound account" if the configured one was since
+    // deactivated/deleted — the public form falls back to primaries rather
+    // than blocking the share. Only hard-fail an explicit bad override.
+    if (acct && acct.is_active !== false && !acct.deleted_at) {
+      boundPaymentAccountId = acct.id;
+    } else if (payment_account_id) {
+      throw appError({
+        status: 400,
+        code: RESPONSE_CODES.VALIDATION_FAILED ?? 'VALIDATION_FAILED',
+        message: 'The selected payment account is not available. Pick an active account.',
+      });
+    }
+  }
+
   const token = randomToken(32);
   const row = await tokenRepo.insertToken({
     token,
     tenant_id: tenant.id,
     lead_id,
     created_by_user_id: actor?.id ?? null,
+    payment_account_id: boundPaymentAccountId,
   });
 
   // Audit row for the lead timeline. Best-effort — never block the
@@ -149,8 +174,10 @@ export const prefillFromToken = async (token) => {
   const lead = rows[0];
   if (!lead) throw notFound('Lead not found');
 
-  // Active programs + centers — student needs both in the form.
-  const [{ rows: programs }, { rows: centers }, offer] = await Promise.all([
+  // Active programs + centers — student needs both in the form. Plus the
+  // tenant's active payment accounts so we can show the PRIMARY one the
+  // student should pay the registration amount into.
+  const [{ rows: programs }, { rows: centers }, offer, paymentAccounts] = await Promise.all([
     tenantQuery(
       tenant,
       `SELECT id, name FROM programs WHERE deleted_at IS NULL AND COALESCE(is_active, true) = true ORDER BY name`,
@@ -160,7 +187,37 @@ export const prefillFromToken = async (token) => {
       `SELECT id, name FROM admission_centers WHERE deleted_at IS NULL AND COALESCE(is_active, true) = true ORDER BY sort_order ASC, name ASC`,
     ),
     feeOffersRepo.findByLead(tenant, lookupRow.lead_id),
+    paymentAccountsRepo.list(tenant, { include_inactive: false }),
   ]);
+
+  // The account the student should pay into. When the accounts user bound
+  // a specific account to this link at generation time, show ONLY that one
+  // (it's the account they told the student to use). Otherwise fall back to
+  // the legacy behaviour: all active primaries, else the first active one.
+  // One account now carries any combination of Bank / UPI / QR sections —
+  // expose whatever's present so the student sees all the ways to pay,
+  // each with a signed QR URL when a QR image is attached.
+  const boundAccount = lookupRow.payment_account_id
+    ? paymentAccounts.find((a) => a.id === lookupRow.payment_account_id)
+    : null;
+  const primaries = paymentAccounts.filter((a) => a.is_primary);
+  const payAccts = boundAccount
+    ? [boundAccount]
+    : (primaries.length ? primaries : paymentAccounts.slice(0, 1));
+  const payment_accounts = await Promise.all(payAccts.map(async (a) => ({
+    id: a.id,
+    label: a.label,
+    account_holder_name: a.account_holder_name || null,
+    account_number: a.account_number || null,
+    ifsc: a.ifsc || null,
+    bank_name: a.bank_name || null,
+    branch: a.branch || null,
+    account_type: a.account_type || null,
+    upi_id: a.upi_id || null,
+    qr_url: a.qr_r2_key ? await getDownloadSignedUrl({ key: a.qr_r2_key }).catch(() => null) : null,
+  })));
+  // Back-compat single-account field (first primary) for older FE builds.
+  const payment_account = payment_accounts[0] || null;
 
   // Resolve the offer's program name so the student sees a confirmed
   // course label on the form even though the program select will be
@@ -194,6 +251,9 @@ export const prefillFromToken = async (token) => {
       program_name: offerProgramName,
       course_fees: Number(offer.course_fees),
       registration_amount: Number(offer.registration_amount),
+      // Explicit "pay now" amount the accounts team set; null → the form
+      // falls back to the registration amount.
+      pay_now_amount: offer.pay_now_amount != null ? Number(offer.pay_now_amount) : null,
       registration_date: offer.registration_date,
       // Pre-fills the (locked) Mode of Training select on the student
       // form. Null for legacy offers — the FE falls back to letting the
@@ -202,6 +262,11 @@ export const prefillFromToken = async (token) => {
       payment_mode: offer.payment_mode,
       fee_installments: offer.fee_installments,
     } : null,
+    // The bank/UPI account the student pays the registration amount into.
+    // null if the admin hasn't configured any payment account yet — the FE
+    // then shows a "contact your counsellor" notice instead of the pay box.
+    payment_account,
+    payment_accounts,
     tenant: {
       name: tenant.company_name || tenant.name,
       logo_url: tenant.logo_url,
@@ -300,6 +365,14 @@ export const submitFromToken = async (token, input) => {
                     : (offer.payment_mode === 'installment' ? 'Installment' : 'Full'),
     selfie_r2_key: input.selfie_r2_key || null,
     photo_r2_key: input.photo_r2_key || null,
+    // Registration-amount payment proof. Recorded UNVERIFIED — the accounts
+    // team confirms it against the bank statement at the approval step.
+    payment_proof_r2_key: input.payment_proof_r2_key || null,
+    payment_utr: input.payment_utr?.trim() || null,
+    payment_account_id: input.payment_account_id || null,
+    // The amount the student paid now: the offer's explicit pay-now amount
+    // if set, else the registration amount (prior behaviour).
+    payment_amount: (offer.pay_now_amount != null ? Number(offer.pay_now_amount) : Number(offer.registration_amount)) || null,
     status: 'pending_approval',
     guided_by_counsellor_id: lead.assigned_to || null,
     source: lead.first_touch_source || null,

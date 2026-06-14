@@ -99,8 +99,11 @@ const leadBaseSchema = z.object({
   // optional planned rows. stage_id is required for any slot row; ad-hoc
   // (slot_index null) rows may omit it. sub_stage_id is optional and
   // typically captured via the review modal on save.
+  // next_action_datetime is optional: a slot may carry a comment WITHOUT a
+  // date (the counsellor jotted a note but hasn't scheduled the next action
+  // yet). The repo keeps any row that has a date OR a non-empty comment.
   followups: z.array(z.object({
-    next_action_datetime: z.coerce.date(),
+    next_action_datetime: z.coerce.date().optional().nullable(),
     comment: z.string().optional().nullable(),
     status: z.enum(['planned', 'done', 'missed', 'cancelled']).optional(),
     stage_id: z.string().uuid().optional(),
@@ -195,7 +198,24 @@ export const listQuery = z.object({
   tag_id: z.string().uuid().optional(),
   date_from: z.string().optional(),
   date_to: z.string().optional(),
-  sort: z.enum(['created_desc', 'created_asc', 'updated_desc', 'score_desc', 'last_activity_desc']).default('created_desc'),
+  // Last-Updated date range (Lead Manager column search).
+  updated_from: z.string().optional(),
+  updated_to: z.string().optional(),
+  // Per-column NAME search (Lead Manager column search boxes).
+  stage_name: z.string().optional(),
+  sub_stage_name: z.string().optional(),
+  program_name: z.string().optional(),
+  owner_name: z.string().optional(),
+  added_by_name: z.string().optional(),
+  sort: z.enum([
+    'created_desc', 'created_asc', 'updated_desc', 'updated_asc',
+    'score_desc', 'score_asc', 'last_activity_desc',
+    'name_asc', 'name_desc', 'phone_asc', 'phone_desc',
+    'stage_asc', 'stage_desc', 'sub_stage_asc', 'sub_stage_desc',
+    'program_asc', 'program_desc', 'city_asc', 'city_desc',
+    'owner_asc', 'owner_desc', 'added_by_asc', 'added_by_desc',
+    'age_asc', 'age_desc',
+  ]).default('created_desc'),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });

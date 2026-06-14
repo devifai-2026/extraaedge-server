@@ -7,13 +7,13 @@ import { sysQuery } from '../../db/system.js';
 
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h, per product spec
 
-export const insertToken = async ({ token, tenant_id, lead_id, created_by_user_id }) => {
+export const insertToken = async ({ token, tenant_id, lead_id, created_by_user_id, payment_account_id }) => {
   const expires_at = new Date(Date.now() + TOKEN_TTL_MS);
   const { rows } = await sysQuery(
-    `INSERT INTO public_admission_tokens (token, tenant_id, lead_id, created_by_user_id, expires_at)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO public_admission_tokens (token, tenant_id, lead_id, created_by_user_id, payment_account_id, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id, token, expires_at, created_at`,
-    [token, tenant_id, lead_id, created_by_user_id ?? null, expires_at],
+    [token, tenant_id, lead_id, created_by_user_id ?? null, payment_account_id ?? null, expires_at],
   );
   return rows[0];
 };
@@ -26,7 +26,7 @@ export const insertToken = async ({ token, tenant_id, lead_id, created_by_user_i
 // `status` field below — easier than throwing structured errors here.
 export const lookupToken = async (token) => {
   const { rows } = await sysQuery(
-    `SELECT id, token, tenant_id, lead_id, expires_at, used_at
+    `SELECT id, token, tenant_id, lead_id, payment_account_id, expires_at, used_at
        FROM public_admission_tokens
       WHERE token = $1
       LIMIT 1`,

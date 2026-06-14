@@ -125,6 +125,50 @@ export const approve = async (tenant, actor, id) => {
     actor_kind: events.ACTOR_KINDS.USER,
     summary: `Approved · ${existing?.status ?? '—'} → ${row.status}`,
   });
+
+  // Auto-convert the student's submitted registration payment into a real
+  // receipt so it flows into the Payments ledger. This is a PARTIAL payment
+  // against registration (the agreed registration figure stays on the
+  // offer; the receipt records what was actually collected now). Skipped
+  // when there's no amount or a registration receipt already exists.
+  const paidNow = Number(row.payment_amount || 0);
+  if (paidNow > 0) {
+    try {
+      const already = await repo.hasRegistrationReceipt(tenant, id);
+      if (!already) {
+        const receipt = await repo.insertReceipt(tenant, id, {
+          receipt_date: new Date(),
+          amount: paidNow,
+          // Student-submitted proofs are UPI/bank transfers; default to
+          // 'online' since we don't capture an exact mode on the public form.
+          mode_of_payment: 'online',
+          transaction_details: row.payment_utr ? `UTR ${row.payment_utr}` : null,
+          receipt_kind: 'registration',
+          payment_screenshot_r2_key: row.payment_proof_r2_key ?? null,
+          payment_account_id: row.payment_account_id ?? null,
+        }, actor?.id);
+        events.log(tenant, {
+          admission_id: id, lead_id: row.lead_id ?? null,
+          event_type: events.EVENT_TYPES.RECEIPT_ADDED,
+          actor_user_id: actor?.id ?? null,
+          actor_kind: events.ACTOR_KINDS.USER,
+          summary: `Registration payment verified · ${paidNow}`,
+          metadata: {
+            receipt_id: receipt?.id ?? null,
+            receipt_no: receipt?.receipt_no ?? null,
+            receipt_kind: 'registration',
+            auto_from_submission: true,
+            share_token: receipt?.share_token ?? null,
+          },
+        });
+      }
+    } catch {
+      // Never block approval on receipt creation — the accounts user can
+      // still add the receipt manually if this fails (e.g. a race that
+      // created the registration receipt between the check and insert).
+    }
+  }
+
   return row;
 };
 
@@ -169,6 +213,12 @@ export const setStatus = async (tenant, id, status, extra, actor) => {
 };
 
 export const listReceipts = (tenant, q) => repo.listReceipts(tenant, q);
+
+// Admin Payment Details ledger (paginated/filterable/sortable/searchable).
+export const listPaymentDetails = (tenant, q) => repo.listPaymentDetails(tenant, q);
+
+// Payment analytics for the admin dashboard charts.
+export const paymentAnalytics = (tenant, q) => repo.paymentAnalytics(tenant, q);
 
 export const createReceipt = async (tenant, actor, admission_id, input) => {
   const adm = await repo.findById(tenant, admission_id);

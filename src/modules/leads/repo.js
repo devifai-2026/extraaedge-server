@@ -196,9 +196,11 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     );
     lead.manager_id = newManagerId;
     await client.query(
-      `INSERT INTO lead_assignments (lead_id, assigned_to, assigned_by, assignment_type, is_active, status)
-       VALUES ($1,$2,$3,'assign',true,'open')`,
-      [lead.id, input.assigned_to, created_by],
+      `INSERT INTO lead_assignments
+         (lead_id, assigned_to, assigned_by, assignment_type, is_active, status,
+          stage_id_at_transfer, sub_stage_id_at_transfer)
+       VALUES ($1,$2,$3,'assign',true,'open',$4,$5)`,
+      [lead.id, input.assigned_to, created_by, lead.stage_id ?? null, lead.sub_stage_id ?? null],
     );
   }
 
@@ -588,7 +590,10 @@ export const replaceFollowupsForStage = async (tenant, lead_id, stage_id, rows, 
 
     const incomingBySlot = new Map();
     for (const r of rows || []) {
-      if (!r?.next_action_datetime) continue;
+      // A slot is kept when it has a date OR a non-empty comment. Previously
+      // a comment typed without a date was silently dropped here.
+      const hasComment = typeof r?.comment === 'string' && r.comment.trim().length > 0;
+      if (!r?.next_action_datetime && !hasComment) continue;
       const slot = Number.isInteger(r.slot_index) && r.slot_index >= 1 && r.slot_index <= 5
         ? r.slot_index : null;
       if (slot === null) continue;
@@ -616,8 +621,13 @@ export const replaceFollowupsForStage = async (tenant, lead_id, stage_id, rows, 
 
     let written = 0;
     for (const [slot, r] of incomingBySlot) {
-      const status = r.status ?? 'done';
-      const completedAt = status === 'done' ? r.next_action_datetime : null;
+      const nextAt = r.next_action_datetime || null;
+      const comment = typeof r.comment === 'string' && r.comment.trim() ? r.comment : null;
+      // A comment-only slot (no date) can't be 'done' — there's nothing to
+      // have completed. Keep it 'planned' so completed_at stays null and the
+      // NOT NULL date assumption is never relied on.
+      const status = !nextAt ? 'planned' : (r.status ?? 'done');
+      const completedAt = status === 'done' && nextAt ? nextAt : null;
       const subStageId = r.sub_stage_id ?? null;
       const existingId = existingBySlot.get(slot);
       if (existingId) {
@@ -631,7 +641,7 @@ export const replaceFollowupsForStage = async (tenant, lead_id, stage_id, rows, 
                   completed_by = COALESCE(completed_by, $6),
                   updated_at = now()
             WHERE id = $7`,
-          [r.next_action_datetime, r.comment ?? null, status, subStageId,
+          [nextAt, comment, status, subStageId,
            completedAt, completedAt ? actor_id ?? null : null, existingId],
         );
       } else {
@@ -640,7 +650,7 @@ export const replaceFollowupsForStage = async (tenant, lead_id, stage_id, rows, 
               (lead_id, next_action_datetime, comment, status, created_by,
                completed_at, completed_by, slot_index, stage_id, sub_stage_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [lead_id, r.next_action_datetime, r.comment ?? null, status,
+          [lead_id, nextAt, comment, status,
            actor_id ?? null, completedAt,
            completedAt ? actor_id ?? null : null, slot, stage_id, subStageId],
         );
@@ -648,6 +658,65 @@ export const replaceFollowupsForStage = async (tenant, lead_id, stage_id, rows, 
       written += 1;
     }
     return { written };
+  });
+
+// Upsert the single ad-hoc PLANNED follow-up that the "Followup Scheduled On"
+// + "Follow up Comments" fields at the top of the Edit Lead form represent.
+// These are NOT slot rows (slot_index IS NULL) — there's one logical "next
+// scheduled action" per lead. We keep exactly one open planned ad-hoc row:
+//   • date + (optional) comment  -> upsert that one row
+//   • comment only (no date)     -> upsert a dateless planned row so the note
+//                                   is never lost
+//   • both empty                 -> soft-delete the existing ad-hoc planned row
+// The row is stage-scoped to the lead's current stage so it survives the
+// slot grouping above and shows correctly in the timeline / Follow-up Manager.
+export const upsertAdHocPlannedFollowup = async (tenant, lead_id, { next_action_datetime, comment, stage_id, sub_stage_id }, actor_id) =>
+  tenantTx(tenant, async (client) => {
+    const nextAt = next_action_datetime || null;
+    const note = typeof comment === 'string' && comment.trim() ? comment : null;
+
+    const { rows: existing } = await client.query(
+      `SELECT id FROM lead_followups
+        WHERE lead_id = $1 AND slot_index IS NULL AND status = 'planned'
+          AND deleted_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [lead_id],
+    );
+    const existingId = existing[0]?.id ?? null;
+
+    // Nothing to record — clear any stale open ad-hoc row and stop.
+    if (!nextAt && !note) {
+      if (existingId) {
+        await client.query(
+          `UPDATE lead_followups SET deleted_at = now(), updated_at = now() WHERE id = $1`,
+          [existingId],
+        );
+      }
+      return { written: 0 };
+    }
+
+    if (existingId) {
+      await client.query(
+        `UPDATE lead_followups
+            SET next_action_datetime = $1, comment = $2,
+                stage_id = COALESCE($3, stage_id),
+                sub_stage_id = COALESCE($4, sub_stage_id),
+                updated_at = now()
+          WHERE id = $5`,
+        [nextAt, note, stage_id ?? null, sub_stage_id ?? null, existingId],
+      );
+      return { written: 1, id: existingId };
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO lead_followups
+          (lead_id, next_action_datetime, comment, status, created_by, stage_id, sub_stage_id)
+       VALUES ($1, $2, $3, 'planned', $4, $5, $6)
+       RETURNING id`,
+      [lead_id, nextAt, note, actor_id ?? null, stage_id ?? null, sub_stage_id ?? null],
+    );
+    return { written: 1, id: rows[0].id };
   });
 
 // Hard-delete: physically remove the lead row. Foreign-key cascades clean up
@@ -755,8 +824,31 @@ const sortClause = (sort) => {
   switch (sort) {
     case 'created_asc': return 'l.created_at ASC';
     case 'updated_desc': return 'l.updated_at DESC';
+    case 'updated_asc': return 'l.updated_at ASC';
     case 'score_desc': return 'l.lead_score DESC, l.created_at DESC';
+    case 'score_asc': return 'l.lead_score ASC, l.created_at DESC';
     case 'last_activity_desc': return 'l.last_activity_at DESC';
+    // Per-column header sorts (NULLS LAST so blanks sink to the bottom either
+    // way). Each pairs a *_asc / *_desc key with the matching joined column.
+    case 'name_asc': return 'l.name ASC NULLS LAST';
+    case 'name_desc': return 'l.name DESC NULLS LAST';
+    case 'phone_asc': return 'l.phone ASC NULLS LAST';
+    case 'phone_desc': return 'l.phone DESC NULLS LAST';
+    case 'stage_asc': return 's.name ASC NULLS LAST';
+    case 'stage_desc': return 's.name DESC NULLS LAST';
+    case 'sub_stage_asc': return 'ss.name ASC NULLS LAST';
+    case 'sub_stage_desc': return 'ss.name DESC NULLS LAST';
+    case 'program_asc': return 'p.name ASC NULLS LAST';
+    case 'program_desc': return 'p.name DESC NULLS LAST';
+    case 'city_asc': return 'l.city ASC NULLS LAST';
+    case 'city_desc': return 'l.city DESC NULLS LAST';
+    case 'owner_asc': return 'u.name ASC NULLS LAST';
+    case 'owner_desc': return 'u.name DESC NULLS LAST';
+    case 'added_by_asc': return 'cb.name ASC NULLS LAST';
+    case 'added_by_desc': return 'cb.name DESC NULLS LAST';
+    // Age sorts on created_at INVERSELY: oldest lead = greatest age.
+    case 'age_asc': return 'l.created_at DESC';
+    case 'age_desc': return 'l.created_at ASC';
     default: return 'l.created_at DESC';
   }
 };
@@ -783,6 +875,11 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
     lead_score_from, lead_score_to,
     followup_from, followup_to,
     date_from, date_to, flag,
+    // Per-column header text search (match joined dimension by NAME) + the
+    // Last-Updated date range. These power the column search boxes in the
+    // Lead Manager table; they run against the whole tenant DB, not a page.
+    stage_name, sub_stage_name, program_name, owner_name, added_by_name,
+    updated_from, updated_to,
   } = opts;
   const conds = ['l.deleted_at IS NULL'];
   const params = [];
@@ -819,6 +916,16 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
   if (whatsapp_number) { params.push(`%${whatsapp_number}%`); conds.push(`l.whatsapp_number ILIKE $${params.length}`); }
   if (date_from) { params.push(date_from); conds.push(`l.created_at >= $${params.length}::timestamptz`); }
   if (date_to) { params.push(date_to); conds.push(`l.created_at <= $${params.length}::timestamptz`); }
+  // Last-Updated date range (mirrors created_at's date_from/date_to).
+  if (updated_from) { params.push(updated_from); conds.push(`l.updated_at >= $${params.length}::timestamptz`); }
+  if (updated_to) { params.push(updated_to); conds.push(`l.updated_at <= $${params.length}::timestamptz`); }
+  // Per-column NAME search via scalar subqueries — kept out of the JOINs so
+  // the shared count query (which only joins tagJoin) stays valid.
+  if (stage_name) { params.push(`%${stage_name}%`); conds.push(`EXISTS (SELECT 1 FROM lead_stages s2 WHERE s2.id = l.stage_id AND s2.name ILIKE $${params.length})`); }
+  if (sub_stage_name) { params.push(`%${sub_stage_name}%`); conds.push(`EXISTS (SELECT 1 FROM lead_sub_stages ss2 WHERE ss2.id = l.sub_stage_id AND ss2.name ILIKE $${params.length})`); }
+  if (program_name) { params.push(`%${program_name}%`); conds.push(`EXISTS (SELECT 1 FROM programs p2 WHERE p2.id = l.program_id AND p2.name ILIKE $${params.length})`); }
+  if (owner_name) { params.push(`%${owner_name}%`); conds.push(`EXISTS (SELECT 1 FROM users uo WHERE uo.id = l.assigned_to AND uo.name ILIKE $${params.length})`); }
+  if (added_by_name) { params.push(`%${added_by_name}%`); conds.push(`EXISTS (SELECT 1 FROM users ua WHERE ua.id = l.created_by AND ua.name ILIKE $${params.length})`); }
   if (lead_age_from != null) { params.push(lead_age_from); conds.push(`EXTRACT(EPOCH FROM (now() - l.created_at)) / 86400 >= $${params.length}`); }
   if (lead_age_to != null) { params.push(lead_age_to); conds.push(`EXTRACT(EPOCH FROM (now() - l.created_at)) / 86400 <= $${params.length}`); }
   if (lead_score_from != null) { params.push(lead_score_from); conds.push(`l.lead_score >= $${params.length}`); }

@@ -65,6 +65,7 @@ import admissionsRouter from './modules/admissions/routes.js';
 import publicAdmissionsRouter from './modules/public-admissions/routes.js';
 import publicReceiptsRouter from './modules/public-receipts/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
+import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
 // ---- Pending modules (wired as these passes complete) ----
 // Pass 7: follow-ups, quick-add
@@ -171,6 +172,9 @@ export const mountRoutes = (app) => {
   // Per-lead customised fee offer — accounts team's tweak of the
   // program-level defaults for a specific converted lead.
   api.use('/lead-fee-offers', leadFeeOffersRouter);
+  // Admin-managed payment destinations (bank accounts + UPI IDs) used to
+  // collect the registration/admission amount. Exactly one is primary.
+  api.use('/payment-accounts', paymentAccountsRouter);
 
   // Internal callback from the WhatsApp gateway (gateway → API). NOT behind
   // authRequired/tenantRequired — the shared secret in the header is the

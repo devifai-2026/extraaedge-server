@@ -91,6 +91,37 @@ export const reportQuery = z.object({
   program_id: z.string().uuid().optional(),
 });
 
+// Admin "Payment Details" ledger — paginated, filterable, sortable, searchable.
+const boolFromStr = z.preprocess((v) => {
+  if (v === 'true' || v === true) return true;
+  if (v === 'false' || v === false) return false;
+  return undefined;
+}, z.boolean().optional());
+
+export const paymentDetailsQuery = z.object({
+  q: z.string().trim().optional(),
+  date_from: z.string().optional(),
+  date_to: z.string().optional(),
+  program_id: z.string().uuid().optional(),
+  center_id: z.string().uuid().optional(),
+  admission_id: z.string().uuid().optional(),
+  lead_id: z.string().uuid().optional(),
+  collected_by: z.string().uuid().optional(),
+  mode_of_payment: z.string().optional(),
+  receipt_kind: z.enum(['installment', 'registration', 'misc']).optional(),
+  admission_status: z.enum(['pending_approval', 'attending', 'on_break', 'completed', 'rejected']).optional(),
+  is_old_collection: boolFromStr,
+  amount_min: z.coerce.number().nonnegative().optional(),
+  amount_max: z.coerce.number().nonnegative().optional(),
+  sort: z.enum([
+    'date_desc', 'date_asc', 'amount_desc', 'amount_asc',
+    'receipt_no_asc', 'receipt_no_desc', 'admission_asc', 'admission_desc',
+    'collected_by_asc', 'collected_by_desc', 'created_desc', 'created_asc',
+  ]).optional().default('date_desc'),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
 export const idParam = z.object({ id: z.string().uuid() });
 
 // Receipt creation. amount + mode_of_payment + receipt_date required.
@@ -111,6 +142,9 @@ export const createReceiptSchema = z.object({
   // attached when capturing the receipt (UPI / bank screenshot, etc.).
   // The FE uploads via /uploads/presign and posts the resulting r2_key.
   payment_screenshot_r2_key: z.string().optional().nullable(),
+  // Which payment account this money was received into. The FE picker
+  // defaults to the first primary+active account.
+  payment_account_id: z.string().uuid().optional().nullable(),
 }).superRefine((data, ctx) => {
   // Cross-field rule: installment_no must be present iff
   // receipt_kind = 'installment'. Mirrors the FE picker which only shows

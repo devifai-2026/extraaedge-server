@@ -75,6 +75,8 @@ const ADMISSION_COLS = `
   a.total_fees, a.mode_of_payment,
   a.status, a.break_reason,
   a.selfie_r2_key, a.photo_r2_key,
+  a.payment_proof_r2_key, a.payment_utr, a.payment_account_id,
+  a.payment_amount, a.payment_verified_at, a.payment_verified_by,
   a.guided_by_counsellor_id, a.guided_by_manager_id, a.source,
   a.created_by, a.approved_by, a.approved_at,
   a.created_at, a.updated_at
@@ -85,13 +87,19 @@ const ADMISSION_JOINS = `
   LEFT JOIN admission_centers c ON c.id   = a.center_id
   LEFT JOIN users           u1  ON u1.id  = a.guided_by_counsellor_id
   LEFT JOIN users           u2  ON u2.id  = a.guided_by_manager_id
+  LEFT JOIN payment_accounts pa ON pa.id  = a.payment_account_id
 `;
 
 const ADMISSION_NAMED_COLS = `
   p.name AS program_name,
   c.name AS center_name,
   u1.name AS guided_by_counsellor_name,
-  u2.name AS guided_by_manager_name
+  u2.name AS guided_by_manager_name,
+  pa.label AS payment_account_label,
+  pa.bank_name AS payment_account_bank,
+  pa.account_number AS payment_account_number,
+  pa.ifsc AS payment_account_ifsc,
+  pa.upi_id AS payment_account_upi
 `;
 
 export const list = async (tenant, q = {}) => {
@@ -205,9 +213,10 @@ export const insert = async (tenant, input, created_by) =>
           whatsapp_number, alternate_contact, address, program_id, mode_of_training,
           center_id, total_fees, mode_of_payment, status,
           selfie_r2_key, photo_r2_key,
+          payment_proof_r2_key, payment_utr, payment_account_id, payment_amount,
           guided_by_counsellor_id, guided_by_manager_id, source,
           created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
        RETURNING *`,
       [
         input.lead_id ?? null,
@@ -227,6 +236,10 @@ export const insert = async (tenant, input, created_by) =>
         input.status ?? 'pending_approval',
         input.selfie_r2_key ?? null,
         input.photo_r2_key ?? null,
+        input.payment_proof_r2_key ?? null,
+        input.payment_utr ?? null,
+        input.payment_account_id ?? null,
+        input.payment_amount ?? null,
         input.guided_by_counsellor_id ?? null,
         input.guided_by_manager_id ?? null,
         input.source ?? null,
@@ -357,12 +370,35 @@ export const approve = async (tenant, id, user_id) => {
         SET status = 'attending',
             approved_by = $2,
             approved_at = now(),
+            -- Approving an admission also verifies the registration payment
+            -- the student submitted. Only stamp when there's a payment and
+            -- it isn't already verified, so re-approves don't churn it.
+            payment_verified_at = CASE
+              WHEN payment_amount IS NOT NULL AND payment_amount > 0 AND payment_verified_at IS NULL
+              THEN now() ELSE payment_verified_at END,
+            payment_verified_by = CASE
+              WHEN payment_amount IS NOT NULL AND payment_amount > 0 AND payment_verified_by IS NULL
+              THEN $2 ELSE payment_verified_by END,
             updated_at = now()
       WHERE id = $1 AND deleted_at IS NULL AND status = 'pending_approval'
       RETURNING *`,
     [id, user_id],
   );
   return rows[0] || null;
+};
+
+// Does this admission already have a (live) registration receipt? Used to
+// avoid double-creating one when approve() auto-converts the student's
+// submitted payment into a receipt.
+export const hasRegistrationReceipt = async (tenant, admission_id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT 1 FROM admission_receipts
+      WHERE admission_id = $1 AND receipt_kind = 'registration' AND deleted_at IS NULL
+      LIMIT 1`,
+    [admission_id],
+  );
+  return rows.length > 0;
 };
 
 // Reject a pending admission. Sets status='rejected' so the lead becomes
@@ -426,6 +462,333 @@ export const listReceipts = async (tenant, q = {}) => {
   return rows;
 };
 
+// ---------- Payment Details (admin ledger view) ---------------------------
+//
+// One row per recorded payment (admission_receipts), enriched with the
+// admission code, lead id, program, payer, collected-by (accounts person),
+// and the linked payment account. Paginated + filterable + sortable +
+// searchable for the admin "Payment Details" tab.
+const PAYMENT_SORTS = {
+  date_desc: 'r.receipt_date DESC, r.created_at DESC',
+  date_asc: 'r.receipt_date ASC, r.created_at ASC',
+  amount_desc: 'r.amount DESC',
+  amount_asc: 'r.amount ASC',
+  receipt_no_asc: 'r.receipt_no ASC',
+  receipt_no_desc: 'r.receipt_no DESC',
+  admission_asc: 'a.admission_code ASC NULLS LAST',
+  admission_desc: 'a.admission_code DESC NULLS LAST',
+  collected_by_asc: 'cb.name ASC NULLS LAST',
+  collected_by_desc: 'cb.name DESC NULLS LAST',
+  created_desc: 'r.created_at DESC',
+  created_asc: 'r.created_at ASC',
+};
+
+export const listPaymentDetails = async (tenant, q = {}) => {
+  const conds = ['r.deleted_at IS NULL'];
+  const params = [];
+  const add = (sql, val) => { params.push(val); conds.push(sql.replace('$$', `$${params.length}`)); };
+
+  if (q.date_from) add('r.receipt_date >= $$', q.date_from);
+  if (q.date_to) add('r.receipt_date <= $$', q.date_to);
+  if (q.program_id) add('a.program_id = $$', q.program_id);
+  if (q.center_id) add('a.center_id = $$', q.center_id);
+  if (q.admission_id) add('r.admission_id = $$', q.admission_id);
+  if (q.lead_id) add('a.lead_id = $$', q.lead_id);
+  if (q.collected_by) add('r.created_by = $$', q.collected_by);
+  if (q.mode_of_payment) add('r.mode_of_payment = $$', q.mode_of_payment);
+  if (q.receipt_kind) add('r.receipt_kind = $$', q.receipt_kind);
+  if (q.is_old_collection === true) conds.push('r.is_old_collection = true');
+  if (q.is_old_collection === false) conds.push('r.is_old_collection = false');
+  if (q.amount_min != null) add('r.amount >= $$', q.amount_min);
+  if (q.amount_max != null) add('r.amount <= $$', q.amount_max);
+  if (q.admission_status) add('a.status = $$', q.admission_status);
+
+  // Free-text search across receipt no / admission code / payer name /
+  // phone / email / UTR-ish transaction details.
+  if (q.q) {
+    params.push(`%${q.q}%`);
+    const i = params.length;
+    conds.push(`(
+      r.receipt_no ILIKE $${i}
+      OR a.admission_code ILIKE $${i}
+      OR a.first_name ILIKE $${i}
+      OR a.last_name ILIKE $${i}
+      OR a.email::text ILIKE $${i}
+      OR a.whatsapp_number ILIKE $${i}
+      OR r.transaction_details ILIKE $${i}
+    )`);
+  }
+
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const orderBy = PAYMENT_SORTS[q.sort] || PAYMENT_SORTS.date_desc;
+  const page = Math.max(1, Number(q.page) || 1);
+  const limit = Math.min(200, Math.max(1, Number(q.limit) || 50));
+  const offset = (page - 1) * limit;
+
+  const baseFrom = `
+    FROM admission_receipts r
+    JOIN admissions a       ON a.id = r.admission_id
+    LEFT JOIN leads l       ON l.id = a.lead_id
+    LEFT JOIN programs p    ON p.id = a.program_id
+    LEFT JOIN users cb      ON cb.id = r.created_by
+    -- Prefer the account this specific receipt was collected into; fall
+    -- back to the admission-level account (the registration destination).
+    LEFT JOIN payment_accounts pa ON pa.id = COALESCE(r.payment_account_id, a.payment_account_id)
+    ${where}
+  `;
+
+  const [{ rows }, { rows: countRows }, { rows: sumRows }] = await Promise.all([
+    tenantQuery(
+      tenant,
+      `SELECT r.id, r.receipt_no, r.receipt_date, r.amount, r.mode_of_payment,
+              r.transaction_details, r.is_old_collection, r.receipt_kind,
+              r.installment_no, r.payment_screenshot_r2_key, r.share_token,
+              r.created_at,
+              a.id AS admission_id, a.admission_code, a.status AS admission_status,
+              a.first_name, a.last_name, a.email, a.whatsapp_number,
+              a.payment_utr, a.payment_verified_at,
+              a.total_fees,
+              -- Per-admission running totals: everything collected so far
+              -- (all live receipts for this admission) and the balance left
+              -- against the agreed total fee. Same value repeats on every
+              -- receipt row for that admission — it's the admission's state.
+              (SELECT COALESCE(sum(r2.amount), 0) FROM admission_receipts r2
+                WHERE r2.admission_id = a.id AND r2.deleted_at IS NULL) AS paid_till_date,
+              (COALESCE(a.total_fees, 0) - (SELECT COALESCE(sum(r2.amount), 0) FROM admission_receipts r2
+                WHERE r2.admission_id = a.id AND r2.deleted_at IS NULL)) AS due_amount,
+              a.lead_id,
+              l.name AS lead_name,
+              p.name AS program_name,
+              cb.id AS collected_by_id, cb.name AS collected_by_name, cb.role AS collected_by_role,
+              pa.type AS payment_account_type, pa.label AS payment_account_label,
+              pa.upi_id AS payment_account_upi, pa.bank_name AS payment_account_bank
+         ${baseFrom}
+        ORDER BY ${orderBy}
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset],
+    ),
+    tenantQuery(tenant, `SELECT count(*)::int AS total ${baseFrom}`, params),
+    tenantQuery(tenant, `SELECT COALESCE(sum(r.amount), 0)::numeric AS total_amount ${baseFrom}`, params),
+  ]);
+
+  // ---- Pending-verification rows ----
+  // A student's submitted registration payment lives on the admissions row
+  // (payment_amount / payment_utr / payment_proof) and has NO receipt until
+  // an accounts user approves it. So those payments would be invisible in a
+  // receipts-only ledger. Surface them as synthetic rows tagged is_pending,
+  // built from the admissions table. We skip them when a receipt-specific
+  // filter is set (mode/kind/collected-by/old) since a pending payment has
+  // no receipt to match, and only attach them on page 1.
+  const pending = await fetchPendingVerificationPayments(tenant, q, { page, limit });
+
+  // Pending rows lead the list (they're what needs action). They count
+  // toward the total + total_amount so the footer is honest.
+  const merged = [...pending.rows, ...rows].slice(0, limit);
+
+  return {
+    rows: merged,
+    total: (countRows[0]?.total ?? 0) + pending.total,
+    total_amount: Number(sumRows[0]?.total_amount ?? 0) + pending.total_amount,
+    pending_count: pending.total,
+    page,
+    limit,
+  };
+};
+
+// Submitted-but-unverified registration payments, shaped to match a ledger
+// row (same field names as the receipts SELECT) with is_pending = true and
+// a synthetic id. Only the filters that map to an admission are applied.
+const fetchPendingVerificationPayments = async (tenant, q = {}, { page, limit }) => {
+  const empty = { rows: [], total: 0, total_amount: 0 };
+  // Receipt-specific filters can't match a payment that has no receipt yet.
+  if (q.collected_by || q.mode_of_payment || q.is_old_collection != null) return empty;
+  // The pending bucket is conceptually "registration awaiting verification".
+  if (q.receipt_kind && q.receipt_kind !== 'registration') return empty;
+  // An explicit admission_status filter other than pending_approval excludes them.
+  if (q.admission_status && q.admission_status !== 'pending_approval') return empty;
+
+  const conds = [
+    'a.deleted_at IS NULL',
+    "a.status = 'pending_approval'",
+    'a.payment_amount IS NOT NULL',
+    'a.payment_amount > 0',
+    'a.payment_verified_at IS NULL',
+    // No live registration receipt yet (else it's already in the ledger).
+    `NOT EXISTS (SELECT 1 FROM admission_receipts rr
+                  WHERE rr.admission_id = a.id AND rr.receipt_kind = 'registration' AND rr.deleted_at IS NULL)`,
+  ];
+  const params = [];
+  const add = (sql, val) => { params.push(val); conds.push(sql.replace('$$', `$${params.length}`)); };
+  if (q.program_id) add('a.program_id = $$', q.program_id);
+  if (q.center_id) add('a.center_id = $$', q.center_id);
+  if (q.admission_id) add('a.id = $$', q.admission_id);
+  if (q.lead_id) add('a.lead_id = $$', q.lead_id);
+  if (q.amount_min != null) add('a.payment_amount >= $$', q.amount_min);
+  if (q.amount_max != null) add('a.payment_amount <= $$', q.amount_max);
+  // Date range applies to when the student submitted (admission created).
+  if (q.date_from) add('a.created_at >= $$::date', q.date_from);
+  if (q.date_to) add("a.created_at < ($$::date + interval '1 day')", q.date_to);
+  if (q.q) {
+    params.push(`%${q.q}%`);
+    const i = params.length;
+    conds.push(`(a.admission_code ILIKE $${i} OR a.first_name ILIKE $${i} OR a.last_name ILIKE $${i}
+                 OR a.email::text ILIKE $${i} OR a.whatsapp_number ILIKE $${i} OR a.payment_utr ILIKE $${i})`);
+  }
+
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const from = `
+    FROM admissions a
+    LEFT JOIN leads l    ON l.id = a.lead_id
+    LEFT JOIN programs p ON p.id = a.program_id
+    LEFT JOIN payment_accounts pa ON pa.id = a.payment_account_id
+    ${where}
+  `;
+
+  const [{ rows: cnt }, dataRes] = await Promise.all([
+    tenantQuery(tenant, `SELECT count(*)::int AS total, COALESCE(sum(a.payment_amount),0)::numeric AS total_amount ${from}`, params),
+    // Only materialise the rows on page 1 — they're the action queue and
+    // shouldn't paginate weirdly mixed with receipts.
+    page === 1
+      ? tenantQuery(
+          tenant,
+          `SELECT a.id AS admission_id, a.admission_code, a.status AS admission_status,
+                  a.first_name, a.last_name, a.email, a.whatsapp_number,
+                  a.payment_utr, a.payment_verified_at, a.payment_amount, a.created_at,
+                  a.total_fees,
+                  a.lead_id, l.name AS lead_name, p.name AS program_name,
+                  a.payment_proof_r2_key,
+                  pa.type AS payment_account_type, pa.label AS payment_account_label,
+                  pa.upi_id AS payment_account_upi, pa.bank_name AS payment_account_bank
+             ${from}
+            ORDER BY a.created_at DESC
+            LIMIT $${params.length + 1}`,
+          [...params, limit],
+        )
+      : Promise.resolve({ rows: [] }),
+  ]);
+
+  // Shape each into a ledger-row lookalike. is_pending flags the FE to render
+  // a "Pending verification" tag; payment_proof_r2_key reuses the screenshot
+  // column the FE already knows how to preview.
+  const rows = (dataRes.rows || []).map((a) => ({
+    id: `pending-${a.admission_id}`,
+    is_pending: true,
+    receipt_no: null,
+    receipt_date: a.created_at,
+    amount: Number(a.payment_amount),
+    total_fees: a.total_fees != null ? Number(a.total_fees) : null,
+    // Not yet a receipt — "paid so far" is just this submitted amount, and
+    // due is the balance against the agreed total fee.
+    paid_till_date: Number(a.payment_amount),
+    due_amount: a.total_fees != null ? Number(a.total_fees) - Number(a.payment_amount) : null,
+    mode_of_payment: 'online',
+    transaction_details: a.payment_utr ? `UTR ${a.payment_utr}` : null,
+    is_old_collection: false,
+    receipt_kind: 'registration',
+    installment_no: null,
+    payment_screenshot_r2_key: a.payment_proof_r2_key,
+    share_token: null,
+    created_at: a.created_at,
+    admission_id: a.admission_id,
+    admission_code: a.admission_code,
+    admission_status: a.admission_status,
+    first_name: a.first_name,
+    last_name: a.last_name,
+    email: a.email,
+    whatsapp_number: a.whatsapp_number,
+    payment_utr: a.payment_utr,
+    payment_verified_at: null,
+    lead_id: a.lead_id,
+    lead_name: a.lead_name,
+    program_name: a.program_name,
+    collected_by_id: null,
+    collected_by_name: null,
+    collected_by_role: null,
+    payment_account_type: a.payment_account_type,
+    payment_account_label: a.payment_account_label,
+    payment_account_upi: a.payment_account_upi,
+    payment_account_bank: a.payment_account_bank,
+  }));
+
+  return { rows, total: cnt[0]?.total ?? 0, total_amount: Number(cnt[0]?.total_amount ?? 0) };
+};
+
+// Payment analytics for the admin dashboard charts. Returns:
+//   • trend       — daily collected amount + count over the last N days
+//   • by_mode     — total collected grouped by payment mode (cash/upi/…)
+//   • by_kind     — total collected grouped by receipt kind (registration/
+//                   installment/misc)
+//   • totals      — overall collected amount + count in the window
+const PAYMENT_ANALYTICS_DAYS = 30;
+export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS } = {}) => {
+  const tz = tenant.timezone || 'Asia/Kolkata';
+  const since = `now() - ($1 || ' days')::interval`;
+  const [trend, byMode, byKind, byAccount, totals] = await Promise.all([
+    tenantQuery(
+      tenant,
+      `SELECT to_char((receipt_date)::date, 'YYYY-MM-DD') AS day,
+              sum(amount)::numeric AS amount,
+              count(*)::int AS count
+         FROM admission_receipts
+        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date
+        GROUP BY 1 ORDER BY 1`,
+      [days],
+    ),
+    tenantQuery(
+      tenant,
+      `SELECT COALESCE(mode_of_payment, 'unknown') AS mode,
+              sum(amount)::numeric AS amount, count(*)::int AS count
+         FROM admission_receipts
+        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date
+        GROUP BY 1 ORDER BY amount DESC`,
+      [days],
+    ),
+    tenantQuery(
+      tenant,
+      `SELECT COALESCE(receipt_kind, 'misc') AS kind,
+              sum(amount)::numeric AS amount, count(*)::int AS count
+         FROM admission_receipts
+        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date
+        GROUP BY 1 ORDER BY amount DESC`,
+      [days],
+    ),
+    // Collected ₹ grouped by the payment account the receipt's admission was
+    // paid into (admissions.payment_account_id). Unlinked → 'Unspecified'.
+    tenantQuery(
+      tenant,
+      `SELECT COALESCE(
+                NULLIF(TRIM(COALESCE(pa.label, '') ||
+                  CASE WHEN pa.upi_id IS NOT NULL THEN ' (' || pa.upi_id || ')'
+                       WHEN pa.account_number IS NOT NULL THEN ' (A/C ••' || RIGHT(pa.account_number, 4) || ')'
+                       ELSE '' END), ''),
+                'Unspecified') AS account,
+              sum(r.amount)::numeric AS amount, count(*)::int AS count
+         FROM admission_receipts r
+         JOIN admissions a ON a.id = r.admission_id
+         LEFT JOIN payment_accounts pa ON pa.id = a.payment_account_id
+        WHERE r.deleted_at IS NULL AND r.receipt_date >= (${since})::date
+        GROUP BY 1 ORDER BY amount DESC`,
+      [days],
+    ),
+    tenantQuery(
+      tenant,
+      `SELECT COALESCE(sum(amount), 0)::numeric AS amount, count(*)::int AS count
+         FROM admission_receipts
+        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date`,
+      [days],
+    ),
+  ]);
+  void tz; // receipt_date is a DATE already; tz reserved for future ts fields.
+  return {
+    trend: trend.rows.map((r) => ({ day: r.day, amount: Number(r.amount), count: r.count })),
+    by_mode: byMode.rows.map((r) => ({ mode: r.mode, amount: Number(r.amount), count: r.count })),
+    by_kind: byKind.rows.map((r) => ({ kind: r.kind, amount: Number(r.amount), count: r.count })),
+    by_account: byAccount.rows.map((r) => ({ account: r.account, amount: Number(r.amount), count: r.count })),
+    totals: { amount: Number(totals.rows[0].amount), count: totals.rows[0].count },
+    days,
+  };
+};
+
 export const insertReceipt = async (tenant, admission_id, input, created_by) => {
   // Auto-generate receipt_no if not supplied: RC-YYYYMMDD-<seq>
   let receipt_no = input.receipt_no;
@@ -449,8 +812,8 @@ export const insertReceipt = async (tenant, admission_id, input, created_by) => 
     `INSERT INTO admission_receipts
        (admission_id, receipt_no, receipt_date, amount, mode_of_payment,
         transaction_details, is_old_collection, receipt_kind, installment_no,
-        share_token, payment_screenshot_r2_key, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        share_token, payment_screenshot_r2_key, payment_account_id, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING *`,
     [admission_id, receipt_no, input.receipt_date, input.amount, input.mode_of_payment,
      input.transaction_details ?? null, input.is_old_collection ?? false,
@@ -458,6 +821,7 @@ export const insertReceipt = async (tenant, admission_id, input, created_by) => 
      input.receipt_kind === 'installment' ? (input.installment_no ?? null) : null,
      share_token,
      input.payment_screenshot_r2_key ?? null,
+     input.payment_account_id ?? null,
      created_by ?? null],
   );
   return rows[0];

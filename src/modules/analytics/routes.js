@@ -67,19 +67,41 @@ router.get('/summary', validate({ query: rangeQuery }), async (req, res, next) =
          count(*)::int AS total_leads,
          count(*) FILTER (WHERE converted_at IS NOT NULL)::int AS converted,
          count(DISTINCT program_id) FILTER (WHERE program_id IS NOT NULL)::int AS programs_active,
-         count(*) FILTER (WHERE is_cold)::int AS cold_leads
+         count(*) FILTER (WHERE is_cold)::int AS cold_leads,
+         -- Live product counts that replace the (empty) comms KPIs:
+         count(*) FILTER (WHERE created_at > now() - interval '7 days')::int  AS new_leads_7d,
+         count(*) FILTER (WHERE created_at::date = now()::date)::int          AS new_leads_today,
+         count(*) FILTER (WHERE assigned_to IS NULL)::int                     AS unassigned_leads,
+         count(*) FILTER (WHERE converted_at IS NOT NULL
+                           AND date_trunc('month', converted_at) = date_trunc('month', now()))::int AS enrolled_this_month
        FROM leads WHERE ${where}`,
       params,
     );
 
-    // Communication counts — scoped for non-admins (only their own sends).
-    const userScopeClause = scope?.user_ids ? `AND user_id = ANY($1::uuid[])` : '';
-    const userScopeParams = scope?.user_ids ? [scope.user_ids] : [];
-    const [emailN, smsN, waN] = await Promise.all([
-      tenantQuery(req.tenant, `SELECT count(*)::int n FROM message_log WHERE channel='email'    AND sent_at > now() - interval '30 days' ${userScopeClause}`, userScopeParams),
-      tenantQuery(req.tenant, `SELECT count(*)::int n FROM message_log WHERE channel='sms'      AND sent_at > now() - interval '30 days' ${userScopeClause}`, userScopeParams),
-      tenantQuery(req.tenant, `SELECT count(*)::int n FROM message_log WHERE channel='whatsapp' AND sent_at > now() - interval '30 days' ${userScopeClause}`, userScopeParams),
+    // Follow-ups due today + admissions this month — operational, always-
+    // populated counts. Scoped for non-admins (their own / team's).
+    const fuScope = scope?.user_ids ? `AND (f.created_by = ANY($1::uuid[]) OR l.assigned_to = ANY($1::uuid[]))` : '';
+    const fuParams = scope?.user_ids ? [scope.user_ids] : [];
+    const admScope = scope?.user_ids ? `AND guided_by_counsellor_id = ANY($1::uuid[])` : '';
+    const admParams = scope?.user_ids ? [scope.user_ids] : [];
+    const [fuToday, admMonth] = await Promise.all([
+      tenantQuery(
+        req.tenant,
+        `SELECT count(*)::int n
+           FROM lead_followups f JOIN leads l ON l.id = f.lead_id
+          WHERE f.deleted_at IS NULL AND f.status = 'planned'
+            AND f.next_action_datetime::date = now()::date ${fuScope}`,
+        fuParams,
+      ),
+      tenantQuery(
+        req.tenant,
+        `SELECT count(*)::int n FROM admissions
+          WHERE deleted_at IS NULL AND status <> 'rejected'
+            AND date_trunc('month', admission_date) = date_trunc('month', now()) ${admScope}`,
+        admParams,
+      ).catch(() => ({ rows: [{ n: 0 }] })),
     ]);
+
     const s = rows[0];
     const conversion = s.total_leads ? Math.round((s.converted / s.total_leads) * 100) : 0;
     res.json({
@@ -89,7 +111,12 @@ router.get('/summary', validate({ query: rangeQuery }), async (req, res, next) =
         conversion_rate_pct: conversion,
         programs_active: s.programs_active,
         cold_leads: s.cold_leads,
-        comms_30d: { email: emailN.rows[0].n, sms: smsN.rows[0].n, whatsapp: waN.rows[0].n },
+        new_leads_7d: s.new_leads_7d,
+        new_leads_today: s.new_leads_today,
+        unassigned_leads: s.unassigned_leads,
+        enrolled_this_month: s.enrolled_this_month,
+        followups_due_today: fuToday.rows[0].n,
+        admissions_this_month: admMonth.rows[0].n,
       },
       meta: { requestId: req.id },
     });

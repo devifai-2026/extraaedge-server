@@ -100,14 +100,26 @@ router.post(
       }
 
       const result = await tenantTx(req.tenant, async (client) => {
-        const { rows: leadRows } = await client.query(`SELECT assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`, [lead_id]);
+        const { rows: leadRows } = await client.query(`SELECT assigned_to, stage_id, sub_stage_id FROM leads WHERE id = $1 AND deleted_at IS NULL`, [lead_id]);
         if (!leadRows[0]) throw notFound('Lead not found');
         const from_user_id = leadRows[0].assigned_to;
+        // Derive the real type from state: you can only "reassign" a lead that
+        // already had an owner. If there's no previous owner this is the FIRST
+        // assignment, so record it as 'assign' (unless the caller explicitly
+        // sent a more specific type like 'refer'/'auto_assign'). Prevents the
+        // nonsensical "reassign with no previous owner" rows in the report.
+        let effectiveType = assignment_type;
+        if (!from_user_id && (assignment_type === 'reassign' || !assignment_type)) {
+          effectiveType = 'assign';
+        }
         await client.query(`UPDATE lead_assignments SET is_active = false, status = 'closed' WHERE lead_id = $1 AND is_active`, [lead_id]);
         const { rows } = await client.query(
-          `INSERT INTO lead_assignments (lead_id, from_user_id, assigned_to, assigned_by, assignment_type, reason, is_active, status)
-           VALUES ($1,$2,$3,$4,$5,$6,true,'open') RETURNING *`,
-          [lead_id, from_user_id, assigned_to, req.user.id, assignment_type, reason ?? null],
+          `INSERT INTO lead_assignments
+             (lead_id, from_user_id, assigned_to, assigned_by, assignment_type, reason, is_active, status,
+              stage_id_at_transfer, sub_stage_id_at_transfer)
+           VALUES ($1,$2,$3,$4,$5,$6,true,'open',$7,$8) RETURNING *`,
+          [lead_id, from_user_id, assigned_to, req.user.id, effectiveType, reason ?? null,
+           leadRows[0].stage_id ?? null, leadRows[0].sub_stage_id ?? null],
         );
         // Snap manager_id to the new counsellor's primary manager so the
         // hierarchy chip on the LeadCard reflects reality. Same logic that
@@ -121,7 +133,7 @@ router.post(
         await client.query(
           `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
            VALUES ($1,$2,$3,$4,$5::jsonb)`,
-          [lead_id, req.user.id, assignment_type, `Lead ${assignment_type}`, JSON.stringify({ from: from_user_id, to: assigned_to, reason: reason ?? null })],
+          [lead_id, req.user.id, effectiveType, `Lead ${effectiveType}`, JSON.stringify({ from: from_user_id, to: assigned_to, reason: reason ?? null })],
         );
         return rows[0];
       });

@@ -150,6 +150,9 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'third_party_integration',
   'reports',
   'analytics',
+  // Lead Transfer / Lead Report — admin + sales_manager. Telecaller /
+  // Counsellor performance via the immutable lead_assignments ledger.
+  'lead_transfer_report',
   // Accounts module (account_manager role). These show up in the
   // super_admin's "tab permissions" matrix so the role assignments can
   // be tuned per tenant without a code deploy.

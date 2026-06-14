@@ -306,17 +306,40 @@ export const updateLead = async (tenant, actor, id, updates) => {
   const lead = await repo.updateLead(tenant, id, scalarUpdates, actor?.id ?? null);
 
   if (Array.isArray(followups) && followups.length) {
-    // Group incoming rows by stage_id. Each group is processed as a full
-    // replace for that (lead, stage) — slots not present in the payload
-    // get soft-deleted (see replaceFollowupsForStage).
+    // Two kinds of rows arrive in `followups`:
+    //   • slot rows   — stage_id + slot_index 1..5 (the per-stage 5-slot grid)
+    //   • ad-hoc row  — no slot_index (the top "Followup Scheduled On" +
+    //                   "Follow up Comments" pair). At most one is meaningful.
     const byStage = new Map();
+    const adHoc = [];
     for (const f of followups) {
-      if (!f?.stage_id || !Number.isInteger(f.slot_index)) continue;
-      if (!byStage.has(f.stage_id)) byStage.set(f.stage_id, []);
-      byStage.get(f.stage_id).push(f);
+      if (f?.stage_id && Number.isInteger(f.slot_index)) {
+        if (!byStage.has(f.stage_id)) byStage.set(f.stage_id, []);
+        byStage.get(f.stage_id).push(f);
+      } else if (f && (f.next_action_datetime || (typeof f.comment === 'string' && f.comment.trim()))) {
+        adHoc.push(f);
+      }
     }
+    // Each group is a full replace for that (lead, stage) — slots not present
+    // in the payload get soft-deleted (see replaceFollowupsForStage).
     for (const [stageId, rows] of byStage) {
       await repo.replaceFollowupsForStage(tenant, id, stageId, rows, actor?.id);
+    }
+    // Persist the top-level planned follow-up (date and/or comment). Scope it
+    // to the lead's current stage so it groups + reports correctly.
+    if (adHoc.length) {
+      const f = adHoc[adHoc.length - 1];
+      await repo.upsertAdHocPlannedFollowup(
+        tenant,
+        id,
+        {
+          next_action_datetime: f.next_action_datetime ?? null,
+          comment: f.comment ?? null,
+          stage_id: f.stage_id ?? scalarUpdates.stage_id ?? existing.stage_id ?? null,
+          sub_stage_id: f.sub_stage_id ?? scalarUpdates.sub_stage_id ?? existing.sub_stage_id ?? null,
+        },
+        actor?.id,
+      );
     }
   }
 

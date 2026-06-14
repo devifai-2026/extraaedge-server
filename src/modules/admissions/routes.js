@@ -8,7 +8,7 @@ import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import {
   createAdmissionSchema, updateAdmissionSchema, listQuery, reportQuery, idParam,
-  createReceiptSchema, createCenterSchema, updateCenterSchema,
+  createReceiptSchema, createCenterSchema, updateCenterSchema, paymentDetailsQuery,
 } from './schema.js';
 
 const router = express.Router();
@@ -44,11 +44,15 @@ router.get(
 );
 
 // Share-link generator for the public student-facing admission form.
-// Body is empty; the lead is identified by URL. Each call mints a new
-// 24h token (regenerate = call again).
+// Body optionally carries `payment_account_id` — the account the accounts
+// user picked for the student to pay into. Each call mints a new 24h
+// token (regenerate = call again).
 router.post(
   '/share-link/:leadId',
-  validate({ params: z.object({ leadId: z.string().uuid() }) }),
+  validate({
+    params: z.object({ leadId: z.string().uuid() }),
+    body: z.object({ payment_account_id: z.string().uuid().optional().nullable() }).optional(),
+  }),
   controller.generateShareLink,
 );
 
@@ -58,6 +62,10 @@ router.get('/reports/collection-receipt-wise', validate({ query: reportQuery }),
 
 // Receipts (flat list across admissions)
 router.get('/receipts', validate({ query: reportQuery }), controller.listReceipts);
+// Admin Payment Details ledger — paginated/filterable/sortable/searchable.
+router.get('/payment-details', validate({ query: paymentDetailsQuery }), controller.listPaymentDetails);
+// Payment analytics for the admin dashboard charts.
+router.get('/payment-analytics', controller.paymentAnalytics);
 router.delete('/receipts/:id', validate({ params: idParam }), controller.deleteReceipt);
 
 // Centers — super_admin manages, account_manager reads.

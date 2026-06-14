@@ -14,6 +14,7 @@ const main = async () => {
   const hash = await argon2.hash('ChangeMe123!', { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 });
   const { rows: [roleMgr] } = await tenantQuery(tenant, `SELECT id FROM custom_roles WHERE name = 'sales_manager' AND deleted_at IS NULL`);
   const { rows: [roleCouns] } = await tenantQuery(tenant, `SELECT id FROM custom_roles WHERE name = 'counsellor' AND deleted_at IS NULL`);
+  const { rows: [roleAcct] } = await tenantQuery(tenant, `SELECT id FROM custom_roles WHERE name = 'account_manager' AND deleted_at IS NULL`);
 
   await tenantQuery(tenant, `
     INSERT INTO users (name, email, phone, password_hash, role, role_id) VALUES
@@ -22,6 +23,15 @@ const main = async () => {
       ('Counsellor Two', '[email protected]', '+919800000003', $1, 'counsellor', $3)
     ON CONFLICT (email) DO NOTHING`,
     [hash, roleMgr.id, roleCouns.id]);
+
+  // Accounts (account_manager) demo user — matches the login-screen chip.
+  if (roleAcct) {
+    await tenantQuery(tenant, `
+      INSERT INTO users (name, email, phone, password_hash, role, role_id) VALUES
+        ('Demo Accounts', '[email protected]', '+919800000004', $1, 'account_manager', $2)
+      ON CONFLICT (email) DO NOTHING`,
+      [hash, roleAcct.id]);
+  }
 
   await tenantQuery(tenant, `
     INSERT INTO programs (name, code, category, type, price, currency, duration_value, duration_unit, is_active)
