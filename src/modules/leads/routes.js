@@ -42,6 +42,17 @@ router.post(
 );
 
 router.get('/', validate({ query: listQuery }), controller.list);
+// Full CSV export of the lead list — NO pagination, every matching row.
+// Super-admin ONLY (the FE hides the button for other roles; we enforce here
+// because the FE check is just a hint). Honors the same filter query params
+// as GET /leads so the download matches the on-screen list. Declared before
+// the '/:id' route so 'export.csv' isn't swallowed as an :id param.
+router.get(
+  '/export.csv',
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN),
+  validate({ query: listQuery }),
+  controller.exportCsv,
+);
 // stage-counts honors the same advanced-filter query params as /leads so the
 // tab labels update when the user applies a filter in the LeadList.
 router.get('/stage-counts', validate({ query: listQuery }), controller.stageCounts);

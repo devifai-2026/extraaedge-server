@@ -27,6 +27,8 @@ const schema = z.object({
         'http://localhost:3000',
         'https://extraa-edge-admin.netlify.app',
         'https://extraaedge-product.netlify.app',
+        // Render-hosted admin frontend.
+        'https://extraaedge-admin.onrender.com',
       ].join(','),
     ),
   PUBLIC_TENANT_DOMAIN: stringNonEmpty.default('productivo.in'),

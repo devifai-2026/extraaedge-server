@@ -40,6 +40,16 @@ export const listLeads = async (tenant, actor, query) => {
   return repo.list(tenant, query, scope);
 };
 
+// Full CSV export of the lead list — same filters/scope as listLeads but
+// every matching row (no pagination). Route layer restricts this to
+// super_admin, so computeScope returns null (whole tenant) for that actor;
+// we still pass the scope through so the export honors visibility if the
+// gate is ever widened to managers/counsellors.
+export const exportLeads = async (tenant, actor, query) => {
+  const scope = await computeScope(tenant, actor);
+  return repo.exportList(tenant, query, scope);
+};
+
 export const stageCounts = async (tenant, actor, query = {}) => {
   const scope = await computeScope(tenant, actor);
   return repo.stageCounts(tenant, query, scope);

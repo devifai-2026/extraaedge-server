@@ -1139,6 +1139,55 @@ export const list = async (tenant, opts, scope) => {
   return { rows, total: countRows[0].total };
 };
 
+// Full export — same filter/scope/sort as `list`, but with NO pagination.
+// Returns every matching lead in the tenant DB with human-friendly joined
+// names (stage / sub-stage / program / owner / etc.) so the CSV is readable
+// without a second lookup. Used by GET /leads/export.csv (super_admin only).
+//
+// We deliberately reuse buildLeadWhere + sortClause so a filtered export
+// (the FE passes the same filterParams it uses for the list) lines up
+// exactly with what the user sees on screen — just without the LIMIT.
+export const exportList = async (tenant, opts, scope) => {
+  const { sort } = opts;
+  const { conds, params, tagJoin } = buildLeadWhere(opts, scope, { includeFlag: true });
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.id, l.name, l.email, l.phone, l.whatsapp_number, l.alternate_contact,
+            l.gender, l.language,
+            s.name  AS stage_name,
+            ss.name AS sub_stage_name,
+            p.name  AS program_name,
+            c.name  AS country_name,
+            st.name AS state_name,
+            l.district, l.city, l.pincode,
+            ps.name AS primary_source_name,
+            u.name   AS assigned_to_name,
+            mgr.name AS manager_name,
+            cb.name  AS created_by_name,
+            l.lead_score, l.engagement_score, l.lead_value,
+            l.is_cold,
+            (l.converted_at IS NOT NULL) AS is_converted,
+            l.converted_at,
+            EXTRACT(EPOCH FROM (now() - l.created_at))::int / 86400 AS lead_age_days,
+            l.created_at, l.updated_at, l.last_activity_at
+       FROM leads l ${tagJoin}
+       LEFT JOIN lead_stages          s   ON s.id  = l.stage_id
+       LEFT JOIN lead_sub_stages      ss  ON ss.id = l.sub_stage_id
+       LEFT JOIN programs             p   ON p.id  = l.program_id
+       LEFT JOIN countries            c   ON c.id  = l.country_id
+       LEFT JOIN states               st  ON st.id = l.state_id
+       LEFT JOIN lead_primary_sources ps  ON ps.id = l.primary_source_id
+       LEFT JOIN users                u   ON u.id  = l.assigned_to
+       LEFT JOIN users                mgr ON mgr.id = l.manager_id
+       LEFT JOIN users                cb  ON cb.id  = l.created_by
+       ${where}
+       ORDER BY ${sortClause(sort)}`,
+    params,
+  );
+  return rows;
+};
+
 // Stage counts — scoped same way as list, and honors the same advanced
 // filter so the tab labels (All / Unassigned / Fresh / Untouched / each
 // stage) update when the user applies filters in the LeadList. The base
