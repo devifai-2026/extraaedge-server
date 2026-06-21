@@ -48,7 +48,7 @@ export const duplicateDetected = (matches) =>
   appError({
     status: 409,
     code: RESPONSE_CODES.DUPLICATE_DETECTED,
-    message: 'A lead with the same phone or email already exists',
+    message: 'A lead with the same phone, WhatsApp number or email already exists',
     details: { matches },
   });
 

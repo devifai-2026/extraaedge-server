@@ -20,7 +20,7 @@ export const LEAD_COLUMNS = `
   pg_degree_id, pg_specialization_id, pg_university_id, pg_graduation_year,
   country_id, state_id, district, city, address, pincode,
   program_id, stage_id, sub_stage_id, remarks, closure_remarks,
-  assigned_to, team_id, created_by,
+  assigned_to, team_id, branch_id, created_by,
   lead_score, lead_score_manual_override, engagement_score, lead_value,
   referred_by_lead_id, referral_code_used, referral_source,
   first_touch_campaign_id, first_touch_channel, first_touch_source, first_touch_medium, first_touch_at,
@@ -110,6 +110,19 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
   if (input.first_touch_campaign_id || input.first_touch_channel) {
     cols.push('first_touch_at'); vals.push(new Date()); placeholders.push(`$${i}`); i += 1;
   }
+  // Default the lead into the first pipeline stage when the caller didn't pick
+  // one (e.g. Quick Add sends no stage). Without this the lead lands with
+  // stage_id = NULL and the UI shows "Unassigned stage". Pick the lowest
+  // order_index active stage (normally "01-New").
+  if (input.stage_id === undefined || input.stage_id === null) {
+    const { rows: firstStage } = await client.query(
+      `SELECT id FROM lead_stages WHERE is_active = true AND deleted_at IS NULL
+        ORDER BY order_index ASC, name ASC LIMIT 1`,
+    );
+    if (firstStage[0]?.id) {
+      cols.push('stage_id'); vals.push(firstStage[0].id); placeholders.push(`$${i}`); i += 1;
+    }
+  }
   const { rows } = await client.query(
     `INSERT INTO leads (${cols.join(',')}) VALUES (${placeholders.join(',')}) RETURNING ${LEAD_COLUMNS}`,
     vals,
@@ -179,22 +192,24 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
     }
   }
 
-  // Lead assignment history row if assigned. Also snap manager_id from the
-  // assignee's primary manager so the LeadCard hierarchy chip + manager
-  // leadlist filter are correct from the moment the row exists. The same
+  // Lead assignment history row if assigned. Also snap manager_id + branch_id
+  // from the assignee so the LeadCard hierarchy chip + manager leadlist filter
+  // + branch scoping are correct from the moment the row exists. The same
   // snapping happens on auto-assign (rule-processor) and manual reassign
   // (lead-assignments routes); keeping it here closes the create path.
   if (input.assigned_to) {
     const { rows: mgrRows } = await client.query(
-      `SELECT manager_id FROM users WHERE id = $1`,
+      `SELECT manager_id, branch_id FROM users WHERE id = $1`,
       [input.assigned_to],
     );
     const newManagerId = mgrRows[0]?.manager_id ?? null;
+    const newBranchId = mgrRows[0]?.branch_id ?? null;
     await client.query(
-      `UPDATE leads SET manager_id = $2 WHERE id = $1`,
-      [lead.id, newManagerId],
+      `UPDATE leads SET manager_id = $2, branch_id = $3 WHERE id = $1`,
+      [lead.id, newManagerId, newBranchId],
     );
     lead.manager_id = newManagerId;
+    lead.branch_id = newBranchId;
     await client.query(
       `INSERT INTO lead_assignments
          (lead_id, assigned_to, assigned_by, assignment_type, is_active, status,
@@ -202,6 +217,28 @@ export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, 
        VALUES ($1,$2,$3,'assign',true,'open',$4,$5)`,
       [lead.id, input.assigned_to, created_by, lead.stage_id ?? null, lead.sub_stage_id ?? null],
     );
+  }
+
+  // Guarantee EVERY lead carries a branch (no branchless leads). The assignee
+  // snap above covers the common case; for an unassigned lead, an assignee with
+  // no branch (e.g. super_admin), or an admin-created lead, fall back to:
+  //   1) the creator's branch, then
+  //   2) the tenant's sole branch (only when exactly one exists — we can't pick
+  //      among many without an owner to derive it from).
+  if (!lead.branch_id) {
+    let fallbackBranch = null;
+    if (created_by) {
+      const cr = await client.query(`SELECT branch_id FROM users WHERE id = $1`, [created_by]);
+      fallbackBranch = cr.rows[0]?.branch_id ?? null;
+    }
+    if (!fallbackBranch) {
+      const only = await client.query(`SELECT id FROM branches WHERE deleted_at IS NULL LIMIT 2`);
+      if (only.rows.length === 1) fallbackBranch = only.rows[0].id;
+    }
+    if (fallbackBranch) {
+      await client.query(`UPDATE leads SET branch_id = $2 WHERE id = $1`, [lead.id, fallbackBranch]);
+      lead.branch_id = fallbackBranch;
+    }
   }
 
   // Initial activity. Force created_at to clock_timestamp() (live wall time
@@ -316,6 +353,28 @@ export const setManagerId = async (tenant, id, manager_id) => {
   );
 };
 
+// Stamp the owning branch on a lead. Used for unassigned quick-adds by a
+// branch/sales manager, where there's no assignee to snap branch_id from.
+export const setBranchId = async (tenant, id, branch_id) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE leads SET branch_id = $2 WHERE id = $1 AND deleted_at IS NULL`,
+    [id, branch_id ?? null],
+  );
+};
+
+// One-time adoption: stamp EVERY branch-less lead (assigned or not) with a
+// branch. Used by the "create first branch and adopt everyone" flow where the
+// tenant has a single branch, so no lead should be left branch-less. Runs on a
+// tx client for atomicity with the user adoption. Returns rows affected.
+export const stampBranchOnUnbranchedLeads = async (client, branch_id) => {
+  const { rowCount } = await client.query(
+    `UPDATE leads SET branch_id = $1 WHERE branch_id IS NULL AND deleted_at IS NULL`,
+    [branch_id],
+  );
+  return rowCount;
+};
+
 export const findByIdWithRelations = async (tenant, id) => {
   const base = await findById(tenant, id);
   if (!base) return null;
@@ -374,6 +433,13 @@ export const findByIdWithRelations = async (tenant, id) => {
        ORDER BY stage_id NULLS LAST, slot_index ASC NULLS LAST, next_action_datetime DESC
     `, [id]),
   ]);
+  // Resolve the owning branch's name (for the read-only Branch field on the
+  // edit form). Cheap point lookup; null when the lead has no branch yet.
+  let branch_name = null;
+  if (base.branch_id) {
+    const br = await tenantQuery(tenant, `SELECT name FROM branches WHERE id = $1 AND deleted_at IS NULL`, [base.branch_id]);
+    branch_name = br.rows[0]?.name ?? null;
+  }
   const custom_values = {};
   for (const r of customValuesRes.rows) custom_values[r.key] = r.value;
   const assignments = assignmentsRes.rows;
@@ -402,6 +468,7 @@ export const findByIdWithRelations = async (tenant, id) => {
   }
   return {
     ...base,
+    branch_name,
     family: family.rows[0] ?? null,
     sources: sources.rows,
     tags: tagsRes.rows,
@@ -1010,6 +1077,17 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
       conds.push(`l.assigned_to = ANY($${userIdsIdx}::uuid[])`);
     }
   }
+  // branch_manager scope: every lead in their branch. A null branch_id means
+  // the manager isn't assigned to any branch yet — scope to nothing rather
+  // than leaking the whole tenant.
+  if (scope && Object.prototype.hasOwnProperty.call(scope, 'branch_id')) {
+    if (scope.branch_id) {
+      params.push(scope.branch_id);
+      conds.push(`l.branch_id = $${params.length}`);
+    } else {
+      conds.push('false');
+    }
+  }
   if (scope && scope.converted_only) {
     conds.push(`l.converted_at IS NOT NULL`);
   }
@@ -1081,6 +1159,7 @@ export const list = async (tenant, opts, scope) => {
               c.name  AS country_name,
               st.name AS state_name,
               ps.name AS primary_source_name,
+              br.name AS branch_name,
               l.district, l.city,
               u.name   AS assigned_to_name,
               u.role   AS assigned_to_role,
@@ -1123,6 +1202,7 @@ export const list = async (tenant, opts, scope) => {
          LEFT JOIN users           mgr  ON mgr.id  = l.manager_id
          LEFT JOIN users           gmgr ON gmgr.id = mgr.manager_id
          LEFT JOIN users           cb  ON cb.id  = l.created_by
+         LEFT JOIN branches        br  ON br.id  = l.branch_id
          LEFT JOIN LATERAL (
            SELECT u2.name FROM lead_assignments la
              JOIN users u2 ON u2.id = la.assigned_to
@@ -1290,9 +1370,10 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
   const firstStageRes = await client.query(`SELECT id FROM lead_stages WHERE is_active = true ORDER BY order_index ASC, name ASC LIMIT 1`);
   const firstStageId = firstStageRes.rows[0]?.id ?? null;
 
-  // Resolve the assignee's manager (if they're a counsellor under one).
-  const mgrRes = await client.query(`SELECT manager_id FROM users WHERE id = $1`, [assigned_to]);
+  // Resolve the assignee's manager + branch (snapshotted onto each lead).
+  const mgrRes = await client.query(`SELECT manager_id, branch_id FROM users WHERE id = $1`, [assigned_to]);
   const newManagerId = mgrRes.rows[0]?.manager_id ?? null;
+  const newBranchId = mgrRes.rows[0]?.branch_id ?? null;
 
   // Snapshot each lead's current owner BEFORE we overwrite it, so we can
   // record `from_user_id` on the new assignment row. Without this, the
@@ -1318,11 +1399,12 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
     `UPDATE leads
         SET assigned_to     = $1,
             manager_id      = $4,
+            branch_id       = $5,
             stage_id        = COALESCE(stage_id, $3),
             updated_at      = now(),
             last_activity_at = now()
       WHERE id = ANY($2::uuid[]) AND deleted_at IS NULL`,
-    [assigned_to, changingIds, firstStageId, newManagerId],
+    [assigned_to, changingIds, firstStageId, newManagerId, newBranchId],
   );
   await client.query(`UPDATE lead_assignments SET is_active = false, status = 'closed' WHERE lead_id = ANY($1::uuid[]) AND is_active`, [changingIds]);
   for (const id of changingIds) {

@@ -75,12 +75,12 @@ const policySchema = z.object({
   is_active: z.boolean().default(true),
 });
 
-router.get('/policies', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/policies', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try { const { rows } = await tenantQuery(req.tenant, `SELECT * FROM referral_policies WHERE deleted_at IS NULL ORDER BY trigger`); res.json({ data: rows, meta: { requestId: req.id } }); }
   catch (err) { next(err); }
 });
 
-router.post('/policies', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: policySchema }), async (req, res, next) => {
+router.post('/policies', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: policySchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -91,7 +91,7 @@ router.post('/policies', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate(
   } catch (err) { next(err); }
 });
 
-router.put('/policies/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: policySchema.partial() }), async (req, res, next) => {
+router.put('/policies/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: policySchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) { if (v === undefined) continue; fields.push(`${k} = $${i}`); params.push(v); i += 1; }
@@ -101,13 +101,13 @@ router.put('/policies/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), valida
   } catch (err) { next(err); }
 });
 
-router.delete('/policies/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/policies/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `UPDATE referral_policies SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });
 
 // Credits
-router.get('/credits', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/credits', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const status = req.query.status;
     const { rows } = await tenantQuery(
@@ -124,7 +124,7 @@ router.get('/credits', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENAN
   } catch (err) { next(err); }
 });
 
-router.post('/credits/:id/credit', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/credits/:id/credit', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -136,7 +136,7 @@ router.post('/credits/:id/credit', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, 
   } catch (err) { next(err); }
 });
 
-router.post('/credits/:id/revoke', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ reason: z.string().optional() }) }), async (req, res, next) => {
+router.post('/credits/:id/revoke', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ reason: z.string().optional() }) }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -148,7 +148,7 @@ router.post('/credits/:id/revoke', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, 
 });
 
 // All referrals overview
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,

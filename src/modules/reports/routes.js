@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import ExcelJS from 'exceljs';
@@ -15,7 +15,7 @@ import { teamHierarchy } from '../users/repo.js';
 const router = express.Router();
 router.use(authRequired, tenantRequired);
 
-const adminOrManager = requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER);
+const adminOrManager = requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER);
 
 const idParam = z.object({ id: z.string().uuid() });
 const jobIdParam = z.object({ job_id: z.string().uuid() });
@@ -35,7 +35,7 @@ router.post('/leads/:id/pdf', validate({ params: idParam }), async (req, res, ne
 });
 
 // Dashboard PDF
-router.post('/dashboard/pdf', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: dashSchema }), async (req, res, next) => {
+router.post('/dashboard/pdf', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: dashSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -64,7 +64,7 @@ const transferQuery = z.object({
   assignment_type: z.enum(['assign', 'reassign', 'auto_assign', 'refer', 'unassign']).optional(),
   // Focus the report on a role — e.g. role=counsellor shows only transfers
   // where the previous OR current owner is a counsellor (counsellor perf).
-  role: z.enum(['counsellor', 'sales_manager', 'super_admin', 'account_manager']).optional(),
+  role: z.enum(['counsellor', 'sales_manager', 'branch_manager', 'super_admin', 'account_manager']).optional(),
   // Filter by the lead's qualification (first time it reached a success
   // stage): who qualified it + the date window it was qualified in.
   qualified_by_user_id: z.string().uuid().optional(),
@@ -203,7 +203,7 @@ router.get('/lead-transfers', adminOrManager, validate({ query: transferQuery })
   try {
     // Manager → recursive team scope; admin → all.
     let scopeUserIds = null;
-    if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
       scopeUserIds = await teamHierarchy(req.tenant, req.user.id);
     }
     const { rows, leadCount, transferCount } = await fetchLeadTransfers(req.tenant, req.query, scopeUserIds);

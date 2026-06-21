@@ -2,7 +2,7 @@ import argon2 from 'argon2';
 import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
 import { conflict, forbidden, notFound } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 
@@ -17,6 +17,115 @@ const resolveRoleFromRoleId = async (tenant, role_id) => {
   const role_row = await roleRepo.findById(tenant, role_id);
   if (!role_row) throw notFound('Role not found');
   return role_row.scope; // 'super_admin' | 'sales_manager' | 'counsellor'
+};
+
+// Roles a branch_manager is NOT allowed to create, promote into, or edit.
+// They run a branch; they don't mint other admins/branch heads.
+const BRANCH_MANAGER_FORBIDDEN_ROLES = [
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+];
+
+// The tenant's primary super_admin id — a branch_manager always reports up to
+// the admin (the top of the tree), so we default their manager to it. Returns
+// null only if a tenant somehow has no active super_admin (shouldn't happen).
+const primarySuperAdminId = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id FROM users
+      WHERE role = $1 AND deleted_at IS NULL AND is_active = true
+      ORDER BY created_at
+      LIMIT 1`,
+    [SYSTEM_TENANT_ROLES.SUPER_ADMIN],
+  );
+  return rows[0]?.id ?? null;
+};
+
+// A branch_manager reports to the tenant admin, period — there's no manager to
+// pick. Force manager_id to the super_admin and clear any multi-manager list
+// the FE may have sent. Returns the patched input/updates object.
+const forceBranchManagerReporting = async (tenant, role, obj) => {
+  if (role !== SYSTEM_TENANT_ROLES.BRANCH_MANAGER) return obj;
+  const adminId = await primarySuperAdminId(tenant);
+  return { ...obj, manager_id: adminId, manager_ids: adminId ? [adminId] : [] };
+};
+
+// Validate a branch_id references a live branch in this tenant. Throws if not.
+const assertBranchExists = async (tenant, branch_id) => {
+  if (!branch_id) return;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT 1 FROM branches WHERE id = $1 AND deleted_at IS NULL`,
+    [branch_id],
+  );
+  if (!rows[0]) throw validationError({ branch_id: 'Branch not found' });
+};
+
+// Resolve + enforce the branch_id for a user given their (resulting) role.
+//   - super_admin   → spans all branches → branch_id forced to null.
+//   - branch_manager→ branch is set when they're made a branch head, so a
+//                     null branch_id here is allowed (the head-assignment step
+//                     fills it). A provided branch_id is honored + validated.
+//   - everyone else → branch_id REQUIRED and must be a live branch. If a
+//                     branch_manager actor creates them without one, default to
+//                     the actor's own branch.
+// Returns the patched obj with a normalized branch_id.
+const resolveBranchForRole = async (tenant, role, actor, obj) => {
+  if (role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    return { ...obj, branch_id: null };
+  }
+  let branch_id = obj.branch_id ?? null;
+  // Default a branch_manager-actor's new reports into the actor's own branch.
+  if (!branch_id && actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER && actor.branch_id) {
+    branch_id = actor.branch_id;
+  }
+  if (role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    await assertBranchExists(tenant, branch_id);
+    return { ...obj, branch_id };
+  }
+  // sales_manager / counsellor / account_manager: branch required.
+  if (!branch_id) throw validationError({ branch_id: 'A branch is required' });
+  await assertBranchExists(tenant, branch_id);
+  return { ...obj, branch_id };
+};
+
+// Whether the tenant has any branch yet. Before the first branch exists we
+// can't enforce branch assignment (the admin hasn't run onboarding) — so
+// enforcement is skipped until at least one branch is created.
+const tenantHasBranches = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT 1 FROM branches WHERE deleted_at IS NULL LIMIT 1`,
+  );
+  return Boolean(rows[0]);
+};
+
+// Constrain what a branch_manager actor may do to a target user. super_admin
+// is unrestricted. Branch managers:
+//   - may only create/edit users that fall inside their own branch (their
+//     downstream team subtree, resolved from users.manager_id), and
+//   - may not create, promote into, or touch super_admin / branch_manager
+//     users.
+// `targetRole` is the resulting role bucket; `targetUserId` is the user being
+// edited (null on create); `managerId` is the new/edited user's primary
+// reporting manager. Throws forbidden on violation; resolves to void otherwise.
+const assertBranchManagerScope = async (tenant, actor, { targetRole, targetUserId, managerId }) => {
+  if (!actor || actor.role !== SYSTEM_TENANT_ROLES.BRANCH_MANAGER) return;
+  if (targetRole && BRANCH_MANAGER_FORBIDDEN_ROLES.includes(targetRole)) {
+    throw forbidden('Branch managers cannot manage admin or branch-manager accounts');
+  }
+  const branch = await repo.teamHierarchy(tenant, actor.id); // includes actor + subtree
+  const inBranch = (id) => id && branch.includes(id);
+  // On edit, the existing user must already be inside the branch.
+  if (targetUserId && !inBranch(targetUserId)) {
+    throw forbidden('User is outside your branch');
+  }
+  // The (new) reporting manager must be the branch manager themselves or
+  // someone already inside the branch — otherwise the user would be parented
+  // into another branch.
+  if (managerId && !inBranch(managerId)) {
+    throw forbidden('Reporting manager must be inside your branch');
+  }
 };
 
 export const listUsers = (tenant, query) => repo.list(tenant, query);
@@ -45,20 +154,53 @@ export const createUser = async (tenant, input, actor) => {
     if (seedRole) role_id = seedRole.id;
   }
 
-  // Only the tenant super_admin can create users in the account_manager
-  // role. Other elevated roles (sales_manager) can manage their team but
-  // not provision org-level account managers.
+  // account_manager users can be provisioned by the tenant super_admin OR by
+  // a branch_manager (so a branch can be staffed end-to-end). sales_manager
+  // and below still cannot mint account managers.
   if (role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER
-      && actor?.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
-    throw forbidden('Only the tenant admin can create account-manager users');
+      && actor?.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN
+      && actor?.role !== SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    throw forbidden('Only an admin or branch manager can create account-manager users');
   }
 
-  // account_manager has no team / no reporting manager — these don't apply
-  // even if the caller accidentally sends them. Strip silently so the FE
-  // doesn't have to special-case the payload shape.
+  // account_manager has no team beneath them, but they DO report to a branch
+  // manager (or the tenant super_admin) now that the org is branch-wise — so
+  // we keep their manager_id and only strip team_id. Their lead visibility
+  // stays converted-only regardless (see leads/service.js computeScope).
   if (role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) {
-    input = { ...input, manager_id: null, manager_ids: [], team_id: null };
+    input = { ...input, team_id: null };
   }
+
+  // A branch_manager always reports to the tenant admin — force it and ignore
+  // any manager the FE sent (the FE disables the "Reporting To" picker for
+  // this role). Keeps the branch tree rooted at the admin.
+  input = await forceBranchManagerReporting(tenant, role, input);
+
+  // Branch assignment: required for non-super_admin once the tenant has any
+  // branch (i.e. after onboarding). Before the first branch exists we skip the
+  // requirement so the admin can still manage users pre-setup.
+  if (role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || await tenantHasBranches(tenant)) {
+    input = await resolveBranchForRole(tenant, role, actor, input);
+  }
+
+  // When a branch_manager creates a user without specifying a reporting
+  // manager, default it to the branch_manager themselves so the new user
+  // lands inside their branch (never an orphan outside any branch). Doesn't
+  // apply to account_manager, whose manager_id may legitimately be set
+  // separately to the branch head.
+  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER
+      && !(Array.isArray(input.manager_ids) && input.manager_ids.length)
+      && !input.manager_id) {
+    input = { ...input, manager_id: actor.id };
+  }
+
+  // Branch managers may only create users inside their own branch and may not
+  // create admins / other branch managers.
+  await assertBranchManagerScope(tenant, actor, {
+    targetRole: role,
+    targetUserId: null,
+    managerId: input.manager_ids?.[0] ?? input.manager_id ?? null,
+  });
 
   // super_admin role should default track_work_time=false
   const track_work_time = input.track_work_time ?? (role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN);
@@ -102,19 +244,55 @@ export const updateUser = async (tenant, id, updates, actor) => {
     if (clash && clash.id !== id) throw conflict('Email already in use');
   }
 
-  // Same gate as createUser: changing a user's role TO account_manager
-  // requires super_admin. Existing account_managers can still be edited
-  // by other admins, just not promoted INTO the role.
+  // Same gate as createUser: promoting a user TO account_manager requires
+  // super_admin or branch_manager. Existing account_managers can still be
+  // edited by other admins, just not promoted INTO the role by lower tiers.
   if (updates.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER
       && existing.role !== SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER
-      && actor?.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
-    throw forbidden('Only the tenant admin can promote a user to account_manager');
+      && actor?.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN
+      && actor?.role !== SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    throw forbidden('Only an admin or branch manager can promote a user to account_manager');
   }
-  // account_manager has no team / no manager — null them if the caller
-  // didn't explicitly clear them.
+  // account_manager has no team beneath them, but DOES report to a branch
+  // manager now — keep manager_id, only null team_id.
   if (updates.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) {
-    updates = { ...updates, manager_id: null, manager_ids: [], team_id: null };
+    updates = { ...updates, team_id: null };
   }
+  // If the user is (or is becoming) a branch_manager, force their reporting up
+  // to the tenant admin and ignore any manager the FE sent. Only applies when
+  // the role is actually changing to / staying branch_manager AND the caller
+  // touched the role or manager fields, so we don't clobber on unrelated edits.
+  const effectiveRole = updates.role ?? existing.role;
+  if (effectiveRole === SYSTEM_TENANT_ROLES.BRANCH_MANAGER
+      && ('role' in updates || 'manager_id' in updates || 'manager_ids' in updates)) {
+    updates = await forceBranchManagerReporting(tenant, effectiveRole, updates);
+  }
+  // Branch assignment enforcement, mirroring createUser. Only evaluated when
+  // the role is changing or branch_id is being touched, so unrelated edits
+  // (e.g. a name change) never trip the requirement. super_admin is forced to
+  // a null branch. For other roles, resolve against the new-or-existing
+  // branch_id and require one (once the tenant has branches).
+  if ('role' in updates || 'branch_id' in updates) {
+    if (effectiveRole === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+      updates = { ...updates, branch_id: null };
+    } else if (await tenantHasBranches(tenant)) {
+      const merged = await resolveBranchForRole(tenant, effectiveRole, actor, {
+        ...updates,
+        branch_id: 'branch_id' in updates ? updates.branch_id : existing.branch_id,
+      });
+      updates = { ...updates, branch_id: merged.branch_id };
+    }
+  }
+  // Branch managers may only edit users inside their own branch and may not
+  // touch / promote into admin / branch-manager roles. Evaluate against the
+  // resulting role bucket and the (possibly new) primary manager.
+  await assertBranchManagerScope(tenant, actor, {
+    targetRole: updates.role ?? existing.role,
+    targetUserId: id,
+    managerId: Array.isArray(updates.manager_ids)
+      ? (updates.manager_ids[0] ?? null)
+      : (updates.manager_id ?? null),
+  });
   // Don't let the last active super_admin deactivate themselves — would lock
   // everybody out. Same logic as the demote / delete guards above.
   if (updates.is_active === false && existing.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN && existing.is_active) {
@@ -140,18 +318,40 @@ export const deleteUser = async (tenant, id, actor) => {
     if (others.total <= 1) throw forbidden('Cannot delete the last super_admin');
   }
   if (actor?.id === id) throw forbidden('Cannot delete yourself');
+  // Branch managers may only delete users inside their own branch and never
+  // an admin / fellow branch manager.
+  await assertBranchManagerScope(tenant, actor, {
+    targetRole: existing.role,
+    targetUserId: id,
+    managerId: null,
+  });
   await repo.softDelete(tenant, id);
 };
 
-export const resetPassword = async (tenant, id, new_password) => {
+export const resetPassword = async (tenant, id, new_password, actor) => {
   const row = await repo.findById(tenant, id);
   if (!row) throw notFound('User not found');
+  // Branch managers may only reset passwords for users inside their branch.
+  await assertBranchManagerScope(tenant, actor, {
+    targetRole: row.role,
+    targetUserId: id,
+    managerId: null,
+  });
   const hash = await argon2.hash(new_password, HASH_OPTS);
   await repo.updatePasswordHash(tenant, id, hash);
 };
 
-export const updatePermissions = async (tenant, id, permissions_json) =>
-  repo.update(tenant, id, { permissions_json });
+export const updatePermissions = async (tenant, id, permissions_json, actor) => {
+  const row = await repo.findById(tenant, id);
+  if (!row) throw notFound('User not found');
+  // Branch managers may only change permissions for users inside their branch.
+  await assertBranchManagerScope(tenant, actor, {
+    targetRole: row.role,
+    targetUserId: id,
+    managerId: null,
+  });
+  return repo.update(tenant, id, { permissions_json });
+};
 
 export const myTeam = async (tenant, actor_id) => {
   const ids = await repo.teamHierarchy(tenant, actor_id);
@@ -201,19 +401,22 @@ export const orgTree = async (tenant, actor) => {
     const team = await repo.teamHierarchy(tenant, actor.id);
     const { rows: chainRows } = await tenantQuery(
       tenant,
+      // Walk UP the reporting tree from the actor. Postgres allows exactly ONE
+      // non-recursive anchor term; the recursive part must be a single
+      // SELECT that references the CTE once. We combine both upward paths —
+      // the legacy users.manager_id chain AND the user_managers join — inside
+      // one recursive step via a LEFT JOIN to user_managers + an OR, instead
+      // of two separate recursive UNION branches (which Postgres rejects with
+      // "recursive reference ... must not appear within its non-recursive term").
       `WITH RECURSIVE chain AS (
          SELECT id, manager_id FROM users WHERE id = $1 AND deleted_at IS NULL
          UNION
-         SELECT u.id, u.manager_id
-           FROM users u
-           JOIN chain c ON u.id = c.manager_id
-          WHERE u.deleted_at IS NULL
-         UNION
-         SELECT um_target.id, um_target.manager_id
-           FROM user_managers um
-           JOIN users um_target ON um_target.id = um.manager_id
-           JOIN chain c ON um.user_id = c.id
-          WHERE um_target.deleted_at IS NULL
+         SELECT up.id, up.manager_id
+           FROM chain c
+           LEFT JOIN user_managers um ON um.user_id = c.id
+           JOIN users up
+             ON up.id = c.manager_id OR up.id = um.manager_id
+          WHERE up.deleted_at IS NULL
        )
        SELECT id FROM chain`,
       [actor.id],
@@ -223,8 +426,25 @@ export const orgTree = async (tenant, actor) => {
       `SELECT id FROM users WHERE role = $1 AND deleted_at IS NULL AND is_active = true`,
       [SYSTEM_TENANT_ROLES.SUPER_ADMIN],
     );
+    // Branch managers run a whole branch, not just a manager_id subtree — so
+    // their org tree includes EVERY active user in their branch (all sales
+    // managers, counsellors, account managers under that branch_id), even if
+    // those users don't report to the BM directly via manager_id.
+    let branchMemberIds = [];
+    if (actor.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+      const me = await repo.findById(tenant, actor.id);
+      if (me?.branch_id) {
+        const { rows: branchRows } = await tenantQuery(
+          tenant,
+          `SELECT id FROM users WHERE branch_id = $1 AND deleted_at IS NULL AND is_active = true`,
+          [me.branch_id],
+        );
+        branchMemberIds = branchRows.map((r) => r.id);
+      }
+    }
     const set = new Set([
       ...team,
+      ...branchMemberIds,
       ...chainRows.map((r) => r.id),
       ...admins.map((a) => a.id),
       actor.id,
@@ -236,10 +456,12 @@ export const orgTree = async (tenant, actor) => {
 
   const { rows: nodes } = await tenantQuery(
     tenant,
-    `SELECT id, name, email, role, designation, manager_id, is_active
-       FROM users
-      WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
-      ORDER BY role DESC, name`,
+    `SELECT u.id, u.name, u.email, u.role, u.designation, u.manager_id, u.is_active,
+            u.branch_id, b.name AS branch_name
+       FROM users u
+       LEFT JOIN branches b ON b.id = u.branch_id AND b.deleted_at IS NULL
+      WHERE u.id = ANY($1::uuid[]) AND u.deleted_at IS NULL
+      ORDER BY u.role DESC, u.name`,
     [userIds],
   );
 

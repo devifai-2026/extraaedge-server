@@ -20,7 +20,7 @@ const configSchema = z.object({
   is_active: z.boolean().default(true),
 });
 
-router.get('/config', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/config', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `SELECT * FROM lead_score_config WHERE deleted_at IS NULL ORDER BY name`);
     res.json({ data: rows, meta: { requestId: req.id } });
@@ -45,7 +45,7 @@ router.put('/config', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ b
 });
 
 // Dry-run against a lead: returns the score contribution of every active criterion.
-router.post('/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
+router.post('/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
   try {
     const { rows: [lead] } = await tenantQuery(req.tenant, `SELECT * FROM leads WHERE id = $1 AND deleted_at IS NULL`, [req.body.lead_id]);
     if (!lead) throw notFound('Lead not found');

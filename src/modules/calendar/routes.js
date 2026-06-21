@@ -11,11 +11,11 @@ const router = express.Router();
 router.use(authRequired, tenantRequired);
 
 router.get('/business-hours', controller.getHours);
-router.put('/business-hours', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: businessHoursSchema }), controller.putHours);
+router.put('/business-hours', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: businessHoursSchema }), controller.putHours);
 
 router.get('/holidays', controller.listHolidays);
-router.post('/holidays', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: holidaySchema }), controller.addHoliday);
-router.delete('/holidays/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), controller.deleteHoliday);
+router.post('/holidays', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: holidaySchema }), controller.addHoliday);
+router.delete('/holidays/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), controller.deleteHoliday);
 
 router.get('/next-business-moment', validate({ query: nextMomentQuery }), controller.nextMoment);
 

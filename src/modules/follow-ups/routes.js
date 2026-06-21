@@ -8,7 +8,7 @@ import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { isValidRRule } from '../../lib/rrule.js';
 import { publish } from '../../lib/queue.js';
-import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
 import { notifyChain } from '../../lib/socket.js';
 
@@ -72,7 +72,7 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
       if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
         params.push(req.user.id);
         conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
-      } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+      } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
         // Manager sees follow-ups for any lead currently owned by their team
         // (recursive manager_id chain) plus follow-ups they themselves created.
         const team = await teamHierarchy(req.tenant, req.user.id);
@@ -127,7 +127,7 @@ router.get('/calendar', async (req, res, next) => {
     if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
       params.push(req.user.id);
       conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
-    } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
       const team = await teamHierarchy(req.tenant, req.user.id);
       params.push(team);
       params.push(req.user.id);
@@ -170,7 +170,7 @@ router.get('/analytics', async (req, res, next) => {
     if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
       params.push(req.user.id);
       conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
-    } else if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
       const team = await teamHierarchy(req.tenant, req.user.id);
       params.push(team);
       params.push(req.user.id);

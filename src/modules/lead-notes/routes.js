@@ -59,7 +59,7 @@ router.put(
     try {
       const { rows: existing } = await tenantQuery(req.tenant, `SELECT user_id FROM lead_notes WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
       if (!existing[0]) throw notFound('Note not found');
-      if (existing[0].user_id !== req.user.id && req.user.role !== 'super_admin' && req.user.role !== 'sales_manager') {
+      if (existing[0].user_id !== req.user.id && req.user.role !== 'super_admin' && req.user.role !== 'branch_manager' && req.user.role !== 'sales_manager') {
         throw forbidden('You can only edit your own notes');
       }
       const fields = [];

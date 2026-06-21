@@ -11,9 +11,9 @@ const router = express.Router();
 router.use(authRequired, tenantRequired);
 
 router.get('/:type', validate({ params: typeParam }), controller.list);
-router.post('/:type', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: typeParam, body: itemCreateSchema }), controller.create);
-router.put('/:type/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: typeIdParam, body: itemUpdateSchema }), controller.update);
-router.delete('/:type/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: typeIdParam }), controller.remove);
-router.post('/:type/reorder', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: typeParam, body: reorderSchema }), controller.reorder);
+router.post('/:type', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: typeParam, body: itemCreateSchema }), controller.create);
+router.put('/:type/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: typeIdParam, body: itemUpdateSchema }), controller.update);
+router.delete('/:type/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: typeIdParam }), controller.remove);
+router.post('/:type/reorder', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: typeParam, body: reorderSchema }), controller.reorder);
 
 export default router;

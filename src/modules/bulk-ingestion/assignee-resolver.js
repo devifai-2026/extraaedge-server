@@ -20,7 +20,7 @@
 // State is per-bulk-import (in-memory): each distinct pool gets its own
 // cursor inside one job, so leads land fairly within a single upload.
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 
 export const createAssigneeCache = () => ({
   // email (lowercased) -> { id, role, manager_id } | null (miss)
@@ -117,7 +117,7 @@ export const resolveAssignee = async (tenant, cache, assigned_to_email) => {
     return { assigned_to: user.id, manager_id: user.manager_id ?? null };
   }
 
-  if (user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(user.role)) {
     const pool = await loadCounsellorsFor(tenant, cache, user.id);
     const picked = pickNext(cache, `mgr:${user.id}`, pool);
     if (!picked) return { assigned_to: null, manager_id: user.id };

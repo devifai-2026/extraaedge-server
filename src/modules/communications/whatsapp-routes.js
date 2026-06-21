@@ -35,7 +35,7 @@ router.get('/templates', async (req, res, next) => {
   catch (err) { next(err); }
 });
 
-router.post('/templates', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: tplSchema }), async (req, res, next) => {
+router.post('/templates', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: tplSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -47,7 +47,7 @@ router.post('/templates', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TE
   } catch (err) { next(err); }
 });
 
-router.put('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: tplSchema.partial() }), async (req, res, next) => {
+router.put('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: tplSchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -61,7 +61,7 @@ router.put('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM
   } catch (err) { next(err); }
 });
 
-router.delete('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `UPDATE whatsapp_templates SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });
@@ -95,7 +95,7 @@ router.get('/inbox', async (req, res, next) => {
       req.tenant,
       `SELECT r.*, l.name AS lead_name FROM message_reply r LEFT JOIN leads l ON l.id = r.lead_id
         WHERE r.channel = 'whatsapp' AND r.is_read = false
-          AND (r.routed_to_user_id = $1 OR $2 IN ('super_admin','sales_manager'))
+          AND (r.routed_to_user_id = $1 OR $2 IN ('super_admin','branch_manager','sales_manager'))
         ORDER BY r.received_at DESC LIMIT 200`,
       [req.user.id, req.user.role],
     );

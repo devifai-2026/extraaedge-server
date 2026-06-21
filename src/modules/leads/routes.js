@@ -37,7 +37,7 @@ const blockEditIfConverted = async (req, _res, next) => {
 // lead in the tenant. Admins / managers only; counsellors don't get the button.
 router.post(
   '/auto-assign-unassigned',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER),
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER),
   controller.autoAssignUnassigned,
 );
 

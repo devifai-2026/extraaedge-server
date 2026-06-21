@@ -2,6 +2,7 @@ import argon2 from 'argon2';
 import { env, isDevelopment } from '../../config/env.js';
 import * as repo from './repo.js';
 import * as platformSvc from '../platform-users/service.js';
+import * as branchesRepo from '../branches/repo.js';
 import { resolveTenantBySlug } from '../../db/tenant.js';
 import { signAccessToken, signRefreshToken, verifyToken, ACCESS_TTL_SECONDS, REFRESH_TTL_SECONDS } from '../../lib/jwt.js';
 import { sha256Hex } from '../../lib/crypto.js';
@@ -20,11 +21,14 @@ const safeAvatarUrl = async (key) => {
 const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
 
 // ---------- helpers ----------
-// Returns the tab keys this user can see. super_admin always gets a
-// wildcard so any tab added to the codebase later (without re-seeding
-// the role row) shows up immediately without forcing a re-login.
+// Returns the tab keys this user can see. super_admin and branch_manager
+// always get a wildcard so any tab added to the codebase later (without
+// re-seeding the role row) shows up immediately without forcing a re-login.
+// branch_manager is admin-like for TAB access; its two carve-outs (lead CSV
+// export, sudo-login) are enforced at the route layer, not via tab keys, so a
+// tab wildcard is still safe.
 const buildAllowedTabs = (tab_permissions, role) => {
-  if (role === 'super_admin') return ['*'];
+  if (role === 'super_admin' || role === 'branch_manager') return ['*'];
   if (!tab_permissions) return null;
   return Object.entries(tab_permissions)
     .filter(([, level]) => level && level !== 'hidden')
@@ -388,6 +392,13 @@ export const me = async ({ user }) => {
     const tenant = await resolveTenantBySlug(user.tenantSlug);
     const row = await repo.findUserById(tenant, user.id);
     if (!row) throw notFound('User not found');
+    // Branch onboarding signal: when the tenant has no branches yet, the FE
+    // prompts the admin to create their first branch + branch manager. Derived
+    // (no tenant-table flag) — a cheap count keeps it always-accurate.
+    const branchCount = await branchesRepo.countActive(tenant);
+    // Resolve the user's branch name for the navbar. null for super_admin (or
+    // any unbranched user) — the FE shows "N/A" in that case.
+    const branch = row.branch_id ? await branchesRepo.findById(tenant, row.branch_id) : null;
     return {
       user: {
         id: row.id, email: row.email, name: row.name, phone: row.phone,
@@ -395,6 +406,7 @@ export const me = async ({ user }) => {
         avatar_r2_key: row.avatar_r2_key,
         avatar_url: await safeAvatarUrl(row.avatar_r2_key),
         manager_id: row.manager_id, team_id: row.team_id,
+        branch_id: row.branch_id ?? null, branch_name: branch?.name ?? null,
         track_work_time: row.track_work_time,
         session_timeout_minutes: row.session_timeout_minutes,
         permissions: row.permissions_json ?? null,
@@ -404,6 +416,10 @@ export const me = async ({ user }) => {
         theme_primary_light: row.theme_primary_light ?? null,
       },
       tenant: projectTenantBranding(tenant),
+      tenant_setup: {
+        needs_branch_setup: branchCount === 0,
+        branch_count: branchCount,
+      },
       allowed_tabs: buildAllowedTabs(row.tab_permissions, row.role),
       feature_permissions: row.feature_permissions ?? {},
       impersonated_by: user.impersonatedBy ?? null,

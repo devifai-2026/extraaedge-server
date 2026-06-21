@@ -135,7 +135,7 @@ router.post('/:id/verify-email', otpLimiter, validate({ params: idParam }), asyn
   } catch (err) { next(err); }
 });
 
-router.post('/:id/promote', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/promote', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     await tenantQuery(req.tenant, `UPDATE leads SET is_cold = false, last_activity_at = now() WHERE id = $1`, [req.params.id]);
     await tenantQuery(

@@ -9,10 +9,17 @@ import { logger } from '../../lib/logger.js';
 // rows, this is the server-side guarantee that nobody can sneak them in
 // via a direct API call.
 //
-// Rule: account_manager scope → only 'accounts.*' tabs allowed. Every
-// other scope → any tab EXCEPT 'accounts.*'.
+// Rule:
+//   - account_manager scope → only 'accounts.*' tabs allowed.
+//   - super_admin / branch_manager → admin-like, ALL tabs allowed (they
+//     oversee the whole tenant / branch, including the Accounts module run by
+//     account managers under them).
+//   - every other scope (sales_manager, counsellor) → any tab EXCEPT
+//     'accounts.*'.
+const ALL_TABS_SCOPES = ['super_admin', 'branch_manager'];
 const sanitizeTabPermissions = (scope, tabPermissions) => {
   if (!tabPermissions || typeof tabPermissions !== 'object') return tabPermissions;
+  if (ALL_TABS_SCOPES.includes(scope)) return tabPermissions;
   const out = {};
   for (const [k, v] of Object.entries(tabPermissions)) {
     const isAccounts = k.startsWith('accounts.');

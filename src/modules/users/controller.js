@@ -51,14 +51,14 @@ export const remove = async (req, res, next) => {
 
 export const resetPassword = async (req, res, next) => {
   try {
-    await service.resetPassword(req.tenant, req.params.id, req.body.new_password);
+    await service.resetPassword(req.tenant, req.params.id, req.body.new_password, req.user);
     res.status(204).end();
   } catch (err) { next(err); }
 };
 
 export const updatePermissions = async (req, res, next) => {
   try {
-    const row = await service.updatePermissions(req.tenant, req.params.id, req.body.permissions_json);
+    const row = await service.updatePermissions(req.tenant, req.params.id, req.body.permissions_json, req.user);
     res.json({ data: row, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

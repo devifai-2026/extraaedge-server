@@ -1,4 +1,5 @@
 import * as repo from './repo.js';
+import * as discountRepo from '../lead-discounts/repo.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, forbidden } from '../../lib/errors.js';
 
@@ -19,6 +20,13 @@ export const getForLead = async (tenant, lead_id) => {
 
   const offer = await repo.findByLead(tenant, lead_id);
 
+  // The agreed Discount % for the Accounts team. ONLY an APPROVED discount is
+  // surfaced — a pending or rejected one must never reach Accounts. (With the
+  // hold-conversion model a lead can't even be converted while its discount is
+  // pending, so this is belt-and-braces.) Accounts acts on this final %.
+  const discountRow = await discountRepo.findByLead(tenant, lead_id);
+  const discount = discountRow && discountRow.status === 'approved' ? discountRow : null;
+
   // Active programs list — the modal lets the manager change the course.
   // We also surface each program's fee defaults so the FE can prefill
   // when the manager picks a different course.
@@ -30,7 +38,7 @@ export const getForLead = async (tenant, lead_id) => {
       ORDER BY name`,
   );
 
-  return { lead, offer, programs };
+  return { lead, offer, discount, programs };
 };
 
 // Create or update the per-lead fee plan. The course is captured in the

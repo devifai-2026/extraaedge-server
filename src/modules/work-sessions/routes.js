@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { teamHierarchy } from '../users/repo.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { conflict, forbidden } from '../../lib/errors.js';
 
 const router = express.Router();
@@ -250,11 +250,11 @@ router.get('/me/today', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ query: listQuery }), async (req, res, next) => {
+router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ query: listQuery }), async (req, res, next) => {
   try {
     const conds = [];
     const params = [];
-    if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
       const ids = await teamHierarchy(req.tenant, req.user.id);
       params.push(ids);
       conds.push(`user_id = ANY($${params.length}::uuid[])`);
@@ -276,10 +276,10 @@ router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES
   } catch (err) { next(err); }
 });
 
-router.get('/team-summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/team-summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     let userIds = null;
-    if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
       userIds = await teamHierarchy(req.tenant, req.user.id);
     }
     const params = userIds ? [userIds] : [];

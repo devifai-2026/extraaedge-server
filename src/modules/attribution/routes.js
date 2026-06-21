@@ -19,7 +19,7 @@ const query = z.object({
   model: z.enum(['first_touch', 'last_touch', '50_50', 'linear']).default('50_50'),
 });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ query }), async (req, res, next) => {
+router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ query }), async (req, res, next) => {
   try {
     const amountField = {
       first_touch: 'amount_attributed_first',
@@ -51,7 +51,7 @@ router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES
   } catch (err) { next(err); }
 });
 
-router.get('/models', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), (_req, res) => {
+router.get('/models', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), (_req, res) => {
   res.json({
     data: [
       { code: 'first_touch', label: 'First touch — credit the earliest touchpoint' },
@@ -62,7 +62,7 @@ router.get('/models', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT
   });
 });
 
-router.put('/model', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: z.object({ default_model: z.enum(['first_touch', 'last_touch', '50_50', 'linear']) }) }), async (req, res, next) => {
+router.put('/model', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: z.object({ default_model: z.enum(['first_touch', 'last_touch', '50_50', 'linear']) }) }), async (req, res, next) => {
   try {
     // Persist on the subscription_credits table as a simple tenant-setting anchor — or add a tenant_settings table later.
     // For now, applied at query time — this endpoint stores the preference in a settings blob on the tenant row.

@@ -67,19 +67,20 @@ export const applyAssignment = async (tenant, lead, { restrictPool = null } = {}
     if (!evaluateCondition(rule.condition_json, { lead })) continue;
     const targetUser = await pickTarget(tenant, rule, restrictPool);
     if (!targetUser) continue;
-    // Snap manager_id to the new counsellor's primary manager so the
-    // hierarchy chip on the LeadCard reflects reality. Mirrors the manual
+    // Snap manager_id + branch_id to the new counsellor so the hierarchy chip
+    // on the LeadCard and branch scoping reflect reality. Mirrors the manual
     // reassign path in modules/lead-assignments.
     const { rows: mgrRows } = await tenantQuery(
       tenant,
-      `SELECT manager_id FROM users WHERE id = $1`,
+      `SELECT manager_id, branch_id FROM users WHERE id = $1`,
       [targetUser],
     );
     const newManagerId = mgrRows[0]?.manager_id ?? null;
+    const newBranchId = mgrRows[0]?.branch_id ?? null;
     await tenantQuery(
       tenant,
-      `UPDATE leads SET assigned_to = $2, manager_id = $3, last_activity_at = now() WHERE id = $1`,
-      [lead.id, targetUser, newManagerId],
+      `UPDATE leads SET assigned_to = $2, manager_id = $3, branch_id = $4, last_activity_at = now() WHERE id = $1`,
+      [lead.id, targetUser, newManagerId, newBranchId],
     );
     await tenantQuery(tenant, `INSERT INTO lead_assignments (lead_id, assigned_to, assignment_type, is_active, status) VALUES ($1,$2,'auto_assign',true,'open')`, [lead.id, targetUser]);
     // Timeline visibility: also drop a row in lead_activities so the

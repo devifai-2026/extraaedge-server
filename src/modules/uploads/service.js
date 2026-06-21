@@ -54,7 +54,7 @@ export const getSignedDownload = async (tenant, user, id) => {
   if (row.visibility === 'private' && row.user_id && row.user_id !== user.id) {
     // Allow tenant users with manager+ role to access others' private uploads if desired — keep strict here.
     // (Override at module boundary if a manager endpoint needs this.)
-    if (user.role !== 'super_admin' && user.role !== 'sales_manager') throw forbidden('Not your upload');
+    if (user.role !== 'super_admin' && user.role !== 'branch_manager' && user.role !== 'sales_manager') throw forbidden('Not your upload');
   }
   const url = await getDownloadSignedUrl({ key: row.r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS });
   return { url, expires_in: env.GCS_SIGNED_URL_TTL_SECONDS, uploaded_file: row };
@@ -63,14 +63,15 @@ export const getSignedDownload = async (tenant, user, id) => {
 // Same as getSignedDownload but the FE looks up by r2_key rather than by
 // uploads.id. Admission rows store photo_r2_key, not the uploads PK, so
 // this is the natural lookup for any photo preview on the admin pages.
-// Account/admin-side roles (super_admin, sales_manager, account_manager)
-// can preview any admission photo regardless of who uploaded it —
-// admission photos are tenant-scoped artefacts, not personal uploads.
+// Account/admin-side roles (super_admin, branch_manager, sales_manager,
+// account_manager) can preview any admission photo regardless of who
+// uploaded it — admission photos are tenant-scoped artefacts, not personal
+// uploads.
 export const getSignedDownloadByKey = async (tenant, user, r2Key) => {
   const row = await repo.findByR2Key(tenant, r2Key);
   if (!row) throw notFound('Upload not found');
   if (row.visibility === 'private' && row.user_id && row.user_id !== user.id) {
-    const elevated = ['super_admin', 'sales_manager', 'account_manager'];
+    const elevated = ['super_admin', 'branch_manager', 'sales_manager', 'account_manager'];
     if (!elevated.includes(user.role)) throw forbidden('Not your upload');
   }
   const url = await getDownloadSignedUrl({ key: row.r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS });
@@ -80,7 +81,7 @@ export const getSignedDownloadByKey = async (tenant, user, r2Key) => {
 export const deleteUpload = async (tenant, user, id) => {
   const row = await repo.findById(tenant, id);
   if (!row) throw notFound('Upload not found');
-  if (row.user_id && row.user_id !== user.id && user.role !== 'super_admin' && user.role !== 'sales_manager') {
+  if (row.user_id && row.user_id !== user.id && user.role !== 'super_admin' && user.role !== 'branch_manager' && user.role !== 'sales_manager') {
     throw forbidden('Not your upload');
   }
   await deleteObject(row.r2_key).catch(() => {});

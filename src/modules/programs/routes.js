@@ -14,14 +14,14 @@ router.use(authRequired, tenantRequired);
 
 router.get('/', validate({ query: listQuery }), controller.list);
 router.get('/:id', validate({ params: idParam }), controller.get);
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: createProgramSchema }), controller.create);
+router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: createProgramSchema }), controller.create);
 router.put(
   '/:id',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN),
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER),
   validate({ params: idParam, body: updateProgramSchema }),
   optimisticLock(async (req) => repo.getUpdatedAt(req.tenant, req.params.id)),
   controller.update,
 );
-router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), controller.remove);
+router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), controller.remove);
 
 export default router;

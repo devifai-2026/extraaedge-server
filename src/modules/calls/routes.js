@@ -85,7 +85,7 @@ router.get('/dispositions', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/dispositions', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: dispositionSchema }), async (req, res, next) => {
+router.post('/dispositions', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: dispositionSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -97,7 +97,7 @@ router.post('/dispositions', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), valid
   } catch (err) { next(err); }
 });
 
-router.put('/dispositions/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: dispositionSchema.partial() }), async (req, res, next) => {
+router.put('/dispositions/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: dispositionSchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -110,7 +110,7 @@ router.put('/dispositions/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), va
   } catch (err) { next(err); }
 });
 
-router.delete('/dispositions/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/dispositions/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `UPDATE call_dispositions SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });

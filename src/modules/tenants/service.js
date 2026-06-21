@@ -107,10 +107,10 @@ export const deleteTenant = async (id, platform_user_id, ip, user_agent) => {
   return row;
 };
 
-// Build the tenant's user hierarchy (super_admin → sales_manager →
-// counsellor) for the product-owner UI. Returns an array of root nodes
-// (users with no manager) so the caller can render multiple top-level
-// owners if a tenant has more than one.
+// Build the tenant's user hierarchy (super_admin → branch_manager →
+// sales_manager → counsellor) for the product-owner UI. Returns an array of
+// root nodes (users with no manager) so the caller can render multiple
+// top-level owners if a tenant has more than one.
 //
 // Per the product spec, each node carries only `id`, `name`, and `role` —
 // no email or other internal data. The product owner sees structure, not
@@ -124,9 +124,10 @@ export const getOrgTree = async (id) => {
        FROM users
       WHERE deleted_at IS NULL AND is_active = true
       ORDER BY
-        -- Owners first, then managers, then counsellors. Stable secondary
-        -- sort by name keeps the tree deterministic.
-        CASE role WHEN 'super_admin' THEN 0 WHEN 'sales_manager' THEN 1 ELSE 2 END,
+        -- Owners first, then branch managers, then sales managers, then
+        -- counsellors. Stable secondary sort by name keeps the tree
+        -- deterministic.
+        CASE role WHEN 'super_admin' THEN 0 WHEN 'branch_manager' THEN 1 WHEN 'sales_manager' THEN 2 ELSE 3 END,
         name`,
   );
 

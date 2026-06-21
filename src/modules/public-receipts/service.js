@@ -45,10 +45,61 @@ const findReceiptAcrossTenants = async (token) => {
   return null;
 };
 
+// Build the full fee schedule for an admission with Paid/Due status, so the
+// public receipt can show the student their whole plan (not just this one
+// payment). Registration (if any) is row 0; installments follow. "Paid" = a
+// non-deleted receipt exists for that slot.
+const buildScheduleWithStatus = async (tenant, admissionId) => {
+  if (!admissionId) return { rows: [], totals: { total: 0, paid: 0, due: 0 } };
+  const [{ rows: schedule }, { rows: receipts }, { rows: offers }, { rows: adms }] = await Promise.all([
+    tenantQuery(tenant, `SELECT installment_no, due_date, amount FROM admission_fee_schedule WHERE admission_id = $1 ORDER BY installment_no`, [admissionId]),
+    tenantQuery(tenant, `SELECT receipt_kind, installment_no, amount, receipt_date FROM admission_receipts WHERE admission_id = $1 AND deleted_at IS NULL`, [admissionId]),
+    tenantQuery(tenant, `SELECT lfo.registration_amount FROM admissions a JOIN lead_fee_offers lfo ON lfo.lead_id = a.lead_id WHERE a.id = $1 LIMIT 1`, [admissionId]),
+    tenantQuery(tenant, `SELECT total_fees FROM admissions WHERE id = $1`, [admissionId]),
+  ]);
+
+  // Index receipts: registration + per-installment.
+  const regReceipt = receipts.find((x) => x.receipt_kind === 'registration') || null;
+  const instReceipts = {};
+  for (const x of receipts) {
+    if (x.receipt_kind === 'installment' && x.installment_no != null) instReceipts[x.installment_no] = x;
+  }
+
+  const rows = [];
+  const regAmount = offers[0]?.registration_amount != null ? Number(offers[0].registration_amount) : null;
+  if (regAmount != null && regAmount > 0) {
+    rows.push({
+      label: 'Registration',
+      installment_no: null,
+      amount: regAmount,
+      due_date: null,
+      paid: Boolean(regReceipt),
+      paid_on: regReceipt?.receipt_date ?? null,
+    });
+  }
+  for (const s of schedule) {
+    const rcpt = instReceipts[s.installment_no];
+    rows.push({
+      label: `Installment ${s.installment_no}`,
+      installment_no: s.installment_no,
+      amount: Number(s.amount || 0),
+      due_date: s.due_date ?? null,
+      paid: Boolean(rcpt),
+      paid_on: rcpt?.receipt_date ?? null,
+    });
+  }
+
+  const total = rows.reduce((sum, x) => sum + x.amount, 0)
+    || Number(adms[0]?.total_fees || 0);
+  const paid = rows.filter((x) => x.paid).reduce((sum, x) => sum + x.amount, 0);
+  return { rows, totals: { total, paid, due: Math.max(0, total - paid) } };
+};
+
 export const lookupByToken = async (token) => {
   const hit = await findReceiptAcrossTenants(token);
   if (!hit) throw notFound('Receipt not found');
   const { tenant, receipt: r } = hit;
+  const fee_schedule = await buildScheduleWithStatus(tenant, r.adm_id);
   // If accounts attached a payment screenshot when they captured the
   // receipt, mint a signed URL the public page can render inline. The
   // r2_key itself never leaves the server — we hand back a time-limited
@@ -84,5 +135,8 @@ export const lookupByToken = async (token) => {
       logo_url: tenant.logo_url,
       brand_primary_color: tenant.brand_primary_color || null,
     },
+    // Full plan with Paid/Due per row + totals, so the receipt shows the
+    // student their whole schedule, not just this single payment.
+    fee_schedule,
   };
 };

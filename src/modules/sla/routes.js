@@ -27,12 +27,12 @@ const alertsQuery = z.object({
 });
 
 // Policies
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try { const { rows } = await tenantQuery(req.tenant, `SELECT * FROM sla_policies WHERE deleted_at IS NULL ORDER BY name`); res.json({ data: rows, meta: { requestId: req.id } }); }
   catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: policySchema }), async (req, res, next) => {
+router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: policySchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -44,7 +44,7 @@ router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: 
   } catch (err) { next(err); }
 });
 
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: policySchema.partial() }), async (req, res, next) => {
+router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: policySchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -58,12 +58,12 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ para
   } catch (err) { next(err); }
 });
 
-router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `UPDATE sla_policies SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });
 
-router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `UPDATE sla_policies SET is_active = NOT is_active WHERE id = $1 RETURNING *`, [req.params.id]);
     res.json({ data: rows[0], meta: { requestId: req.id } });
@@ -112,7 +112,7 @@ router.post('/alerts/:id/resolve', validate({ params: idParam, body: z.object({ 
   } catch (err) { next(err); }
 });
 
-router.get('/alerts/summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/alerts/summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,

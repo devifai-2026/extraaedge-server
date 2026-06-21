@@ -24,7 +24,7 @@ const ruleSchema = z.object({
 });
 const idParam = z.object({ id: z.string().uuid() });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -59,7 +59,7 @@ router.delete('/:id', (_req, res) => {
 
 // Edit a rule. Enforces "at most 1 active rule per tenant" — flipping
 // is_active=true on one rule auto-deactivates every other rule.
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: ruleSchema.partial() }), async (req, res, next) => {
+router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: ruleSchema.partial() }), async (req, res, next) => {
   try {
     if (req.body.is_active === true) {
       // Deactivate every other rule in this tenant before activating this one.
@@ -84,7 +84,7 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ para
 });
 
 // Test a rule against a specific lead (dry run)
-router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
+router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
   try {
     const { rows: [rule] } = await tenantQuery(req.tenant, `SELECT * FROM assignment_rules WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
     if (!rule) throw notFound('Rule not found');

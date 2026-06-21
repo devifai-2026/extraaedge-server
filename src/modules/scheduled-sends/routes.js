@@ -54,7 +54,7 @@ router.delete('/:id', validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows: existing } = await tenantQuery(req.tenant, `SELECT user_id, status FROM scheduled_sends WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
     if (!existing[0]) throw notFound('Scheduled send not found');
-    if (existing[0].user_id !== req.user.id && req.user.role !== 'super_admin' && req.user.role !== 'sales_manager') throw forbidden('Not yours');
+    if (existing[0].user_id !== req.user.id && req.user.role !== 'super_admin' && req.user.role !== 'branch_manager' && req.user.role !== 'sales_manager') throw forbidden('Not yours');
     if (existing[0].status !== 'scheduled') throw forbidden('Only scheduled sends can be cancelled');
     await tenantQuery(req.tenant, `UPDATE scheduled_sends SET status = 'cancelled', deleted_at = now() WHERE id = $1`, [req.params.id]);
     res.status(204).end();

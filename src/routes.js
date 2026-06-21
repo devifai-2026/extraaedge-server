@@ -24,6 +24,8 @@ import templateVariablesRouter from './modules/template-variables/routes.js';
 import leadsRouter from './modules/leads/routes.js';
 import leadRecordingsRouter from './modules/lead-recordings/routes.js';
 import leadAssignmentsRouter from './modules/lead-assignments/routes.js';
+import leadDiscountsRouter from './modules/lead-discounts/routes.js';
+import branchesRouter from './modules/branches/routes.js';
 import leadActivitiesRouter from './modules/lead-activities/routes.js';
 import leadNotesRouter from './modules/lead-notes/routes.js';
 import tagsRouter from './modules/tags/routes.js';
@@ -99,6 +101,7 @@ export const mountRoutes = (app) => {
   api.use('/custom-roles', customRolesRouter);
   api.use('/users', usersRouter);
   api.use('/teams', teamsRouter);
+  api.use('/branches', branchesRouter);
 
   // Tenant — config
   api.use('/dropdowns', dropdownsRouter);
@@ -118,6 +121,7 @@ export const mountRoutes = (app) => {
   // :lead_id path param the sub-router relies on.
   api.use('/leads/:lead_id/recordings', leadRecordingsRouter);
   api.use('/lead-assignments', leadAssignmentsRouter);
+  api.use('/lead-discounts', leadDiscountsRouter);
   api.use('/lead-activities', leadActivitiesRouter);
   api.use('/lead-notes', leadNotesRouter);
   api.use('/tags', tagsRouter);

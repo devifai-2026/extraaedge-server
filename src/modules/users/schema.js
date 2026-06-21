@@ -1,17 +1,17 @@
 import { z } from 'zod';
 
-// `role` is the legacy buckets column on `users` (super_admin / sales_manager
-// / counsellor). It still drives a lot of scoping and middleware — see
-// SYSTEM_TENANT_ROLES — so it's required on create. `role_id` points at a
-// row in `custom_roles` and carries the actual tab/feature permissions; for
-// system roles the seeded "Super Admin" / "Sales Manager" / "Counsellor"
-// custom_roles rows are used. For genuine custom roles, the `role` column
-// must hold the closest matching bucket so existing scope logic
-// (auto-assign-unassigned, lead listing, etc.) continues to work.
-// account_manager is a tenant-level role with no team / no manager (reports
-// directly to the tenant super_admin). Only super_admin can create users
-// in this role — enforced in the service layer.
-const roleBucket = z.enum(['super_admin', 'sales_manager', 'counsellor', 'account_manager']);
+// `role` is the legacy buckets column on `users` (super_admin / branch_manager
+// / sales_manager / counsellor). It still drives a lot of scoping and
+// middleware — see SYSTEM_TENANT_ROLES — so it's required on create. `role_id`
+// points at a row in `custom_roles` and carries the actual tab/feature
+// permissions; for system roles the seeded custom_roles rows are used. For
+// genuine custom roles, the `role` column must hold the closest matching
+// bucket so existing scope logic (auto-assign-unassigned, lead listing, etc.)
+// continues to work. branch_manager scopes its team subtree like sales_manager
+// but one tier higher (their branch). account_manager is a tenant-level role
+// that reports to its branch_manager (or the tenant super_admin). Creating /
+// promoting users into elevated roles is constrained in the service layer.
+const roleBucket = z.enum(['super_admin', 'branch_manager', 'sales_manager', 'counsellor', 'account_manager']);
 
 export const createUserSchema = z.object({
   name: z.string().min(1),
@@ -25,6 +25,9 @@ export const createUserSchema = z.object({
   // (primary manager) so legacy lead-scope logic keeps working.
   manager_ids: z.array(z.string().uuid()).optional(),
   team_id: z.string().uuid().optional(),
+  // Which branch this user belongs to (multi-branch org). Nullable — the
+  // tenant super_admin spans all branches.
+  branch_id: z.string().uuid().nullable().optional(),
   designation: z.string().optional(),
   track_work_time: z.boolean().optional(),
   session_timeout_minutes: z.coerce.number().int().min(5).max(120).optional(),

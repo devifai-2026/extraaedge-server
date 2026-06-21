@@ -2,7 +2,7 @@ import { tenantQuery } from '../../db/tenant.js';
 
 const COLS = `
   u.id, u.email, u.phone, u.name, u.avatar_r2_key, u.role, u.role_id,
-  u.manager_id, u.team_id, u.is_active, u.last_login_at,
+  u.manager_id, u.team_id, u.branch_id, u.is_active, u.last_login_at,
   u.session_timeout_minutes, u.track_work_time, u.permissions_json,
   u.designation,
   u.created_at, u.updated_at, r.name AS role_name, r.scope AS role_scope,
@@ -69,9 +69,9 @@ export const findByEmail = async (tenant, email) => {
 export const insert = async (tenant, input, password_hash) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO users (name, email, phone, password_hash, role, role_id, manager_id, team_id, track_work_time, session_timeout_minutes, permissions_json, designation, is_active)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, COALESCE($9, true), COALESCE($10, 15), $11, $12, true)
-     RETURNING id, email, phone, name, avatar_r2_key, role, role_id, manager_id, team_id, is_active, session_timeout_minutes, track_work_time, permissions_json, designation, created_at, updated_at`,
+    `INSERT INTO users (name, email, phone, password_hash, role, role_id, manager_id, team_id, branch_id, track_work_time, session_timeout_minutes, permissions_json, designation, is_active)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, COALESCE($10, true), COALESCE($11, 15), $12, $13, true)
+     RETURNING id, email, phone, name, avatar_r2_key, role, role_id, manager_id, team_id, branch_id, is_active, session_timeout_minutes, track_work_time, permissions_json, designation, created_at, updated_at`,
     [
       input.name,
       input.email,
@@ -81,6 +81,7 @@ export const insert = async (tenant, input, password_hash) => {
       input.role_id ?? null,
       input.manager_id ?? null,
       input.team_id ?? null,
+      input.branch_id ?? null,
       input.track_work_time ?? null,
       input.session_timeout_minutes ?? null,
       input.permissions_json ?? null,
@@ -127,7 +128,7 @@ export const update = async (tenant, id, updates) => {
   const { rows } = await tenantQuery(
     tenant,
     `UPDATE users SET ${fields.join(', ')} WHERE id = $${i} AND deleted_at IS NULL
-     RETURNING id, email, phone, name, role, role_id, manager_id, team_id, is_active, session_timeout_minutes, track_work_time, permissions_json, updated_at`,
+     RETURNING id, email, phone, name, role, role_id, manager_id, team_id, branch_id, is_active, session_timeout_minutes, track_work_time, permissions_json, updated_at`,
     params,
   );
   return rows[0] ?? null;

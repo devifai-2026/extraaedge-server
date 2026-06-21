@@ -5,14 +5,45 @@ export const PLATFORM_ROLES = Object.freeze({
 
 export const SYSTEM_TENANT_ROLES = Object.freeze({
   SUPER_ADMIN: 'super_admin',
+  // Runs a single branch. Admin-like access (every other manager role plus
+  // counsellors/account_managers report up to them), but WITHOUT two
+  // admin-only capabilities: the full lead CSV export and sudo-login
+  // (impersonation). Lead/ticket/analytics visibility is their downstream
+  // team subtree only (their branch) — see TEAM_SCOPED_MANAGER_ROLES.
+  BRANCH_MANAGER: 'branch_manager',
   SALES_MANAGER: 'sales_manager',
   COUNSELLOR: 'counsellor',
   // Tenant-level role for staff who handle CONVERTED leads (post-enrollment
-  // account management). No team beneath them, no reporting manager — they
-  // report directly to the tenant's super_admin. Scoped lead visibility:
-  // they only see leads where converted_at IS NOT NULL.
+  // account management). No team beneath them; they report to their branch
+  // manager (or directly to the tenant's super_admin). Scoped lead
+  // visibility: they only see leads where converted_at IS NOT NULL.
   ACCOUNT_MANAGER: 'account_manager',
 });
+
+// Manager-tier roles whose lead/ticket/analytics visibility is their own
+// downstream team subtree (recursive users.manager_id). branch_manager sits
+// one tier above sales_manager but scopes the exact same way, so anywhere the
+// code special-cases sales_manager for "see your team subtree", both apply.
+export const TEAM_SCOPED_MANAGER_ROLES = Object.freeze([
+  SYSTEM_TENANT_ROLES.SALES_MANAGER,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+]);
+
+// Roles that get admin-like route access alongside super_admin. Used to
+// expand existing requireRole(SUPER_ADMIN, SALES_MANAGER) "manager-tier"
+// gates so branch managers can operate their branch. The two carve-outs
+// (lead CSV export, sudo-login) are NOT expanded — they stay super_admin-only.
+export const ADMIN_TIER_ROLES = Object.freeze([
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+]);
+
+// Convenience spread for the very common "admin + both manager tiers" gate.
+export const MANAGER_TIER_ROLES = Object.freeze([
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.SALES_MANAGER,
+]);
 
 export const TENANT_STATUS = Object.freeze({
   ACTIVE: 'active',
@@ -32,6 +63,20 @@ export const LEAD_STAGE_CODES = Object.freeze({
   ENROLLED: '10-Enrolled',
   JUNK: '11-Junk',
   COLD: '12-Cold',
+});
+
+// Discount workflow on the Qualified stage. A counsellor may self-apply a
+// discount up to COUNSELLOR_MAX_PERCENT with no approval; anything above that
+// requires a manager (sales_manager / branch_manager / super_admin) to
+// approve. The discount % is surfaced to the Accounts team on the lead.
+export const DISCOUNT = Object.freeze({
+  COUNSELLOR_MAX_PERCENT: 10,
+  MAX_PERCENT: 100,
+  STATUS: Object.freeze({
+    APPROVED: 'approved',
+    PENDING: 'pending_approval',
+    REJECTED: 'rejected',
+  }),
 });
 
 export const CALL_DISPOSITIONS = Object.freeze({

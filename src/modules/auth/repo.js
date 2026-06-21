@@ -2,7 +2,7 @@ import { tenantQuery } from '../../db/tenant.js';
 
 const USER_COLS = `
   u.id, u.email, u.phone, u.name, u.avatar_r2_key, u.password_hash, u.role, u.role_id,
-  u.manager_id, u.team_id, u.is_active, u.last_login_at, u.permissions_json,
+  u.manager_id, u.team_id, u.branch_id, u.is_active, u.last_login_at, u.permissions_json,
   u.session_timeout_minutes, u.track_work_time, u.totp_secret, u.created_at, u.updated_at,
   u.theme_preset, u.theme_primary, u.theme_primary_dark, u.theme_primary_light
 `;

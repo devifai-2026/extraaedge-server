@@ -12,7 +12,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
 
 const router = express.Router();
@@ -26,10 +26,20 @@ const rangeQuery = z.object({
 });
 
 // Resolve the actor's lead-visibility scope. null = no filter (admin).
+//   super_admin    → null, unless they pick a branch (?branch_id) → branch scope
+//   branch_manager → their own branch (leads.branch_id)
+//   sales_manager  → their team subtree
+//   counsellor     → own leads
 const computeScope = async (req) => {
   const actor = req.user;
-  if (!actor || actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
-  if (actor.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  if (!actor) return null;
+  if (actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    return req.query?.branch_id ? { branch_id: req.query.branch_id } : null;
+  }
+  if (actor.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    return { branch_id: actor.branch_id ?? null };
+  }
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
     const ids = await teamHierarchy(req.tenant, actor.id);
     return { user_ids: ids };
   }
@@ -49,6 +59,16 @@ const buildLeadConds = (q, scope, leadAlias = '') => {
   if (scope && scope.user_ids) {
     params.push(scope.user_ids);
     conds.push(`${a}assigned_to = ANY($${params.length}::uuid[])`);
+  }
+  // Branch scope (branch_manager, or super_admin via the branch switcher). A
+  // null branch_id means "no branch" → match nothing rather than leak.
+  if (scope && Object.prototype.hasOwnProperty.call(scope, 'branch_id')) {
+    if (scope.branch_id) {
+      params.push(scope.branch_id);
+      conds.push(`${a}branch_id = $${params.length}`);
+    } else {
+      conds.push('false');
+    }
   }
   return { conds, params };
 };
@@ -254,7 +274,7 @@ router.get('/cold-enquiries', async (req, res, next) => {
 });
 
 // ---------- Counsellor leaderboard (manager / admin only) ----------
-router.get('/counselor-performance', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/counselor-performance', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const scope = await computeScope(req);
     const params = [];
@@ -287,7 +307,7 @@ router.get('/counselor-performance', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN
 // row: { channel, status, n }. `channel='call'` rows encode inbound/outbound
 // in the status (`inbound_completed`, `outbound_missed`, …) so the chart can
 // stack them.
-router.get('/communications', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/communications', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const scope = await computeScope(req);
     const params = [];

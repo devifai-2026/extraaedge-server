@@ -42,14 +42,14 @@ router.get('/categories', async (req, res, next) => {
   catch (err) { next(err); }
 });
 
-router.post('/categories', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: z.object({ name: z.string().min(1), description: z.string().optional(), icon: z.string().optional() }) }), async (req, res, next) => {
+router.post('/categories', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: z.object({ name: z.string().min(1), description: z.string().optional(), icon: z.string().optional() }) }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `INSERT INTO workflow_categories (name, description, icon) VALUES ($1,$2,$3) RETURNING *`, [req.body.name, req.body.description ?? null, req.body.icon ?? null]);
     res.status(201).json({ data: rows[0], meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
-router.put('/categories/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: z.object({ name: z.string().optional(), description: z.string().optional(), icon: z.string().optional() }) }), async (req, res, next) => {
+router.put('/categories/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: z.object({ name: z.string().optional(), description: z.string().optional(), icon: z.string().optional() }) }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) { if (v === undefined) continue; fields.push(`${k} = $${i}`); params.push(v); i += 1; }
@@ -83,7 +83,7 @@ router.get('/:id', validate({ params: idParam }), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: workflowSchema }), async (req, res, next) => {
+router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: workflowSchema }), async (req, res, next) => {
   try {
     const result = await tenantTx(req.tenant, async (client) => {
       const { rows: [wf] } = await client.query(
@@ -113,7 +113,7 @@ router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLE
   } catch (err) { next(err); }
 });
 
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: workflowSchema.partial() }), async (req, res, next) => {
+router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: workflowSchema.partial() }), async (req, res, next) => {
   try {
     const result = await tenantTx(req.tenant, async (client) => {
       const fields = []; const params = []; let i = 1;
@@ -151,12 +151,12 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_RO
   } catch (err) { next(err); }
 });
 
-router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `UPDATE workflows SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });
 
-router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `UPDATE workflows SET is_active = NOT is_active WHERE id = $1 AND deleted_at IS NULL RETURNING *`, [req.params.id]);
     res.json({ data: rows[0], meta: { requestId: req.id } });
@@ -164,7 +164,7 @@ router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
 });
 
 // Trigger + test
-router.post('/:id/execute', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid().optional() }) }), async (req, res, next) => {
+router.post('/:id/execute', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid().optional() }) }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -176,7 +176,7 @@ router.post('/:id/execute', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_
   } catch (err) { next(err); }
 });
 
-router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
+router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
   try {
     // Dry-run — workflow_runs row marked as test; worker supports dry_run flag.
     const { rows } = await tenantQuery(

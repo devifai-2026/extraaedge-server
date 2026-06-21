@@ -46,7 +46,7 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: createSchema }), async (req, res, next) => {
+router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: createSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -61,7 +61,7 @@ router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: 
   } catch (err) { next(err); }
 });
 
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
+router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -75,14 +75,14 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ para
   } catch (err) { next(err); }
 });
 
-router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     await tenantQuery(req.tenant, `UPDATE custom_field_definitions SET deleted_at = now() WHERE id = $1`, [req.params.id]);
     res.status(204).end();
   } catch (err) { next(err); }
 });
 
-router.post('/reorder', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: reorderSchema }), async (req, res, next) => {
+router.post('/reorder', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: reorderSchema }), async (req, res, next) => {
   try {
     for (const o of req.body.order) {
       await tenantQuery(req.tenant, `UPDATE custom_field_definitions SET order_index = $2 WHERE id = $1`, [o.id, o.order_index]);

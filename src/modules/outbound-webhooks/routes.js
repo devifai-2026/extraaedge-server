@@ -23,14 +23,14 @@ const createSchema = z.object({
 const updateSchema = createSchema.partial();
 const idParam = z.object({ id: z.string().uuid() });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `SELECT id, name, target_url, event_types, is_active, created_at, updated_at FROM outbound_webhooks WHERE deleted_at IS NULL ORDER BY name`);
     res.json({ data: rows, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: createSchema }), async (req, res, next) => {
+router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: createSchema }), async (req, res, next) => {
   try {
     const secret = randomToken(24);
     const { rows } = await tenantQuery(
@@ -44,7 +44,7 @@ router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: 
   } catch (err) { next(err); }
 });
 
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
+router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -58,12 +58,12 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ para
   } catch (err) { next(err); }
 });
 
-router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `UPDATE outbound_webhooks SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });
 
-router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows: [wh] } = await tenantQuery(req.tenant, `SELECT * FROM outbound_webhooks WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
     if (!wh) throw notFound('Webhook not found');
@@ -77,7 +77,7 @@ router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate(
   } catch (err) { next(err); }
 });
 
-router.get('/:id/deliveries', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.get('/:id/deliveries', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -88,7 +88,7 @@ router.get('/:id/deliveries', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTE
   } catch (err) { next(err); }
 });
 
-router.post('/deliveries/:id/retry', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.post('/deliveries/:id/retry', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     await tenantQuery(
       req.tenant,

@@ -143,6 +143,10 @@ export const listQuery = z.object({
   program_id: z.string().uuid().optional(),
   assigned_to: z.string().uuid().optional(),
   team_id: z.string().uuid().optional(),
+  // Branch switcher: a super_admin can narrow the whole list to one branch.
+  // Other roles are already branch-scoped server-side, so this is honored only
+  // for super_admin (see leads/service.js computeScope).
+  branch_id: z.string().uuid().optional(),
   country_id: z.string().uuid().optional(),
   state_id: z.string().uuid().optional(),
   city: z.string().optional(),
@@ -241,6 +245,12 @@ export const stageChangeSchema = z.object({
       message: 'next_action_datetime must be in the future',
     })
     .optional(),
+  // Optional Discount % captured when moving the lead to the Qualified stage.
+  // Honored ONLY when the destination stage is Qualified; ignored otherwise.
+  // <=10% self-applies for a counsellor; higher routes to manager approval.
+  // See modules/lead-discounts.
+  discount_percent: z.coerce.number().min(0).max(100).optional(),
+  discount_reason: z.string().max(500).optional(),
 });
 
 export const noteSchema = z.object({

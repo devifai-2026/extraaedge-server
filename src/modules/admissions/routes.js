@@ -70,9 +70,9 @@ router.delete('/receipts/:id', validate({ params: idParam }), controller.deleteR
 
 // Centers — super_admin manages, account_manager reads.
 router.get('/centers', controller.listCenters);
-router.post('/centers', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: createCenterSchema }), controller.createCenter);
-router.put('/centers/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: updateCenterSchema }), controller.updateCenter);
-router.delete('/centers/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), controller.deleteCenter);
+router.post('/centers', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: createCenterSchema }), controller.createCenter);
+router.put('/centers/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: updateCenterSchema }), controller.updateCenter);
+router.delete('/centers/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), controller.deleteCenter);
 
 // Admissions CRUD
 router.get('/', validate({ query: listQuery }), controller.list);

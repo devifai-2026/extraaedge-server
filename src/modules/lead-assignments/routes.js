@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 
 const router = express.Router();
@@ -41,7 +41,7 @@ router.get('/lead/:leadId', validate({ params: z.object({ leadId: z.string().uui
 // scope below decides who can reassign which lead to whom.
 router.post(
   '/',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR),
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR),
   validate({ body: assignSchema }),
   async (req, res, next) => {
     try {
@@ -50,7 +50,7 @@ router.post(
 
       // Sales-manager scope: the new owner must be inside this manager's team
       // hierarchy. Admins can reassign to any active counsellor.
-      if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+      if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
         const { teamHierarchy } = await import('../users/repo.js');
         const teamIds = await teamHierarchy(req.tenant, req.user.id);
         if (!teamIds.includes(assigned_to)) {
@@ -121,14 +121,15 @@ router.post(
           [lead_id, from_user_id, assigned_to, req.user.id, effectiveType, reason ?? null,
            leadRows[0].stage_id ?? null, leadRows[0].sub_stage_id ?? null],
         );
-        // Snap manager_id to the new counsellor's primary manager so the
-        // hierarchy chip on the LeadCard reflects reality. Same logic that
-        // bulkAssign uses.
-        const { rows: mgrRow } = await client.query(`SELECT manager_id FROM users WHERE id = $1`, [assigned_to]);
+        // Snap manager_id + branch_id to the new counsellor so the hierarchy
+        // chip on the LeadCard and the branch scoping reflect reality. Same
+        // logic that bulkAssign uses.
+        const { rows: mgrRow } = await client.query(`SELECT manager_id, branch_id FROM users WHERE id = $1`, [assigned_to]);
         const newManagerId = mgrRow[0]?.manager_id ?? null;
+        const newBranchId = mgrRow[0]?.branch_id ?? null;
         await client.query(
-          `UPDATE leads SET assigned_to = $2, manager_id = $3, last_activity_at = now() WHERE id = $1`,
-          [lead_id, assigned_to, newManagerId],
+          `UPDATE leads SET assigned_to = $2, manager_id = $3, branch_id = $4, last_activity_at = now() WHERE id = $1`,
+          [lead_id, assigned_to, newManagerId, newBranchId],
         );
         await client.query(
           `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)

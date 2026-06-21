@@ -5,14 +5,14 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
 import { forbidden } from '../../lib/errors.js';
 
 const router = express.Router();
 // All three tenant roles can view the failed-leads page; counsellors see it
 // to fix their own bulk uploads and managers/admins see it for everyone's.
-router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
+router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
 
 // Returns either null (super_admin — sees everything) or an array of
 // allowed bulk_imports.user_id values for this viewer:
@@ -22,7 +22,7 @@ router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_A
 const scopeFor = async (req) => {
   const { role, id } = req.user;
   if (role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
-  if (role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(role)) {
     return await teamHierarchy(req.tenant, id);
   }
   return [id];

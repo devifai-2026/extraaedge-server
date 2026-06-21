@@ -46,7 +46,7 @@ router.get('/:id', validate({ params: idParam }), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: createSchema }), async (req, res, next) => {
+router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: createSchema }), async (req, res, next) => {
   try {
     // Encrypt credentials JSON as a blob.
     const creds = req.body.credentials ? Object.fromEntries(Object.entries(req.body.credentials).map(([k, v]) => [k, encrypt(String(v))])) : null;
@@ -60,7 +60,7 @@ router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ body: 
   } catch (err) { next(err); }
 });
 
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
+router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     if (req.body.credentials !== undefined) {
@@ -78,26 +78,26 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ para
   } catch (err) { next(err); }
 });
 
-router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `UPDATE integrations SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });
 
-router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `UPDATE integrations SET status = CASE WHEN status = 'published' THEN 'unpublished' ELSE 'published' END WHERE id = $1 AND deleted_at IS NULL RETURNING ${COLS}`, [req.params.id]);
     res.json({ data: rows[0], meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
-router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     await tenantQuery(req.tenant, `UPDATE integrations SET last_health_check_at = now(), last_error = NULL WHERE id = $1`, [req.params.id]);
     res.json({ data: { ok: true }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
-router.post('/:id/webhook-url', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/webhook-url', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const token = randomToken(24);
     await tenantQuery(

@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 
 import { readFile } from 'node:fs/promises';
@@ -16,7 +16,7 @@ import { buildTemplateXlsx, loadTemplateLookups } from './template-builder.js';
 
 const router = express.Router();
 // All authenticated tenant users (including counsellors) may upload leads.
-router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
+router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
 
 // Serve the bulk-lead template. The xlsx variant is generated live from
 // the tenant's current dropdown values so users pick stage / sub_stage /
@@ -167,7 +167,7 @@ const importsListQuery = z.object({
 
 const allowedUploaderIds = async (req) => {
   if (req.user.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
-  if (req.user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
     const { teamHierarchy } = await import('../users/repo.js');
     return await teamHierarchy(req.tenant, req.user.id);
   }

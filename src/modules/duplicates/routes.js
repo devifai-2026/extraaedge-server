@@ -36,7 +36,7 @@ router.post('/check', validate({ body: checkSchema }), async (req, res, next) =>
   } catch (err) { next(err); }
 });
 
-router.post('/check-bulk', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: bulkSchema }), async (req, res, next) => {
+router.post('/check-bulk', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: bulkSchema }), async (req, res, next) => {
   try {
     const out = [];
     for (const [i, row] of req.body.rows.entries()) {
@@ -48,7 +48,7 @@ router.post('/check-bulk', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
   } catch (err) { next(err); }
 });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -66,7 +66,7 @@ router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES
   } catch (err) { next(err); }
 });
 
-router.post('/:matchId/ignore', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: z.object({ matchId: z.string().uuid() }) }), async (req, res, next) => {
+router.post('/:matchId/ignore', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: z.object({ matchId: z.string().uuid() }) }), async (req, res, next) => {
   try {
     await tenantQuery(
       req.tenant,
@@ -78,7 +78,7 @@ router.post('/:matchId/ignore', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYS
 });
 
 // Merge: move all associated records from merged → surviving, mark merged lead merged_into.
-router.post('/lead/:leadId/merge', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: z.object({ leadId: z.string().uuid() }), body: mergeSchema }), async (req, res, next) => {
+router.post('/lead/:leadId/merge', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: z.object({ leadId: z.string().uuid() }), body: mergeSchema }), async (req, res, next) => {
   try {
     const merged_lead_id = req.params.leadId;
     const surviving_lead_id = req.body.merge_into_lead_id;

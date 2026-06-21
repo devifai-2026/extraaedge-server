@@ -2,26 +2,39 @@ import * as repo from './repo.js';
 import * as usersRepo from '../users/repo.js';
 import { duplicateDetected, notFound, forbidden } from '../../lib/errors.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { notifyLeadChange, notifyAdmins } from '../../lib/socket.js';
 import { applyAssignment, recalcScore } from '../../workers/rule-processor.js';
 import { tenantQuery } from '../../db/tenant.js';
+import * as discountService from '../lead-discounts/service.js';
 
 const emit = (tenant, type, payload) =>
   publish(QUEUE_NAMES.EVENTS, type, { type, tenantId: tenant.id, occurredAt: new Date().toISOString(), ...payload });
 
-const computeScope = async (tenant, actor) => {
+const computeScope = async (tenant, actor, query = {}) => {
   // counsellor:      own leads only.
   // sales_manager:   team (recursive manager_id) PLUS any unassigned leads
   //                  tagged with their own team_id (so quick-add leads they
   //                  create — which land in Unassigned — still show on
   //                  their dashboard until they're routed to a counsellor).
-  // super_admin:     no filter.
+  // branch_manager:  EVERY lead in their branch — assigned or not — via
+  //                  leads.branch_id = their branch. This is the multi-branch
+  //                  scope: a branch head sees the whole branch's pipeline.
+  // super_admin:     no filter — UNLESS they pick a branch in the branch
+  //                  switcher (?branch_id=...), which narrows them to that
+  //                  branch for branch-wise viewing.
   // account_manager: every converted lead in the tenant, regardless of
   //                  owner. They handle post-conversion account work and
   //                  need visibility across the whole converted pipeline.
   if (!actor || !actor.id) return { user_ids: [] };
-  if (actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
+  if (actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    return query.branch_id ? { branch_id: query.branch_id } : null;
+  }
+  if (actor.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    const me = await usersRepo.findById(tenant, actor.id);
+    // No branch assigned yet → see nothing (avoid leaking the whole tenant).
+    return { branch_id: me?.branch_id ?? null };
+  }
   if (actor.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
     const [ids, me] = await Promise.all([
       usersRepo.teamHierarchy(tenant, actor.id),
@@ -36,7 +49,7 @@ const computeScope = async (tenant, actor) => {
 };
 
 export const listLeads = async (tenant, actor, query) => {
-  const scope = await computeScope(tenant, actor);
+  const scope = await computeScope(tenant, actor, query);
   return repo.list(tenant, query, scope);
 };
 
@@ -46,12 +59,12 @@ export const listLeads = async (tenant, actor, query) => {
 // we still pass the scope through so the export honors visibility if the
 // gate is ever widened to managers/counsellors.
 export const exportLeads = async (tenant, actor, query) => {
-  const scope = await computeScope(tenant, actor);
+  const scope = await computeScope(tenant, actor, query);
   return repo.exportList(tenant, query, scope);
 };
 
 export const stageCounts = async (tenant, actor, query = {}) => {
-  const scope = await computeScope(tenant, actor);
+  const scope = await computeScope(tenant, actor, query);
   return repo.stageCounts(tenant, query, scope);
 };
 
@@ -118,6 +131,11 @@ export const getLead = async (tenant, actor, id) => {
     if (scope.converted_only && !row.converted_at) {
       throw forbidden('Lead not in your scope');
     }
+    // branch_manager: the lead must belong to their branch.
+    if (Object.prototype.hasOwnProperty.call(scope, 'branch_id')
+        && (!scope.branch_id || row.branch_id !== scope.branch_id)) {
+      throw forbidden('Lead not in your scope');
+    }
     if (scope.user_ids && !scope.user_ids.includes(row.assigned_to) && row.assigned_to !== null) {
       if (actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) throw forbidden('Lead not in your scope');
     }
@@ -144,8 +162,8 @@ export const getLead = async (tenant, actor, id) => {
 //   counsellor    → ALWAYS owns the lead themselves, even if they picked a
 //                   different owner in the form. assigned_to is forced to the
 //                   creator; manager_id snaps to the creator's manager.
-//   sales_manager → round-robin (the tenant's own configured rule/strategy)
-//                   across the manager's OWN counsellor team only. Empty team
+//   sales_manager / round-robin (the tenant's own configured rule/strategy)
+//   branch_manager → across the manager's OWN counsellor team only. Empty team
 //                   → leave unassigned, tagged with the manager's team_id so
 //                   it surfaces in their Unassigned bucket.
 //   super_admin   → the tenant's configured rule across every counsellor in
@@ -179,7 +197,7 @@ const assignByCreator = async (tenant, actor, lead) => {
     return true;
   }
 
-  if (actor.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
     const [teamIds, me] = await Promise.all([
       usersRepo.teamHierarchy(tenant, actor.id),
       usersRepo.findById(tenant, actor.id),
@@ -238,13 +256,19 @@ export const createLead = async (tenant, actor, input, { on_duplicate = 'block',
   try {
     lead = await repo.insertLead(tenant, input, actor?.id);
   } catch (err) {
-    // The leads_unique_phone_digits partial index (DB backstop) fires when a
+    // A unique-index DB backstop (phone / whatsapp / email) fires when a
     // request races the app-level findDuplicates check above, or when the
-    // caller passed force/create_new but the same phone is already live.
-    // Surface it as the same friendly 409 the pre-check would have thrown,
-    // re-querying for the conflicting row(s) so the FE can show them.
-    if (err?.code === '23505' && /leads_unique_phone_digits/.test(err?.constraint ?? err?.message ?? '')) {
-      const existing = await repo.findDuplicates(tenant, { phone: input.phone });
+    // caller passed force/create_new but the same contact is already live.
+    // Surface ALL of these as the same friendly 409 the pre-check would have
+    // thrown — never let a raw 23505 escape as a 500 "Internal server error".
+    // Re-query for the conflicting row(s) so the FE can show them.
+    const constraint = err?.constraint ?? err?.message ?? '';
+    if (err?.code === '23505' && /leads_unique_phone_digits|leads_whatsapp_unique|leads_email_unique/.test(constraint)) {
+      const existing = await repo.findDuplicates(tenant, {
+        phone: input.phone,
+        whatsapp_number: input.whatsapp_number,
+        email: input.email,
+      });
       throw duplicateDetected(existing);
     }
     throw err;
@@ -409,6 +433,38 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
   );
   const outgoingStageId = preRows[0]?.stage_id ?? null;
 
+  // DISCOUNT GATES CONVERSION. If this move is INTO a converted stage
+  // (is_success) AND carries a discount that needs manager approval, we do NOT
+  // convert the lead yet. We record a pending discount that remembers the
+  // intended stage, and return a "held" signal. The conversion completes only
+  // when a manager approves (lead-discounts/service.decideDiscount). <=cap
+  // discounts (or manager actors) are auto-approved and convert inline below.
+  const hasDiscount = stageChange.discount_percent !== undefined && stageChange.discount_percent !== null;
+  if (hasDiscount) {
+    const { rows: destStageRows } = await tenantQuery(
+      tenant,
+      `SELECT is_success FROM lead_stages WHERE id = $1`,
+      [stageChange.stage_id],
+    );
+    const convertingNow = Boolean(destStageRows[0]?.is_success);
+    if (convertingNow && discountService.discountNeedsApproval(actor, Number(stageChange.discount_percent))) {
+      // HOLD: don't move the stage. Park the discount with the intended stage.
+      const saved = await discountService.applyDiscount(tenant, actor, id, {
+        discount_percent: stageChange.discount_percent,
+        reason: stageChange.discount_reason ?? stageChange.remarks ?? null,
+        pending_stage_id: stageChange.stage_id,
+        pending_sub_stage_id: stageChange.sub_stage_id ?? null,
+      });
+      const current = await repo.findById(tenant, id);
+      return {
+        ...(current ?? {}),
+        discount_pending: true,
+        discount: saved,
+        message: 'Discount needs manager approval — the lead will convert once approved.',
+      };
+    }
+  }
+
   const result = await repo.changeStage(tenant, id, stageChange, actor?.id);
   if (!result) throw notFound('Lead not found');
   // Recompute the score authoritatively so the new stage's `score` column +
@@ -416,6 +472,26 @@ export const changeStage = async (tenant, actor, id, stageChange) => {
   // intentionally no longer touches lead_score; this is the single source of
   // truth.
   await recalcScore(tenant, id).catch(() => {});
+
+  // Auto-approved discount on a conversion (<=cap, or a manager actor): the
+  // stage already moved above, so just record the approved discount inline.
+  if (hasDiscount) {
+    try {
+      const { rows: destStageRows } = await tenantQuery(
+        tenant,
+        `SELECT is_success FROM lead_stages WHERE id = $1`,
+        [stageChange.stage_id],
+      );
+      if (destStageRows[0]?.is_success) {
+        await discountService.applyDiscount(tenant, actor, id, {
+          discount_percent: stageChange.discount_percent,
+          reason: stageChange.discount_reason ?? stageChange.remarks ?? null,
+        });
+      }
+    } catch (err) {
+      if (err?.status === 400) throw err;
+    }
+  }
 
   // When a stage moves, planned follow-ups SCOPED TO THE OUTGOING STAGE
   // become 'done' — moving the lead off that stage means the planned

@@ -77,6 +77,12 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
     // Default custom roles with tab permissions
     const roleBundles = [
       { name: 'super_admin', description: 'Tenant owner — full access', scope: 'super_admin', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.map((t) => [t, 'full'])) },
+      // Branch head. Admin-like tab access (every tab 'full', including the
+      // lead transfer report). The two admin-only carve-outs — the full lead
+      // CSV export and sudo-login (impersonation) — are enforced at the route
+      // layer, not via tab keys, so the tab grant can be the full set. Lead /
+      // analytics visibility is scoped server-side to their branch subtree.
+      { name: 'branch_manager', description: 'Runs a branch — admin-like, minus lead export & user impersonation', scope: 'branch_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.map((t) => [t, 'full'])) },
       { name: 'sales_manager', description: 'Manages a team of counsellors', scope: 'sales_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration').map((t) => [t, 'full'])) },
       { name: 'counsellor', description: 'Handles assigned leads', scope: 'counsellor', is_system: true, tab_permissions: {
         dashboard: 'full', leads: 'full', raw_data: 'read_only', failed_leads: 'read_only',
