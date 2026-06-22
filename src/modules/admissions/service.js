@@ -195,6 +195,48 @@ export const reject = async (tenant, actor, id, reason) => {
   return row;
 };
 
+// Drop a student. Sets status='dropped', records the reason, and — crucially —
+// cancels the linked lead's planned follow-ups so the reminder/overdue workers
+// stop nagging about a student who's no longer pursuing the course. The lead
+// stays converted (it genuinely enrolled once); "dropped" is an accounts-side
+// outcome, surfaced in the Drop Candidates tab.
+export const drop = async (tenant, actor, id, reason) => {
+  const existing = await repo.findById(tenant, id);
+  const row = await repo.drop(tenant, id, actor?.id, reason);
+  if (!row) throw notFound('Admission not found or already dropped');
+
+  // Stop reminders: cancel any planned follow-ups on the linked lead. We mark
+  // them cancelled (not done) so the timeline reads correctly. Best-effort —
+  // a failure here must not block the drop.
+  if (row.lead_id) {
+    try {
+      await tenantQuery(
+        tenant,
+        `UPDATE lead_followups
+            SET status = 'cancelled', updated_at = now()
+          WHERE lead_id = $1 AND deleted_at IS NULL AND status = 'planned'`,
+        [row.lead_id],
+      );
+    } catch (err) {
+      logger.warn({ err: err.message, lead_id: row.lead_id }, 'drop: failed to cancel follow-ups');
+    }
+  }
+
+  events.log(tenant, {
+    admission_id: id, lead_id: row.lead_id ?? null,
+    event_type: events.EVENT_TYPES.STATUS_CHANGED,
+    prev_status: existing?.status ?? null,
+    next_status: row.status,
+    actor_user_id: actor?.id ?? null,
+    actor_kind: events.ACTOR_KINDS.USER,
+    summary: reason
+      ? `Dropped · ${existing?.status ?? '—'} → dropped · ${reason}`
+      : `Dropped · ${existing?.status ?? '—'} → dropped`,
+    metadata: reason ? { reason } : undefined,
+  });
+  return row;
+};
+
 export const setStatus = async (tenant, id, status, extra, actor) => {
   const existing = await repo.findById(tenant, id);
   const row = await repo.setStatus(tenant, id, status, extra);

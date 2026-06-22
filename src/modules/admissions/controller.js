@@ -110,6 +110,13 @@ export const complete = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const drop = async (req, res, next) => {
+  try {
+    const row = await service.drop(req.tenant, req.user, req.params.id, req.body?.reason);
+    res.json({ data: row, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 // ---------- Receipts ----------
 export const listReceipts = async (req, res, next) => {
   try {

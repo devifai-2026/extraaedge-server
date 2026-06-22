@@ -91,6 +91,7 @@ router.post('/:id/reject', validate({ params: idParam, body: z.object({ reason: 
 router.post('/:id/break', validate({ params: idParam, body: z.object({ reason: z.string().optional() }).optional() }), controller.markBreak);
 router.post('/:id/resume', validate({ params: idParam }), controller.resume);
 router.post('/:id/complete', validate({ params: idParam }), controller.complete);
+router.post('/:id/drop', validate({ params: idParam, body: z.object({ reason: z.string().optional() }).optional() }), controller.drop);
 
 // Per-admission receipts
 router.post('/:id/receipts', validate({ params: idParam, body: createReceiptSchema }), controller.createReceipt);

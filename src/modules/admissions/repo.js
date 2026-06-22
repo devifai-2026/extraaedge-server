@@ -420,6 +420,25 @@ export const reject = async (tenant, id, user_id) => {
   return rows[0] || null;
 };
 
+// Drop a student (accounts decided they withdrew / won't continue). Allowed
+// from any live status. Stamps the reason + who/when. The service additionally
+// cancels the lead's planned follow-ups so reminders stop firing.
+export const drop = async (tenant, id, user_id, reason) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE admissions
+        SET status = 'dropped',
+            dropped_by = $2,
+            dropped_at = now(),
+            dropped_reason = $3,
+            updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL AND status <> 'dropped'
+      RETURNING *`,
+    [id, user_id, reason ?? null],
+  );
+  return rows[0] || null;
+};
+
 export const setStatus = async (tenant, id, status, extra = {}) => {
   const params = [id, status];
   let extraSql = '';

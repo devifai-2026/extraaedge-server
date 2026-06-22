@@ -208,6 +208,7 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'accounts.approvals',
   'accounts.attendings',
   'accounts.break',
+  'accounts.drop_candidates',
   'accounts.report',
   'accounts.pay_schedule',
   'accounts.collection_receipt_wise',
