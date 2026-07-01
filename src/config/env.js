@@ -119,6 +119,12 @@ const schema = z.object({
   // (feature effectively off) rather than blocking server boot.
   DEVICE_UPLOAD_API_KEY: z.string().optional().default(''),
 
+  // Platform-wide user-phone uniqueness. Soft rollout: while false, a phone
+  // collision across tenants is logged but NOT rejected (existing data may
+  // still have duplicates). Flip to true once backfill collisions are cleaned
+  // up to start returning 409 on duplicate phones.
+  PHONE_UNIQUENESS_ENFORCED: boolLike.default(false),
+
   RATE_LIMIT_GLOBAL_PER_MINUTE: intFrom(100),
   RATE_LIMIT_LOGIN_PER_15MIN: intFrom(10),
   RATE_LIMIT_PASSWORD_RESET_PER_HOUR: intFrom(3),

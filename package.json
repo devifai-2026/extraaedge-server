@@ -16,6 +16,7 @@
     "migrate:system": "node scripts/run-migrations.js --target system",
     "migrate:tenant": "node scripts/run-migrations.js --target tenant",
     "provision:tenant": "node scripts/provision-tenant.js",
+    "backfill:user-phones": "node scripts/backfill-user-phones.js",
     "create:product-owner": "node scripts/create-product-owner.js",
     "seed:dev": "node scripts/seed-dev.js",
     "backup": "bash scripts/backup-all-dbs.sh",

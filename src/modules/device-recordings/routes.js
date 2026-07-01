@@ -64,6 +64,22 @@ const matchLead = async (tenant, phoneRaw) => {
   return { status: 'matched', lead_id: rows[0].id, digits };
 };
 
+// Resolve the counsellor who uploaded, from their own phone number. Uses the
+// users phone index (users_phone_digits_idx). Returns the user id or null.
+const resolveUploader = async (tenant, counsellorPhone) => {
+  const digits = last10Digits(counsellorPhone);
+  if (digits.length < 10) return null;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id FROM users
+      WHERE deleted_at IS NULL
+        AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10) = $1
+      LIMIT 1`,
+    [digits],
+  );
+  return rows[0]?.id ?? null;
+};
+
 // ------------------------------ DEVICE: PRESIGN -----------------------------
 // Returns a presigned PUT URL so the device uploads the audio straight to GCS.
 const presignSchema = z.object({
@@ -100,7 +116,8 @@ router.post('/presign', apiKeyRequired, tenantRequired, validate({ body: presign
 // never leave a row pointing at nothing.
 const confirmSchema = z.object({
   r2_key: z.string().min(1),
-  phone: z.string().min(1),
+  phone: z.string().min(1),                 // the CALLED number (matched to a lead)
+  counsellor_phone: z.string().optional(),  // the uploading counsellor's own number
   file_name: z.string().max(255).optional(),
   duration_seconds: z.coerce.number().int().nonnegative().optional(),
   client_ref: z.string().max(255).optional(),
@@ -108,7 +125,7 @@ const confirmSchema = z.object({
 
 router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirmSchema }), async (req, res, next) => {
   try {
-    const { r2_key, phone, file_name, duration_seconds, client_ref } = req.body;
+    const { r2_key, phone, counsellor_phone, file_name, duration_seconds, client_ref } = req.body;
     const clientRef = client_ref || null;
     const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : null;
 
@@ -144,13 +161,15 @@ router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirm
     }
 
     const { status, lead_id, digits } = await matchLead(req.tenant, phone);
+    const uploadedBy = counsellor_phone ? await resolveUploader(req.tenant, counsellor_phone) : null;
 
     const { rows } = await tenantQuery(
       req.tenant,
       `INSERT INTO device_recordings
          (lead_id, phone_raw, phone_digits, match_status, r2_key, file_name,
-          size_bytes, duration_seconds, content_type, device_id, client_ref)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          size_bytes, duration_seconds, content_type, device_id, client_ref,
+          uploaded_by, counsellor_phone)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING id, match_status, lead_id`,
       [
         lead_id,
@@ -164,6 +183,8 @@ router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirm
         head.ContentType ?? null,
         deviceId,
         clientRef,
+        uploadedBy,
+        counsellor_phone ?? null,
       ],
     );
 
@@ -173,9 +194,10 @@ router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirm
       await tenantQuery(
         req.tenant,
         `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-         VALUES ($1, NULL, 'call_recording_uploaded', $2, $3::jsonb)`,
+         VALUES ($1, $2, 'call_recording_uploaded', $3, $4::jsonb)`,
         [
           lead_id,
+          uploadedBy,
           file_name ? `Auto-uploaded recording: ${file_name}` : 'Auto-uploaded a call recording',
           JSON.stringify({
             device_recording_id: rows[0].id,
@@ -192,7 +214,12 @@ router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirm
 });
 
 // ------------------------------- CRM READ/ADMIN -----------------------------
-router.use(authRequired, tenantRequired, requireRole(...MANAGER_ROLES));
+// Counsellors can reach these routes too, but only ever see their OWN uploads
+// (enforced per-query via `ownOnly`). Managers/admins see everything in scope.
+router.use(authRequired, tenantRequired, requireRole(...MANAGER_ROLES, SYSTEM_TENANT_ROLES.COUNSELLOR));
+
+// True when the actor is limited to their own uploaded recordings.
+const isOwnOnly = (user) => user.role === SYSTEM_TENANT_ROLES.COUNSELLOR;
 
 const listQuery = z.object({
   match_status: z.enum(['matched', 'unmatched', 'ambiguous']).optional(),
@@ -208,6 +235,7 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
   try {
     const conds = ['dr.deleted_at IS NULL'];
     const params = [];
+    if (isOwnOnly(req.user)) { params.push(req.user.id); conds.push(`dr.uploaded_by = $${params.length}`); }
     if (req.query.match_status) { params.push(req.query.match_status); conds.push(`dr.match_status = $${params.length}`); }
     if (req.query.lead_id) { params.push(req.query.lead_id); conds.push(`dr.lead_id = $${params.length}`); }
     const offset = (req.query.page - 1) * req.query.limit;
@@ -233,10 +261,11 @@ router.get('/:id/url', validate({ params: idParam }), async (req, res, next) => 
   try {
     const { rows } = await tenantQuery(
       req.tenant,
-      `SELECT r2_key, file_name FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT r2_key, file_name, uploaded_by FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
       [req.params.id],
     );
     if (!rows[0]) throw notFound('Recording not found');
+    if (isOwnOnly(req.user) && rows[0].uploaded_by !== req.user.id) throw notFound('Recording not found');
     const url = await getDownloadSignedUrl({ key: rows[0].r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS });
     res.json({ data: { url, file_name: rows[0].file_name }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
@@ -248,10 +277,11 @@ router.post('/:id/attach', validate({ params: idParam, body: attachBody }), asyn
   try {
     const { rows: recRows } = await tenantQuery(
       req.tenant,
-      `SELECT id, file_name, duration_seconds FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT id, file_name, duration_seconds, uploaded_by FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
       [req.params.id],
     );
     if (!recRows[0]) throw notFound('Recording not found');
+    if (isOwnOnly(req.user) && recRows[0].uploaded_by !== req.user.id) throw notFound('Recording not found');
     const { rows: leadRows } = await tenantQuery(
       req.tenant,
       `SELECT id FROM leads WHERE id = $1 AND deleted_at IS NULL`,

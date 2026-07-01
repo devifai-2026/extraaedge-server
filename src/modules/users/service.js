@@ -1,6 +1,7 @@
 import argon2 from 'argon2';
 import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
+import * as phoneDirectory from './phone-directory.js';
 import { conflict, forbidden, notFound } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
@@ -220,6 +221,18 @@ export const createUser = async (tenant, input, actor) => {
     password_hash,
   );
   if (ids.length) await repo.setManagers(tenant, user.id, ids);
+
+  // Register the phone platform-wide (system DB). In enforced mode a collision
+  // throws 409; we roll back the just-created user so we don't leave an
+  // unregistered orphan. In soft mode this never throws.
+  if (input.phone) {
+    try {
+      await phoneDirectory.claimPhone({ phone: input.phone, tenantId: tenant.id, userId: user.id });
+    } catch (err) {
+      await repo.softDelete(tenant, user.id).catch(() => {});
+      throw err;
+    }
+  }
   return user;
 };
 
@@ -300,6 +313,14 @@ export const updateUser = async (tenant, id, updates, actor) => {
     if (others.total <= 1) throw forbidden('Cannot deactivate the last super_admin');
   }
 
+  // Platform-wide phone registry sync. Only when the phone actually changes.
+  // Claim the new number BEFORE the DB write so an enforced collision blocks
+  // the update; release the old number after. In soft mode claim never throws.
+  const phoneChanging = 'phone' in updates && (updates.phone ?? '') !== (existing.phone ?? '');
+  if (phoneChanging && updates.phone) {
+    await phoneDirectory.claimPhone({ phone: updates.phone, tenantId: tenant.id, userId: id });
+  }
+
   // Sync manager_ids[] to join table; mirror first into manager_id.
   let patch = { ...updates };
   if (Array.isArray(updates.manager_ids)) {
@@ -307,7 +328,13 @@ export const updateUser = async (tenant, id, updates, actor) => {
     delete patch.manager_ids;
     await repo.setManagers(tenant, id, updates.manager_ids);
   }
-  return repo.update(tenant, id, patch);
+  const result = await repo.update(tenant, id, patch);
+
+  // After a successful write, release the old number (if it changed / cleared).
+  if (phoneChanging && existing.phone) {
+    await phoneDirectory.releasePhone(existing.phone).catch(() => {});
+  }
+  return result;
 };
 
 export const deleteUser = async (tenant, id, actor) => {
@@ -326,6 +353,8 @@ export const deleteUser = async (tenant, id, actor) => {
     managerId: null,
   });
   await repo.softDelete(tenant, id);
+  // Free the number platform-wide so it can be reused.
+  if (existing.phone) await phoneDirectory.releasePhone(existing.phone).catch(() => {});
 };
 
 export const resetPassword = async (tenant, id, new_password, actor) => {
