@@ -1,17 +1,25 @@
 // Call recordings uploaded by the Android call-recorder app.
 //
+// Upload uses a presigned PUT so the audio goes phone -> GCS directly and never
+// passes through this server. That sidesteps request-body size limits on
+// serverless/proxy hosting (a recording can be up to 100 MB).
+//
+// Device flow:
+//   1. POST /presign  { content_type, size_bytes, client_ref? }
+//        -> { upload_url, method:'PUT', headers, r2_key }
+//   2. PUT the .m4a bytes straight to upload_url (GCS).
+//   3. POST /confirm  { r2_key, phone, file_name?, duration_seconds?, client_ref? }
+//        -> server HEADs the object, matches phone -> lead, records the row.
+//
 // Two distinct actors hit this router:
-//   - the DEVICE (POST /), authenticated by the shared X-Api-Key secret. It has
-//     no logged-in user; tenant comes from the X-Tenant-Slug header.
-//   - CRM USERS (GET / list, GET /:id/url, DELETE, POST /:id/attach), on the
+//   - the DEVICE (POST /presign, POST /confirm), authenticated by the shared
+//     X-Api-Key secret. No logged-in user; tenant comes from X-Tenant-Slug.
+//   - CRM USERS (GET / list, GET /:id/url, POST /:id/attach, DELETE), on the
 //     normal JWT + tenant middleware, gated to manager-tier roles.
 //
-// The device POSTs the raw .m4a plus the call's phone number; the server
-// matches the number to a lead (last-10-digits, same key as the leads unique
-// index), stores the audio in GCS, and records a row. A no-match is still
-// stored (match_status='unmatched') for later review — nothing is dropped.
+// A no-match on confirm is still stored (match_status='unmatched') for later
+// review — nothing is dropped.
 import express from 'express';
-import multer from 'multer';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { apiKeyRequired } from '../../middleware/apiKey.js';
@@ -20,7 +28,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { putObject, getDownloadSignedUrl, deleteObject, buildKey } from '../../lib/r2.js';
+import { getUploadSignedUrl, getDownloadSignedUrl, deleteObject, headObject, buildKey } from '../../lib/r2.js';
 import { last10Digits } from '../../lib/phone.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { env } from '../../config/env.js';
@@ -29,7 +37,6 @@ import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 const router = express.Router();
 
 const MAX_BYTES = 100 * 1024 * 1024; // 100 MB, consistent with lead_call_recordings
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_BYTES } });
 
 // Manager-tier roles that may review / play / delete device recordings.
 const MANAGER_ROLES = [
@@ -40,7 +47,7 @@ const MANAGER_ROLES = [
 
 // Resolve which live lead a phone number belongs to. Uses the SAME normalized
 // expression as `leads_unique_phone_digits`, so the lookup is index-backed and
-// consistent with dedup. Returns { status, lead_id }.
+// consistent with dedup. Returns { status, lead_id, digits }.
 const matchLead = async (tenant, phoneRaw) => {
   const digits = last10Digits(phoneRaw);
   if (digits.length < 10) return { status: 'unmatched', lead_id: null, digits };
@@ -57,25 +64,62 @@ const matchLead = async (tenant, phoneRaw) => {
   return { status: 'matched', lead_id: rows[0].id, digits };
 };
 
-// ----------------------------- DEVICE UPLOAD --------------------------------
-// multipart/form-data: file (the .m4a) + fields phone, [duration_seconds],
-// [file_name], [client_ref]. Optional headers: X-Device-Id.
-// apiKeyRequired first (cheap reject), then tenantRequired (X-Tenant-Slug),
-// then multer parses the body.
-router.post('/', apiKeyRequired, tenantRequired, upload.single('file'), async (req, res, next) => {
-  try {
-    if (!req.file) throw validationError([{ path: 'file', message: 'Recording file is required' }]);
-    if (req.file.mimetype && !req.file.mimetype.startsWith('audio/')) {
-      throw validationError([{ path: 'file', message: `Expected an audio file, got "${req.file.mimetype}"` }]);
-    }
-    const phoneRaw = typeof req.body.phone === 'string' ? req.body.phone : '';
-    if (!phoneRaw) throw validationError([{ path: 'phone', message: 'phone is required' }]);
+// ------------------------------ DEVICE: PRESIGN -----------------------------
+// Returns a presigned PUT URL so the device uploads the audio straight to GCS.
+const presignSchema = z.object({
+  content_type: z.string().min(1).default('audio/mp4'),
+  size_bytes: z.coerce.number().int().positive().max(MAX_BYTES),
+});
 
-    const clientRef = typeof req.body.client_ref === 'string' && req.body.client_ref ? req.body.client_ref : null;
+router.post('/presign', apiKeyRequired, tenantRequired, validate({ body: presignSchema }), async (req, res, next) => {
+  try {
+    if (!req.body.content_type.startsWith('audio/')) {
+      throw validationError([{ path: 'content_type', message: 'Only audio/* uploads are allowed' }]);
+    }
+    const key = buildKey({ tenantSlug: req.tenant.slug, purpose: 'recording', id: nanoid(20), ext: 'm4a' });
+    const signed = await getUploadSignedUrl({
+      key,
+      contentType: req.body.content_type,
+      contentLengthRange: req.body.size_bytes,
+    });
+    res.json({
+      data: {
+        upload_url: signed.url,
+        method: signed.method,      // 'PUT'
+        headers: signed.headers,    // { 'Content-Type': ... } — device must echo these
+        r2_key: key,
+      },
+      meta: { requestId: req.id },
+    });
+  } catch (err) { next(err); }
+});
+
+// ------------------------------ DEVICE: CONFIRM -----------------------------
+// Records metadata after the device has PUT the object. Validates the object
+// exists in GCS (and is audio, under the cap) before writing the row so we
+// never leave a row pointing at nothing.
+const confirmSchema = z.object({
+  r2_key: z.string().min(1),
+  phone: z.string().min(1),
+  file_name: z.string().max(255).optional(),
+  duration_seconds: z.coerce.number().int().nonnegative().optional(),
+  client_ref: z.string().max(255).optional(),
+});
+
+router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirmSchema }), async (req, res, next) => {
+  try {
+    const { r2_key, phone, file_name, duration_seconds, client_ref } = req.body;
+    const clientRef = client_ref || null;
     const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : null;
 
-    // Idempotency: a retrying background job may re-POST the same recording.
-    // If we already stored this client_ref, return it instead of duplicating.
+    // Only accept keys inside this tenant's recording namespace — a device
+    // can't confirm arbitrary objects in the bucket.
+    const expectedPrefix = `recording/${req.tenant.slug}/`;
+    if (!r2_key.startsWith(expectedPrefix)) {
+      throw validationError([{ path: 'r2_key', message: 'r2_key is not in this tenant recording namespace' }]);
+    }
+
+    // Idempotency: a retrying device may re-confirm. Return the existing row.
     if (clientRef) {
       const { rows: existing } = await tenantQuery(
         req.tenant,
@@ -88,16 +132,18 @@ router.post('/', apiKeyRequired, tenantRequired, upload.single('file'), async (r
       }
     }
 
-    const durationSeconds = req.body.duration_seconds != null && req.body.duration_seconds !== ''
-      ? Number(req.body.duration_seconds)
-      : null;
-    const fileName = typeof req.body.file_name === 'string' && req.body.file_name ? req.body.file_name : null;
+    // Authoritative validation from storage: it must exist, be audio, be small
+    // enough. Trust the HEAD over anything the client claims.
+    const head = await headObject(r2_key);
+    if (!head) throw notFound('Upload not found in storage; the PUT may not have completed');
+    if (head.ContentLength && head.ContentLength > MAX_BYTES) {
+      throw validationError([{ path: 'r2_key', message: 'Recording exceeds the 100 MB limit' }]);
+    }
+    if (head.ContentType && !head.ContentType.startsWith('audio/')) {
+      throw validationError([{ path: 'r2_key', message: `Expected an audio file, got "${head.ContentType}"` }]);
+    }
 
-    const { status, lead_id, digits } = await matchLead(req.tenant, phoneRaw);
-
-    // Store the audio in GCS, then the metadata row.
-    const key = buildKey({ tenantSlug: req.tenant.slug, purpose: 'recording', id: nanoid(20), ext: 'm4a' });
-    await putObject({ key, body: req.file.buffer, contentType: req.file.mimetype || 'audio/mp4' });
+    const { status, lead_id, digits } = await matchLead(req.tenant, phone);
 
     const { rows } = await tenantQuery(
       req.tenant,
@@ -108,14 +154,14 @@ router.post('/', apiKeyRequired, tenantRequired, upload.single('file'), async (r
        RETURNING id, match_status, lead_id`,
       [
         lead_id,
-        phoneRaw,
+        phone,
         digits || null,
         status,
-        key,
-        fileName,
-        req.file.size ?? null,
-        Number.isFinite(durationSeconds) ? durationSeconds : null,
-        req.file.mimetype || null,
+        r2_key,
+        file_name ?? null,
+        head.ContentLength ?? null,
+        duration_seconds ?? null,
+        head.ContentType ?? null,
         deviceId,
         clientRef,
       ],
@@ -130,12 +176,12 @@ router.post('/', apiKeyRequired, tenantRequired, upload.single('file'), async (r
          VALUES ($1, NULL, 'call_recording_uploaded', $2, $3::jsonb)`,
         [
           lead_id,
-          fileName ? `Auto-uploaded recording: ${fileName}` : 'Auto-uploaded a call recording',
+          file_name ? `Auto-uploaded recording: ${file_name}` : 'Auto-uploaded a call recording',
           JSON.stringify({
             device_recording_id: rows[0].id,
             source: 'device',
-            file_name: fileName,
-            duration_seconds: Number.isFinite(durationSeconds) ? durationSeconds : null,
+            file_name: file_name ?? null,
+            duration_seconds: duration_seconds ?? null,
           }),
         ],
       );
