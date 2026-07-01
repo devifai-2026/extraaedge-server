@@ -45,6 +45,7 @@ import whatsappConnectionRouter from './modules/communications/whatsapp-connecti
 import waInternalRouter from './modules/internal/wa-routes.js';
 import scheduledSendsRouter from './modules/scheduled-sends/routes.js';
 import callsRouter from './modules/calls/routes.js';
+import deviceRecordingsRouter from './modules/device-recordings/routes.js';
 import paymentsRouter from './modules/payments/routes.js';
 import subscriptionsRouter from './modules/subscriptions/routes.js';
 import assignmentRulesRouter from './modules/assignment-rules/routes.js';
@@ -146,6 +147,9 @@ export const mountRoutes = (app) => {
 
   // Telephony + payments + subscription
   api.use('/calls', callsRouter);
+  // Android call-recorder app uploads (device shared-secret auth on POST; CRM
+  // JWT auth on the read/admin routes).
+  api.use('/device-recordings', deviceRecordingsRouter);
   api.use('/payments', paymentsRouter);
   api.use('/subscription', subscriptionsRouter);
 

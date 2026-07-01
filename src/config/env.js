@@ -113,6 +113,12 @@ const schema = z.object({
   EXOTEL_CALLER_ID: stringNonEmpty,
   EXOTEL_WEBHOOK_SECRET: stringNonEmpty,
 
+  // Shared secret for the Android call-recorder app's device-upload endpoint
+  // (POST /device-recordings). Sent by the device as the `X-Api-Key` header.
+  // Optional: when unset, the device-upload endpoint rejects every request
+  // (feature effectively off) rather than blocking server boot.
+  DEVICE_UPLOAD_API_KEY: z.string().optional().default(''),
+
   RATE_LIMIT_GLOBAL_PER_MINUTE: intFrom(100),
   RATE_LIMIT_LOGIN_PER_15MIN: intFrom(10),
   RATE_LIMIT_PASSWORD_RESET_PER_HOUR: intFrom(3),
