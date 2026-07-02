@@ -37,6 +37,65 @@ router.get('/lead/:leadId', validate({ params: z.object({ leadId: z.string().uui
   } catch (err) { next(err); }
 });
 
+// Reassign target candidates for the CURRENT actor — the exact set the POST
+// below will accept, so the FE picker never shows someone the server rejects.
+//   super_admin   → every active counsellor
+//   manager       → their team hierarchy (downward subtree)
+//   counsellor    → their managers + peers who share a manager (NOT just their
+//                   own downward subtree, which for a leaf counsellor is empty
+//                   — that was the "No options" bug).
+router.get('/targets', async (req, res, next) => {
+  try {
+    const COLS = `u.id, u.name, u.email, u.role, u.manager_id, u.is_active`;
+    if (req.user.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+      const { rows } = await tenantQuery(
+        req.tenant,
+        `SELECT ${COLS} FROM users u
+          WHERE u.deleted_at IS NULL AND u.is_active = true
+            AND u.role = 'counsellor' AND u.id <> $1
+          ORDER BY u.name`,
+        [req.user.id],
+      );
+      return res.json({ data: rows, meta: { requestId: req.id } });
+    }
+    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+      // Same allowed-target set the POST enforces: my managers + peers sharing
+      // any of my managers + my primary manager; excluding myself.
+      const { rows } = await tenantQuery(
+        req.tenant,
+        `WITH my_mgrs AS (
+           SELECT manager_id FROM user_managers WHERE user_id = $1
+           UNION
+           SELECT manager_id FROM users WHERE id = $1 AND manager_id IS NOT NULL
+         )
+         SELECT DISTINCT ${COLS} FROM users u
+          WHERE u.deleted_at IS NULL AND u.is_active = true AND u.id <> $1
+            AND (
+              u.id IN (SELECT manager_id FROM my_mgrs)
+              OR u.manager_id IN (SELECT manager_id FROM my_mgrs)
+              OR EXISTS (SELECT 1 FROM user_managers um WHERE um.user_id = u.id AND um.manager_id IN (SELECT manager_id FROM my_mgrs))
+            )
+          ORDER BY u.name`,
+        [req.user.id],
+      );
+      return res.json({ data: rows, meta: { requestId: req.id } });
+    }
+    // Managers (sales_manager / branch_manager): their team subtree.
+    const { teamHierarchy } = await import('../users/repo.js');
+    const ids = await teamHierarchy(req.tenant, req.user.id);
+    const targetIds = ids.filter((id) => id !== req.user.id);
+    if (!targetIds.length) return res.json({ data: [], meta: { requestId: req.id } });
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT ${COLS} FROM users u
+        WHERE u.id = ANY($1::uuid[]) AND u.deleted_at IS NULL AND u.is_active = true
+        ORDER BY u.name`,
+      [targetIds],
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 // (Re)assign a lead. All three tenant roles can call this; the per-role
 // scope below decides who can reassign which lead to whom.
 router.post(
