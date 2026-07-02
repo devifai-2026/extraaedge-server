@@ -512,6 +512,32 @@ export const orgTree = async (tenant, actor) => {
   return { nodes, edges };
 };
 
+// Self-service phone update for the logged-in user (mandatory phone-capture
+// popup on the web). Enforces platform-wide uniqueness via the phone directory
+// with the same claim -> write -> release-old ordering as updateUser: claim
+// first so an enforced collision (a number owned by another user) throws 409
+// before we touch the row; release the old number only after a successful write.
+export const updateMyPhone = async (tenant, actor, body) => {
+  const existing = await repo.findById(tenant, actor.id);
+  if (!existing) throw notFound('User not found');
+
+  const phoneChanging = (body.phone ?? '') !== (existing.phone ?? '');
+  if (phoneChanging && body.phone) {
+    await phoneDirectory.claimPhone({ phone: body.phone, tenantId: tenant.id, userId: actor.id });
+  }
+
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE users SET phone = $2, updated_at = now() WHERE id = $1 RETURNING phone`,
+    [actor.id, body.phone],
+  );
+
+  if (phoneChanging && existing.phone) {
+    await phoneDirectory.releasePhone(existing.phone).catch(() => {});
+  }
+  return { phone: rows[0]?.phone ?? body.phone };
+};
+
 // Persist the current user's avatar object key (GCS). Pass null to clear.
 // Returns the new key + a short-lived signed URL so the FE can swap the
 // nav-bar avatar without a re-fetch.

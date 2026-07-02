@@ -7,7 +7,7 @@ import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
-import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema } from './schema.js';
+import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema } from './schema.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -28,6 +28,12 @@ router.put('/me/theme', validate({ body: updateThemeSchema }), controller.update
 // stored GCS key on the users row and returns a fresh signed URL for
 // immediate render.
 router.put('/me/avatar', validate({ body: updateAvatarSchema }), controller.updateMyAvatar);
+
+// Set the current user's phone number. Open to every authenticated tenant role
+// (a counsellor sets their own via the mandatory phone-capture popup). Lives
+// before /:id so "me" doesn't hit the UUID validator. Enforces platform-wide
+// phone uniqueness in the service layer.
+router.put('/me/phone', validate({ body: updateMyPhoneSchema }), controller.updateMyPhone);
 
 // /users/org-tree — flat list of nodes + edges for the Org Tree canvas.
 //   super_admin → entire tenant

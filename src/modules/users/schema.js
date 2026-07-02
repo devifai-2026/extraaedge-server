@@ -84,3 +84,10 @@ export const updateThemeSchema = z.object({
 export const updateAvatarSchema = z.object({
   avatar_r2_key: z.union([z.string().min(1).max(512), z.null()]),
 });
+
+// Self-service phone update for the currently-logged-in user (the mandatory
+// phone-capture popup on the web calls this). REQUIRED — the whole point is to
+// force a number so the mobile app's uploads can be attributed to this user.
+export const updateMyPhoneSchema = z.object({
+  phone: z.string().min(4).max(20),
+});
