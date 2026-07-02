@@ -125,6 +125,16 @@ const schema = z.object({
   // up to start returning 409 on duplicate phones.
   PHONE_UNIQUENESS_ENFORCED: boolLike.default(false),
 
+  // WABridge WhatsApp — used to send the phone-change OTP on the web profile.
+  // baseUrl already includes /api; code appends /createmessage. When app/auth
+  // keys are unset the OTP-send throws a clear "not configured" error.
+  WABRIDGE_BASE_URL: z.string().optional().default('https://web.wabridge.com/api'),
+  WABRIDGE_APP_KEY: z.string().optional().default(''),
+  WABRIDGE_AUTH_KEY: z.string().optional().default(''),
+  WABRIDGE_DEVICE_ID: z.string().optional().default(''),
+  // Numeric template id for the OTP WhatsApp template (speedup_template).
+  WABRIDGE_TEMPLATE_OTP: z.string().optional().default(''),
+
   RATE_LIMIT_GLOBAL_PER_MINUTE: intFrom(100),
   RATE_LIMIT_LOGIN_PER_15MIN: intFrom(10),
   RATE_LIMIT_PASSWORD_RESET_PER_HOUR: intFrom(3),

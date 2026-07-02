@@ -119,3 +119,17 @@ export const updateMyPhone = async (req, res, next) => {
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
+
+export const sendPhoneChangeOtp = async (req, res, next) => {
+  try {
+    const data = await service.sendPhoneChangeOtp(req.tenant, req.user, req.body.phone);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const verifyPhoneChangeOtp = async (req, res, next) => {
+  try {
+    const data = await service.verifyPhoneChangeOtp(req.tenant, req.user, req.body.phone, req.body.code);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};

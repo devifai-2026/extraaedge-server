@@ -2,10 +2,13 @@ import argon2 from 'argon2';
 import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
 import * as phoneDirectory from './phone-directory.js';
-import { conflict, forbidden, notFound } from '../../lib/errors.js';
+import { conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
+import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
+import { sendPhoneOtp } from '../../lib/providers/whatsapp-wabridge.js';
+import { logger } from '../../lib/logger.js';
 
 const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
 
@@ -536,6 +539,81 @@ export const updateMyPhone = async (tenant, actor, body) => {
     await phoneDirectory.releasePhone(existing.phone).catch(() => {});
   }
   return { phone: rows[0]?.phone ?? body.phone };
+};
+
+// --- OTP-verified phone RESET (web profile page) ---------------------------
+// Unlike updateMyPhone (first-time capture in the popup), resetting an existing
+// number requires proving control of the NEW number via a WhatsApp OTP.
+// Reuses the otp_verifications table + lib/otp; channel 'whatsapp',
+// purpose 'phone_change', scoped to (user_id, address=new phone).
+
+// Step 1: generate + store an OTP and WhatsApp it to the requested new number.
+export const sendPhoneChangeOtp = async (tenant, actor, newPhone) => {
+  // Pre-check uniqueness so we don't send an OTP for a number the user can't
+  // ultimately claim (enforced mode). Soft mode logs and proceeds.
+  const existingClaim = await phoneDirectory.lookupByPhone(newPhone);
+  if (existingClaim && existingClaim.user_id !== actor.id) {
+    throw conflict('That phone number is already registered to another user on the platform');
+  }
+  const otp = generateOtp(6);
+  const otp_hash = hashOtp(otp, newPhone);
+  // Invalidate any prior pending phone_change OTPs for this user.
+  await tenantQuery(
+    tenant,
+    `UPDATE otp_verifications SET verified_at = now()
+      WHERE user_id = $1 AND purpose = 'phone_change' AND verified_at IS NULL`,
+    [actor.id],
+  );
+  await tenantQuery(
+    tenant,
+    `INSERT INTO otp_verifications (user_id, purpose, channel, address, otp_hash, expires_at, max_attempts)
+     VALUES ($1, 'phone_change', 'whatsapp', $2, $3, $4, 5)`,
+    [actor.id, newPhone, otp_hash, otpExpiryDate()],
+  );
+  // Deliver via WhatsApp. Surface a send failure to the caller so the UI can
+  // tell the user (unlike lead OTPs which are best-effort).
+  await sendPhoneOtp({ to: newPhone, code: otp });
+  logger.info({ user_id: actor.id }, 'phone-change OTP sent');
+  return { sent: true };
+};
+
+// Step 2: verify the OTP for the new number, then update the phone with the
+// same uniqueness claim/release as updateMyPhone.
+export const verifyPhoneChangeOtp = async (tenant, actor, newPhone, code) => {
+  const otp_hash = hashOtp(code, newPhone);
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE otp_verifications SET verified_at = now()
+      WHERE user_id = $1 AND purpose = 'phone_change' AND address = $2
+        AND verified_at IS NULL AND expires_at > now()
+        AND otp_hash = $3 AND attempts < max_attempts
+      RETURNING id`,
+    [actor.id, newPhone, otp_hash],
+  );
+  if (!rows[0]) {
+    await tenantQuery(
+      tenant,
+      `UPDATE otp_verifications SET attempts = attempts + 1
+        WHERE user_id = $1 AND purpose = 'phone_change' AND address = $2 AND verified_at IS NULL`,
+      [actor.id, newPhone],
+    );
+    throw validationError([{ path: 'code', message: 'Invalid or expired OTP' }]);
+  }
+  // OTP good — apply the change (reuse the claim/write/release path).
+  const existing = await repo.findById(tenant, actor.id);
+  const phoneChanging = (newPhone ?? '') !== (existing?.phone ?? '');
+  if (phoneChanging) {
+    await phoneDirectory.claimPhone({ phone: newPhone, tenantId: tenant.id, userId: actor.id });
+  }
+  await tenantQuery(
+    tenant,
+    `UPDATE users SET phone = $2, updated_at = now() WHERE id = $1`,
+    [actor.id, newPhone],
+  );
+  if (phoneChanging && existing?.phone) {
+    await phoneDirectory.releasePhone(existing.phone).catch(() => {});
+  }
+  return { phone: newPhone };
 };
 
 // Persist the current user's avatar object key (GCS). Pass null to clear.

@@ -7,7 +7,8 @@ import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
-import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema } from './schema.js';
+import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema, sendPhoneOtpSchema, verifyPhoneOtpSchema } from './schema.js';
+import { otpLimiter } from '../../middleware/rateLimit.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -34,6 +35,11 @@ router.put('/me/avatar', validate({ body: updateAvatarSchema }), controller.upda
 // before /:id so "me" doesn't hit the UUID validator. Enforces platform-wide
 // phone uniqueness in the service layer.
 router.put('/me/phone', validate({ body: updateMyPhoneSchema }), controller.updateMyPhone);
+
+// OTP-verified phone RESET (web profile). Send a WhatsApp OTP to the new
+// number, then confirm it to change the phone. Self-service, any tenant role.
+router.post('/me/phone/send-otp', otpLimiter, validate({ body: sendPhoneOtpSchema }), controller.sendPhoneChangeOtp);
+router.post('/me/phone/verify-otp', validate({ body: verifyPhoneOtpSchema }), controller.verifyPhoneChangeOtp);
 
 // /users/org-tree — flat list of nodes + edges for the Org Tree canvas.
 //   super_admin → entire tenant

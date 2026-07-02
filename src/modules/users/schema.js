@@ -91,3 +91,13 @@ export const updateAvatarSchema = z.object({
 export const updateMyPhoneSchema = z.object({
   phone: z.string().min(4).max(20),
 });
+
+// OTP-verified phone reset (web profile). Send OTP to a new number, then
+// confirm with the received code.
+export const sendPhoneOtpSchema = z.object({
+  phone: z.string().min(4).max(20),
+});
+export const verifyPhoneOtpSchema = z.object({
+  phone: z.string().min(4).max(20),
+  code: z.string().min(4).max(8),
+});

@@ -45,23 +45,29 @@ const MANAGER_ROLES = [
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 ];
 
-// Resolve which live lead a phone number belongs to. Uses the SAME normalized
-// expression as `leads_unique_phone_digits`, so the lookup is index-backed and
-// consistent with dedup. Returns { status, lead_id, digits }.
-const matchLead = async (tenant, phoneRaw) => {
+// Resolve which live lead(s) a phone number belongs to. Uses the SAME
+// normalized expression as `leads_unique_phone_digits`, so the lookup is
+// index-backed and consistent with dedup.
+//
+// Returns { status, lead_ids[], digits }:
+//   - unmatched : no live lead (or < 10 digits). lead_ids = [].
+//   - matched   : exactly one lead. lead_ids = [id].
+//   - multi     : more than one lead — the recording is attached to ALL of
+//                 them and flagged as a multi-match for review.
+const matchLeads = async (tenant, phoneRaw) => {
   const digits = last10Digits(phoneRaw);
-  if (digits.length < 10) return { status: 'unmatched', lead_id: null, digits };
+  if (digits.length < 10) return { status: 'unmatched', lead_ids: [], digits };
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id FROM leads
       WHERE deleted_at IS NULL
-        AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10) = $1
-      LIMIT 2`,
+        AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10) = $1`,
     [digits],
   );
-  if (rows.length === 0) return { status: 'unmatched', lead_id: null, digits };
-  if (rows.length > 1) return { status: 'ambiguous', lead_id: null, digits };
-  return { status: 'matched', lead_id: rows[0].id, digits };
+  const lead_ids = rows.map((r) => r.id);
+  if (lead_ids.length === 0) return { status: 'unmatched', lead_ids, digits };
+  if (lead_ids.length === 1) return { status: 'matched', lead_ids, digits };
+  return { status: 'multi', lead_ids, digits };
 };
 
 // Resolve the counsellor who uploaded, from their own phone number. Uses the
@@ -160,22 +166,27 @@ router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirm
       throw validationError([{ path: 'r2_key', message: `Expected an audio file, got "${head.ContentType}"` }]);
     }
 
-    const { status, lead_id, digits } = await matchLead(req.tenant, phone);
+    const { status, lead_ids, digits } = await matchLeads(req.tenant, phone);
     const uploadedBy = counsellor_phone ? await resolveUploader(req.tenant, counsellor_phone) : null;
+    const multiMatch = lead_ids.length > 1;
+    // The primary lead (first match) stays on device_recordings.lead_id for
+    // backward-compatible single-lead reads; the join carries the full set.
+    const primaryLeadId = lead_ids[0] ?? null;
 
     const { rows } = await tenantQuery(
       req.tenant,
       `INSERT INTO device_recordings
-         (lead_id, phone_raw, phone_digits, match_status, r2_key, file_name,
+         (lead_id, phone_raw, phone_digits, match_status, multi_match, r2_key, file_name,
           size_bytes, duration_seconds, content_type, device_id, client_ref,
           uploaded_by, counsellor_phone)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-       RETURNING id, match_status, lead_id`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING id, match_status, lead_id, multi_match`,
       [
-        lead_id,
+        primaryLeadId,
         phone,
         digits || null,
         status,
+        multiMatch,
         r2_key,
         file_name ?? null,
         head.ContentLength ?? null,
@@ -187,21 +198,32 @@ router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirm
         counsellor_phone ?? null,
       ],
     );
+    const recordingId = rows[0].id;
 
-    // On a match, drop a timeline entry so the recording surfaces on the lead,
-    // mirroring the manual lead-recordings 'call_recording_uploaded' shape.
-    if (lead_id) {
+    // Attach the recording to EVERY matching lead: a join row + a timeline
+    // entry per lead (mirroring the manual lead-recordings shape). A multi-match
+    // is flagged in metadata so the timeline/UI can indicate it went to several
+    // leads with the same number.
+    for (const leadId of lead_ids) {
+      await tenantQuery(
+        req.tenant,
+        `INSERT INTO device_recording_leads (recording_id, lead_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [recordingId, leadId],
+      );
       await tenantQuery(
         req.tenant,
         `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
          VALUES ($1, $2, 'call_recording_uploaded', $3, $4::jsonb)`,
         [
-          lead_id,
+          leadId,
           uploadedBy,
           file_name ? `Auto-uploaded recording: ${file_name}` : 'Auto-uploaded a call recording',
           JSON.stringify({
-            device_recording_id: rows[0].id,
+            device_recording_id: recordingId,
             source: 'device',
+            multi_match: multiMatch,
+            matched_lead_count: lead_ids.length,
             file_name: file_name ?? null,
             duration_seconds: duration_seconds ?? null,
           }),
@@ -271,7 +293,7 @@ router.get('/:id/url', validate({ params: idParam }), async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// Manually attach an unmatched/ambiguous recording to a lead after review.
+// Manually attach an unmatched recording to a lead after review.
 const attachBody = z.object({ lead_id: z.string().uuid() });
 router.post('/:id/attach', validate({ params: idParam, body: attachBody }), async (req, res, next) => {
   try {
@@ -289,6 +311,13 @@ router.post('/:id/attach', validate({ params: idParam, body: attachBody }), asyn
     );
     if (!leadRows[0]) throw notFound('Lead not found');
 
+    // Record the attachment in the join table too (source of truth for the
+    // full lead set), keeping lead_id as the primary for single-lead reads.
+    await tenantQuery(
+      req.tenant,
+      `INSERT INTO device_recording_leads (recording_id, lead_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [req.params.id, req.body.lead_id],
+    );
     await tenantQuery(
       req.tenant,
       `UPDATE device_recordings SET lead_id = $2, match_status = 'matched' WHERE id = $1`,
