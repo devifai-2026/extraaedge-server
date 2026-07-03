@@ -22,6 +22,7 @@ import calendarRouter from './modules/calendar/routes.js';
 import searchRouter from './modules/search/routes.js';
 import templateVariablesRouter from './modules/template-variables/routes.js';
 import leadsRouter from './modules/leads/routes.js';
+import leadPoolRouter from './modules/lead-pool/routes.js';
 import leadRecordingsRouter from './modules/lead-recordings/routes.js';
 import leadAssignmentsRouter from './modules/lead-assignments/routes.js';
 import leadDiscountsRouter from './modules/lead-discounts/routes.js';
@@ -118,6 +119,11 @@ export const mountRoutes = (app) => {
 
   // Tenant — leads + related
   api.use('/leads', leadsRouter);
+  // Tenant-wide, READ-ONLY Lead Pool. Any counsellor (and up) can look up ANY
+  // lead in the tenant by name or phone — bypasses the owner/team/branch scope
+  // that guards /leads, but exposes only a read-only projection (details +
+  // current owner, manager, previous owner). Gated by the `lead_pool` tab.
+  api.use('/lead-pool', leadPoolRouter);
   // Per-lead manually-uploaded call recordings. Mounted with the
   // :lead_id path param the sub-router relies on.
   api.use('/leads/:lead_id/recordings', leadRecordingsRouter);

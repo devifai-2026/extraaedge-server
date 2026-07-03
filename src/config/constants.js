@@ -202,6 +202,12 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // matched no lead — counsellors review their own, managers see scope, and
   // can create a lead from the number.
   'unmatched_recordings',
+  // Tenant-wide read-only Lead Pool. Every counsellor (and up) can look up
+  // ANY lead in the tenant by name or phone — bypassing the normal
+  // owner/team/branch visibility scope — but the view is strictly read-only:
+  // lead details plus current owner, manager, and previous owner. Lets a
+  // counsellor answer "who owns this number?" without a reassign.
+  'lead_pool',
   // Accounts module (account_manager role). These show up in the
   // super_admin's "tab permissions" matrix so the role assignments can
   // be tuned per tenant without a code deploy.
