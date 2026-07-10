@@ -59,3 +59,6 @@ export const mergeBatches = async (req, res, next) => {
 export const myCourse = async (req, res, next) => {
   try { ok(res, req, await service.myCourse(req.tenant, req.student.id)); } catch (e) { next(e); }
 };
+export const dashboard = async (req, res, next) => {
+  try { ok(res, req, await service.dashboard(req.tenant, req.student.id)); } catch (e) { next(e); }
+};

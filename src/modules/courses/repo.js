@@ -1,4 +1,5 @@
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
+import { leaderboard } from '../assessments/repo.js';
 
 // ---------- Course membership (the trainer scope key) ----------
 
@@ -279,4 +280,83 @@ export const studentCourseView = async (tenant, studentId) => {
     tenantQuery(tenant, `SELECT b.id, b.name, b.start_date, b.end_date FROM batch_students bs JOIN batches b ON b.id = bs.batch_id WHERE bs.student_id = $1 AND bs.deleted_at IS NULL AND b.deleted_at IS NULL LIMIT 1`, [studentId]),
   ]);
   return { course: student, modules, batch: batch[0] || null };
+};
+
+// Aggregated student dashboard: next class, stats, pending actions, recent
+// announcements, leaderboard rank. All scoped to the student's own enrolment.
+export const studentDashboard = async (tenant, studentId) => {
+  const { rows: srows } = await tenantQuery(
+    tenant,
+    `SELECT s.id, s.name, s.program_id, p.name AS program_name,
+            (SELECT bs.batch_id FROM batch_students bs WHERE bs.student_id = s.id AND bs.deleted_at IS NULL LIMIT 1) AS batch_id
+       FROM students s LEFT JOIN programs p ON p.id = s.program_id
+      WHERE s.id = $1 AND s.deleted_at IS NULL`,
+    [studentId],
+  );
+  const s = srows[0];
+  if (!s) return null;
+  const batchId = s.batch_id;
+
+  const [nextClass, attend, tests, projects, announcements, lb] = await Promise.all([
+    // Next upcoming class in the student's batch.
+    batchId ? tenantQuery(tenant,
+      `SELECT c.id, c.title, c.mode, c.meeting_url, c.starts_at, m.name AS module_name
+         FROM classes c LEFT JOIN course_modules m ON m.id = c.module_id
+        WHERE c.batch_id = $1 AND c.deleted_at IS NULL AND c.ended_at IS NULL AND c.starts_at >= now()
+        ORDER BY c.starts_at LIMIT 1`, [batchId]) : Promise.resolve({ rows: [] }),
+    // Attendance %: present / total classes that have a class in their batch.
+    batchId ? tenantQuery(tenant,
+      `SELECT count(*)::int AS total,
+              count(*) FILTER (WHERE att.status = 'present')::int AS present
+         FROM classes c
+         LEFT JOIN attendance att ON att.class_id = c.id AND att.student_id = $2
+        WHERE c.batch_id = $1 AND c.deleted_at IS NULL AND c.ended_at IS NOT NULL`, [batchId, studentId]) : Promise.resolve({ rows: [{ total: 0, present: 0 }] }),
+    // Tests: total published for their program + how many they've attempted + avg.
+    tenantQuery(tenant,
+      `SELECT (SELECT count(*)::int FROM mock_tests t WHERE t.program_id = $1 AND t.deleted_at IS NULL AND t.is_published) AS total,
+              (SELECT count(*)::int FROM mock_test_attempts a JOIN mock_tests t ON t.id = a.test_id WHERE t.program_id = $1 AND a.student_id = $2) AS attempted`,
+      [s.program_id, studentId]),
+    // Projects: total + submitted + pending (not submitted, deadline not passed).
+    tenantQuery(tenant,
+      `SELECT (SELECT count(*)::int FROM projects pr WHERE pr.program_id = $1 AND pr.deleted_at IS NULL) AS total,
+              (SELECT count(*)::int FROM project_submissions ps JOIN projects pr ON pr.id = ps.project_id WHERE pr.program_id = $1 AND ps.student_id = $2) AS submitted`,
+      [s.program_id, studentId]),
+    // Recent announcements (course + their batch), most recent 5.
+    tenantQuery(tenant,
+      `SELECT a.id, a.title, a.body, a.auto_source, a.created_at, u.name AS author_name
+         FROM announcements a LEFT JOIN users u ON u.id = a.author_user_id
+        WHERE a.program_id = $1 AND a.deleted_at IS NULL AND (a.batch_id IS NULL OR a.batch_id = $2)
+        ORDER BY a.created_at DESC LIMIT 5`, [s.program_id, batchId]),
+    // Leaderboard rank (reuse the derived leaderboard, then find this student).
+    leaderboard(tenant, s.program_id),
+  ]);
+
+  const at = attend.rows[0] || { total: 0, present: 0 };
+  const attendance_pct = at.total > 0 ? Math.round((at.present / at.total) * 1000) / 10 : null;
+  const lbRows = lb || [];
+  const myIdx = lbRows.findIndex((r) => r.student_id === studentId);
+
+  return {
+    student: { id: s.id, name: s.name, program_id: s.program_id, program_name: s.program_name },
+    next_class: nextClass.rows[0] || null,
+    stats: {
+      attendance_pct,
+      classes_total: at.total,
+      classes_present: at.present,
+      tests_total: tests.rows[0]?.total || 0,
+      tests_attempted: tests.rows[0]?.attempted || 0,
+      projects_total: projects.rows[0]?.total || 0,
+      projects_submitted: projects.rows[0]?.submitted || 0,
+    },
+    pending: {
+      tests_pending: Math.max(0, (tests.rows[0]?.total || 0) - (tests.rows[0]?.attempted || 0)),
+      projects_pending: Math.max(0, (projects.rows[0]?.total || 0) - (projects.rows[0]?.submitted || 0)),
+    },
+    announcements: announcements.rows,
+    leaderboard: {
+      rank: myIdx >= 0 ? myIdx + 1 : null,
+      total_students: lbRows.length,
+      top: lbRows.slice(0, 5),
+    },
+  };
 };

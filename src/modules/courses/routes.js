@@ -14,6 +14,7 @@ const programParam = z.object({ programId: uuid });
 
 // ---- Student self-view (student principal). Must come BEFORE the staff chain. ----
 router.get('/my-course', studentAuthRequired, tenantRequired, controller.myCourse);
+router.get('/my-dashboard', studentAuthRequired, tenantRequired, controller.dashboard);
 
 // ---- Staff (trainers/head/admin) ----
 router.use(authRequired, tenantRequired);

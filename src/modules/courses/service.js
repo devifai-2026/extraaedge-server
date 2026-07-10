@@ -135,4 +135,17 @@ export const myCourse = async (tenant, studentId) => {
   return view;
 };
 
+export const dashboard = async (tenant, studentId) => {
+  const view = await repo.studentDashboard(tenant, studentId);
+  if (!view) throw notFound('No enrolment found');
+  // Tenant branding for the student sidebar (logo + name). tenant here is the
+  // resolved row, which carries logo_url/brand_name/name + accent.
+  view.tenant = {
+    name: tenant.company_name || tenant.brand_name || tenant.name,
+    logo_url: tenant.logo_url || null,
+    brand_primary_color: tenant.brand_primary_color || '#E53935',
+  };
+  return view;
+};
+
 export { LMS_TENANT_ROLES };
