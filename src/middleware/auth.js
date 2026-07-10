@@ -34,6 +34,30 @@ export const authRequired = (req, _res, next) => {
   }
 };
 
+// Student principal. A student JWT carries type:'student' — strictly distinct
+// from staff access tokens (authRequired rejects it above). Populates
+// req.student so LMS student routes can scope to the caller's own student_id
+// and never touch staff surfaces.
+export const studentAuthRequired = (req, _res, next) => {
+  const token = extractBearer(req);
+  if (!token) throw unauthenticated('Missing bearer token');
+  try {
+    const claims = verifyToken(token);
+    if (claims.type !== 'student') throw unauthenticated('Not a student token');
+    req.student = {
+      id: claims.sub,
+      email: claims.email ?? null,
+      tenantId: claims.tenantId ?? null,
+      tenantSlug: claims.tenantSlug ?? null,
+      role: 'student',
+      type: 'student',
+    };
+    next();
+  } catch (err) {
+    next(err);
+  }
+};
+
 // Variant that allows refresh tokens (used by /auth/refresh only).
 export const refreshTokenRequired = (req, _res, next) => {
   const token = extractBearer(req);

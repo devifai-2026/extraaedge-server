@@ -4,7 +4,10 @@ import { fileURLToPath } from 'node:url';
 import migrationRunner from 'node-pg-migrate';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
-import { DEFAULT_BUSINESS_HOURS, DEFAULT_TAB_KEYS, CALL_DISPOSITIONS } from '../config/constants.js';
+import {
+  DEFAULT_BUSINESS_HOURS, DEFAULT_TAB_KEYS, CALL_DISPOSITIONS,
+  HEAD_TRAINER_TAB_KEYS, TRAINER_TAB_KEYS, STUDENT_TAB_KEYS,
+} from '../config/constants.js';
 
 const { Client } = pg;
 
@@ -98,6 +101,13 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
         dashboard: 'full', leads: 'full', followups: 'full', whatsapp: 'full',
         'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
       } },
+      // ---- LMS / Trainer roles -------------------------------------------
+      // head_trainer owns a course (modules, trainer roster, batches) + teaches.
+      { name: 'head_trainer', description: 'Owns a course — modules, trainers, batches + teaches', scope: 'head_trainer', is_system: true, tab_permissions: Object.fromEntries(HEAD_TRAINER_TAB_KEYS.map((t) => [t, 'full'])) },
+      // trainer teaches assigned module(s); read-only on course structure.
+      { name: 'trainer', description: 'Teaches assigned modules of a course', scope: 'trainer', is_system: true, tab_permissions: Object.fromEntries(TRAINER_TAB_KEYS.map((t) => [t, 'full'])) },
+      // student is the authenticated learner (email+password, separate JWT).
+      { name: 'student', description: 'Enrolled learner — student panel access', scope: 'student', is_system: true, tab_permissions: Object.fromEntries(STUDENT_TAB_KEYS.map((t) => [t, 'full'])) },
     ];
     const roleIds = {};
     for (const r of roleBundles) {

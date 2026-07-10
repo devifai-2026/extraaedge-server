@@ -135,6 +135,11 @@ const schema = z.object({
   // Numeric template id for the OTP WhatsApp template (speedup_template).
   WABRIDGE_TEMPLATE_OTP: z.string().optional().default(''),
 
+  // Base URL of the admin/student web app — used to build absolute links (e.g.
+  // the student set-password link) inside emails. (Brevo email keys are already
+  // declared above: BREVO_API_KEY / BREVO_SENDER_EMAIL / BREVO_SENDER_NAME.)
+  APP_WEB_URL: z.string().optional().default('http://localhost:5173'),
+
   RATE_LIMIT_GLOBAL_PER_MINUTE: intFrom(100),
   RATE_LIMIT_LOGIN_PER_15MIN: intFrom(10),
   RATE_LIMIT_PASSWORD_RESET_PER_HOUR: intFrom(3),

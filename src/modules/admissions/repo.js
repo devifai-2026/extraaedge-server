@@ -158,6 +158,21 @@ export const findById = async (tenant, id) => {
   return rows[0] || null;
 };
 
+// Stamp the Accounts "course-confirm" step (idempotent — only sets it once).
+export const stampCourseConfirmed = async (tenant, id, actorId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE admissions
+        SET course_confirmed_at = COALESCE(course_confirmed_at, now()),
+            course_confirmed_by = COALESCE(course_confirmed_by, $2),
+            updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL
+      RETURNING id, course_confirmed_at, course_confirmed_by`,
+    [id, actorId ?? null],
+  );
+  return rows[0] ?? null;
+};
+
 export const findByIdWithRelations = async (tenant, id) => {
   const adm = await findById(tenant, id);
   if (!adm) return null;

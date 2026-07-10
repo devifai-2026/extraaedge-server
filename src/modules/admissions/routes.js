@@ -105,6 +105,8 @@ router.delete('/:id', acctRole, validate({ params: idParam }), controller.remove
 
 // Status transitions — accounts workflow only (counsellors can't approve etc.).
 router.post('/:id/approve', acctRole, validate({ params: idParam }), controller.approve);
+// Course-confirm: provision the student's LMS portal after approval (Accounts).
+router.post('/:id/confirm-course', acctRole, validate({ params: idParam }), controller.confirmCourse);
 router.post('/:id/reject', acctRole, validate({ params: idParam, body: z.object({ reason: z.string().optional() }).optional() }), controller.reject);
 router.post('/:id/break', acctRole, validate({ params: idParam, body: z.object({ reason: z.string().optional() }).optional() }), controller.markBreak);
 router.post('/:id/resume', acctRole, validate({ params: idParam }), controller.resume);

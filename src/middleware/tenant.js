@@ -8,6 +8,8 @@ import { tenantNotFound } from '../lib/errors.js';
 //   3) X-Tenant-Slug header (dev / API tools)
 const extractSlug = (req) => {
   if (req.user?.tenantSlug) return req.user.tenantSlug;
+  // LMS student principal carries its tenant slug the same way.
+  if (req.student?.tenantSlug) return req.student.tenantSlug;
   const host = req.headers.host || '';
   const suffix = `.${env.PUBLIC_TENANT_DOMAIN}`;
   if (host.endsWith(suffix) && host.length > suffix.length) {

@@ -231,4 +231,56 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // (scoped server-side by guided_by_counsellor_id). They configure the fee
   // offer + send the admission link from here. Seeded to counsellor.
   'admissions.my_students',
+  // ---- LMS / Trainer module ----------------------------------------------
+  // Course management (modules, syllabus, trainer roster, batches). Seeded to
+  // head_trainer (+ super_admin). Trainers read their own course from here.
+  'courses.manage',
+  // Trainer working surfaces (seeded to trainer + head_trainer). Each maps to
+  // a page in the trainer nav group; scoped server-side to the trainer's own
+  // courses via course_trainers membership.
+  'trainer.classes',
+  'trainer.attendance',
+  'trainer.recordings',
+  'trainer.announcements',
+  'trainer.forum',
+  'trainer.tests',
+  'trainer.projects',
+  'trainer.interviews',
+  'trainer.leaderboard',
+  // Student panel surfaces (seeded to the student role). Rendered in the
+  // separate /student/* layout, gated to the student principal.
+  'student.home',
+  'student.classes',
+  'student.forum',
+  'student.tests',
+  'student.projects',
+  'student.leaderboard',
+  'student.catalog',
+  // LMS analytics dashboards — super_admin + branch_manager (branch-scoped).
+  'lms.analytics',
+]);
+
+// LMS tenant roles (teaching staff + the authenticated learner). Kept separate
+// from SYSTEM_TENANT_ROLES so the CRM role gates (lead/admission scopes) don't
+// accidentally include them; these are seeded as their own custom_roles
+// bundles at provisioning + via a seed migration for existing tenants.
+export const LMS_TENANT_ROLES = Object.freeze({
+  HEAD_TRAINER: 'head_trainer',
+  TRAINER: 'trainer',
+  STUDENT: 'student',
+});
+
+// Tab bundles per LMS role — used by provisioning + the seed migration so the
+// grant list stays in one place.
+export const TRAINER_TAB_KEYS = Object.freeze([
+  'trainer.classes', 'trainer.attendance', 'trainer.recordings',
+  'trainer.announcements', 'trainer.forum', 'trainer.tests',
+  'trainer.projects', 'trainer.interviews', 'trainer.leaderboard',
+]);
+export const HEAD_TRAINER_TAB_KEYS = Object.freeze([
+  'courses.manage', ...TRAINER_TAB_KEYS,
+]);
+export const STUDENT_TAB_KEYS = Object.freeze([
+  'student.home', 'student.classes', 'student.forum', 'student.tests',
+  'student.projects', 'student.leaderboard', 'student.catalog',
 ]);

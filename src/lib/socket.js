@@ -29,6 +29,10 @@ const tenantById = async (tenantId) => {
 const userRoom    = (tenantId, userId)    => `tenant:${tenantId}:user:${userId}`;
 const managerRoom = (tenantId, mgrId)     => `tenant:${tenantId}:manager:${mgrId}`;
 const adminRoom   = (tenantId)            => `tenant:${tenantId}:admins`;
+// LMS rooms. A student's personal feed + a per-batch bus (live attendance
+// questions, announcements) that the FE joins on demand via the socket events.
+const studentRoom = (tenantId, studentId) => `tenant:${tenantId}:student:${studentId}`;
+const batchRoom   = (tenantId, batchId)   => `tenant:${tenantId}:batch:${batchId}`;
 
 export const initSocket = (httpServer) => {
   io = new IOServer(httpServer, {
@@ -49,11 +53,15 @@ export const initSocket = (httpServer) => {
       const token = socket.handshake.auth?.token || socket.handshake.query?.token;
       if (!token) return next(new Error('UNAUTHENTICATED'));
       const claims = verifyToken(token);
-      if (claims?.type !== 'access') return next(new Error('INVALID_TOKEN'));
+      // Two principal kinds share the socket: staff (type:'access') and LMS
+      // students (type:'student'). Both get a per-identity room; students also
+      // join batch rooms on demand for live attendance/announcements.
+      if (claims?.type !== 'access' && claims?.type !== 'student') return next(new Error('INVALID_TOKEN'));
       socket.data.user = {
         id: claims.sub,
         tenantId: claims.tenantId,
         role: claims.role,
+        kind: claims.type === 'student' ? 'student' : 'staff',
       };
       return next();
     } catch (err) {
@@ -70,14 +78,35 @@ export const initSocket = (httpServer) => {
     // to the tenant-wide admin room. We deliberately don't have a separate
     // managerRoom — every emit that targets managers iterates over their user
     // ids and hits userRoom directly, which keeps fan-out single-shot.
-    socket.join(userRoom(u.tenantId, u.id));
-    if (u.role === 'super_admin')  socket.join(adminRoom(u.tenantId));
+    if (u.kind === 'student') {
+      // Students get their personal feed + may subscribe to batch rooms they
+      // belong to (the client asks; we don't trust it blindly — batch-room
+      // emits still target only rooms the server chooses to broadcast to, and
+      // membership is re-checked server-side before any sensitive payload).
+      socket.join(studentRoom(u.tenantId, u.id));
+      socket.on('lms:join-batch', (batchId) => {
+        if (typeof batchId === 'string' && batchId) socket.join(batchRoom(u.tenantId, batchId));
+      });
+      socket.on('lms:leave-batch', (batchId) => {
+        if (typeof batchId === 'string' && batchId) socket.leave(batchRoom(u.tenantId, batchId));
+      });
+    } else {
+      socket.join(userRoom(u.tenantId, u.id));
+      if (u.role === 'super_admin') socket.join(adminRoom(u.tenantId));
+      // Trainers may also watch batch rooms (their live attendance console).
+      socket.on('lms:join-batch', (batchId) => {
+        if (typeof batchId === 'string' && batchId) socket.join(batchRoom(u.tenantId, batchId));
+      });
+      socket.on('lms:leave-batch', (batchId) => {
+        if (typeof batchId === 'string' && batchId) socket.leave(batchRoom(u.tenantId, batchId));
+      });
+    }
 
     socket.emit('hello', { ok: true });
-    logger.debug({ userId: u.id, tenantId: u.tenantId, role: u.role }, 'socket connected');
+    logger.debug({ id: u.id, tenantId: u.tenantId, role: u.role, kind: u.kind }, 'socket connected');
 
     socket.on('disconnect', (reason) => {
-      logger.debug({ userId: u.id, reason }, 'socket disconnected');
+      logger.debug({ id: u.id, reason }, 'socket disconnected');
     });
   });
 
@@ -103,6 +132,23 @@ export const notifyUser = (tenantId, userId, type, payload) => {
   if (!io || !tenantId || !userId) return;
   const evt = wrap(type, payload);
   io.to(userRoom(tenantId, userId)).emit('notification', evt);
+};
+
+// ---------- LMS emit helpers ----------
+
+// Deliver a notification to a single student's personal feed.
+export const notifyStudent = (tenantId, studentId, type, payload) => {
+  if (!io || !tenantId || !studentId) return;
+  io.to(studentRoom(tenantId, studentId)).emit('notification', wrap(type, payload));
+};
+
+// Broadcast an LMS event to everyone in a batch room (trainers watching the
+// console + the batch's connected students) — e.g. an attendance question
+// fired, an answer received, a new announcement. `event` is the socket event
+// name (e.g. 'lms:attendance-question'); payload is delivered as-is + wrapped.
+export const emitToBatch = (tenantId, batchId, event, payload) => {
+  if (!io || !tenantId || !batchId) return;
+  io.to(batchRoom(tenantId, batchId)).emit(event, wrap(event, payload));
 };
 
 export const notifyManagersOf = async (tenant, userId, type, payload) => {

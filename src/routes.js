@@ -70,6 +70,7 @@ import admissionsRouter from './modules/admissions/routes.js';
 import publicAdmissionsRouter from './modules/public-admissions/routes.js';
 import publicReceiptsRouter from './modules/public-receipts/routes.js';
 import publicBrandingRouter from './modules/public-branding/routes.js';
+import studentAuthRouter from './modules/student-auth/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
@@ -210,6 +211,10 @@ export const mountRoutes = (app) => {
   // roles) can render it as <img src> without a public bucket or a short-lived
   // signed URL. URL in the tenant's logo_url column points here.
   api.use('/public/branding', publicBrandingRouter);
+
+  // Student authentication (LMS). Separate principal (type:'student' JWT),
+  // tenant-scoped via the x-tenant-slug header. NOT behind the staff auth chain.
+  api.use('/student-auth', studentAuthRouter);
 
   app.use('/api/v1', api);
 };

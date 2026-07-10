@@ -1,6 +1,8 @@
 import * as repo from './repo.js';
 import * as tenantsRepo from '../tenants/repo.js';
-import { notFound, forbidden } from '../../lib/errors.js';
+import * as studentsRepo from '../student-auth/repo.js';
+import * as studentAuth from '../student-auth/service.js';
+import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notifyUser } from '../../lib/socket.js';
@@ -203,6 +205,62 @@ export const approve = async (tenant, actor, id) => {
   }
 
   return row;
+};
+
+// Accounts "course-confirm": the step after approval that moves the enrolled
+// student into the LMS. Creates the authenticated `students` row from the
+// admission, mints a one-time set-password link (emailed via Brevo, and
+// returned so the FE can offer a copy-link fallback), and stamps the admission.
+// The student lands in the course's "Unassigned pool" (no batch) — the course's
+// head_trainer places them into a batch later. Idempotent: a re-confirm reuses
+// the existing student and just re-issues a fresh set-password link.
+export const confirmCourse = async (tenant, actor, id) => {
+  const adm = await repo.findById(tenant, id);
+  if (!adm) throw notFound('Admission not found');
+  // Must be an approved/enrolled admission (approve() sets status 'attending').
+  if (!['attending', 'on_break', 'completed'].includes(adm.status)) {
+    throw forbidden('Approve the admission before confirming the course.');
+  }
+  if (!adm.program_id) throw validationError({ program_id: 'This admission has no course/program set.' });
+  const email = (adm.email || '').trim();
+  if (!email) throw validationError({ email: 'A student email is required to confirm the course.' });
+
+  const name = [adm.first_name, adm.middle_name, adm.last_name].filter(Boolean).join(' ').trim() || email;
+
+  // Create (or reuse) the student, then mint + email a fresh set-password link.
+  const student = await studentsRepo.create(tenant, {
+    admission_id: adm.id,
+    program_id: adm.program_id,
+    name,
+    email,
+    phone: adm.whatsapp_number || adm.alternate_contact || null,
+    created_by: actor?.id ?? null,
+  });
+  const rawToken = await studentAuth.mintSetPasswordToken(tenant, student.id);
+  let emailed = false;
+  let link = studentAuth.setPasswordUrl(rawToken, tenant.slug);
+  try {
+    const r = await studentAuth.emailSetPasswordLink(tenant, student, rawToken);
+    emailed = r.emailed; link = r.url;
+  } catch (err) {
+    logger.error({ err: err.message, studentId: student.id }, 'set-password email failed (copy-link fallback available)');
+  }
+
+  await repo.stampCourseConfirmed(tenant, id, actor?.id);
+  events.log(tenant, {
+    admission_id: id, lead_id: adm.lead_id ?? null,
+    event_type: events.EVENT_TYPES.STATUS_CHANGED,
+    actor_user_id: actor?.id ?? null,
+    actor_kind: events.ACTOR_KINDS.USER,
+    summary: `Course confirmed · student portal ${emailed ? 'invite emailed' : 'invite link ready'}`,
+    metadata: { student_id: student.id, program_id: adm.program_id, emailed },
+  });
+
+  return {
+    student: { id: student.id, name: student.name, email: student.email, status: student.status },
+    set_password_url: link,  // FE shows a "copy link" fallback
+    emailed,
+  };
 };
 
 // Reject a pending admission. Frees the lead to receive a fresh public

@@ -91,6 +91,15 @@ export const approve = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// Accounts "confirm course" — provisions the student portal for an approved
+// admission and returns a set-password link (emailed + copyable).
+export const confirmCourse = async (req, res, next) => {
+  try {
+    const data = await service.confirmCourse(req.tenant, req.user, req.params.id);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const reject = async (req, res, next) => {
   try {
     const row = await service.reject(req.tenant, req.user, req.params.id, req.body?.reason);
