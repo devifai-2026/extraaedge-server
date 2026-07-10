@@ -72,6 +72,7 @@ import publicReceiptsRouter from './modules/public-receipts/routes.js';
 import publicBrandingRouter from './modules/public-branding/routes.js';
 import studentAuthRouter from './modules/student-auth/routes.js';
 import coursesRouter from './modules/courses/routes.js';
+import classesRouter from './modules/classes/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
@@ -191,6 +192,8 @@ export const mountRoutes = (app) => {
   // LMS courses/modules/trainers/batches (trainers + head + admin) — the
   // router does its own auth chain (incl. a student /my-course sub-route).
   api.use('/courses', coursesRouter);
+  // LMS classes + live-MCQ attendance (trainers + students; router self-gates).
+  api.use('/classes', classesRouter);
   // Per-lead customised fee offer — accounts team's tweak of the
   // program-level defaults for a specific converted lead.
   api.use('/lead-fee-offers', leadFeeOffersRouter);
