@@ -30,7 +30,7 @@ export const resolveTenantBySlug = async (slug) => {
     `SELECT id, slug, name, company_name, brand_name, status, db_name, db_user, db_password_encrypted, logo_url,
             brand_primary_color, brand_secondary_color, phone, website, email,
             address_line1, address_line2, city, state, pincode,
-            receipt_terms, receipt_signatory_label, receipt_no_prefix, receipt_no_start, receipt_no_pad,
+            receipt_terms, receipt_signatory_label, receipt_thankyou, receipt_no_prefix, receipt_no_start, receipt_no_pad,
             timezone, currency
        FROM tenants
       WHERE slug = $1
@@ -49,7 +49,7 @@ export const resolveTenantById = async (id) => {
     `SELECT id, slug, name, company_name, brand_name, status, db_name, db_user, db_password_encrypted, logo_url,
             brand_primary_color, brand_secondary_color, phone, website, email,
             address_line1, address_line2, city, state, pincode,
-            receipt_terms, receipt_signatory_label, receipt_no_prefix, receipt_no_start, receipt_no_pad,
+            receipt_terms, receipt_signatory_label, receipt_thankyou, receipt_no_prefix, receipt_no_start, receipt_no_pad,
             timezone, currency
        FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
     [id],

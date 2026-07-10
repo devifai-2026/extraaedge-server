@@ -35,6 +35,7 @@ const brandingSchema = z.object({
   // this one endpoint serves both logo and receipt settings.
   receipt_terms: z.array(z.string().max(300)).max(6).optional(),
   receipt_signatory_label: z.string().max(80).optional(),
+  receipt_thankyou: optText(200),
   receipt_no_prefix: z.string().max(40).nullable().optional(),
   receipt_no_start: z.number().int().min(1).max(9_999_999_999).optional(),
   receipt_no_pad: z.number().int().min(1).max(12).optional(),
@@ -63,6 +64,7 @@ router.put(
           pincode: row.pincode ?? null,
           receipt_terms: Array.isArray(row.receipt_terms) ? row.receipt_terms : [],
           receipt_signatory_label: row.receipt_signatory_label ?? null,
+          receipt_thankyou: row.receipt_thankyou ?? null,
           receipt_no_prefix: row.receipt_no_prefix ?? null,
           receipt_no_start: row.receipt_no_start ?? null,
           receipt_no_pad: row.receipt_no_pad ?? null,

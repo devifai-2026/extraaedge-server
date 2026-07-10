@@ -166,6 +166,7 @@ export const lookupByToken = async (token) => {
       // Footer config (defaulted in the migration; safe if the lean row lacks them).
       receipt_terms: Array.isArray(t.receipt_terms) ? t.receipt_terms : [],
       receipt_signatory_label: t.receipt_signatory_label || 'Authorized Signatory',
+      receipt_thankyou: t.receipt_thankyou || null,
     },
     // Full plan with Paid/Due per row + totals, so the receipt shows the
     // student their whole schedule, not just this single payment.
