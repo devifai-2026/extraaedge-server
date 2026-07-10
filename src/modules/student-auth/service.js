@@ -11,6 +11,9 @@ import { unauthenticated, notFound, validationError, forbidden } from '../../lib
 import { sendEmail, linkEmailHtml } from '../../lib/email.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
+import { presignUpload } from '../uploads/service.js';
+import { getDownloadSignedUrl } from '../../lib/r2.js';
+import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 
 // Same argon2 profile the staff auth service uses.
 const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
@@ -83,6 +86,15 @@ export const login = async (tenant, { email, password }) => {
   let ok = false;
   try { ok = await argon2.verify(student.password_hash, password); } catch { ok = false; }
   if (!ok) return fail();
+  // Block login if the accounts team has put the enrolment on break or dropped
+  // it — with a clear, distinct message per case.
+  const admStatus = await repo.admissionStatus(tenant, student.id);
+  if (admStatus === 'on_break') {
+    throw forbidden('Your enrolment is currently on break. Please contact the accounts team to resume access.');
+  }
+  if (admStatus === 'dropped') {
+    throw forbidden('Your enrolment has been discontinued. Please contact the accounts team for details.');
+  }
   await repo.touchLogin(tenant, student.id);
   return {
     access_token: issueStudentToken(tenant, student),
@@ -144,4 +156,48 @@ export const me = async (tenant, studentId) => {
   const student = await repo.findById(tenant, studentId);
   if (!student) throw notFound('Student not found');
   return { id: student.id, name: student.name, email: student.email, program_id: student.program_id, status: student.status };
+};
+
+// ---------- Profile ----------
+const withUrls = async (tenant, p) => {
+  if (!p) return p;
+  const sign = async (key, downloadAs) => (key ? getDownloadSignedUrl({ key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS, downloadAs }).catch(() => null) : null);
+  return {
+    ...p,
+    photo_url: await sign(p.photo_r2_key),
+    cv_url: await sign(p.cv_r2_key, p.cv_filename || 'cv.pdf'),
+  };
+};
+
+export const getProfile = async (tenant, studentId) => {
+  const p = await repo.getProfile(tenant, studentId);
+  if (!p) throw notFound('Student not found');
+  return withUrls(tenant, p);
+};
+
+export const updateProfile = async (tenant, studentId, input) => {
+  const p = await repo.updateProfile(tenant, studentId, input);
+  return withUrls(tenant, p);
+};
+
+// Presign a student upload (photo | cv). Reuses the uploads presign (it only
+// needs the tenant); purpose maps to a GCS folder + size ceiling.
+export const presign = async (tenant, studentId, input) => {
+  const purpose = input.kind === 'cv' ? 'note_attachment' : 'admission_photo'; // reuse existing size-capped purposes
+  return presignUpload(tenant, { id: studentId }, {
+    purpose, content_type: input.content_type, size_bytes: input.size_bytes, filename: input.filename,
+  });
+};
+
+export const setCv = async (tenant, studentId, r2Key, filename) => {
+  const p = await repo.setCv(tenant, studentId, r2Key, filename);
+  return withUrls(tenant, p);
+};
+
+// Trainer view of a student's profile (must teach the student's course).
+export const trainerViewProfile = async (tenant, actor, studentId) => {
+  const isAdmin = actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
+  const p = await repo.getProfileForTrainer(tenant, studentId, actor?.id, isAdmin);
+  if (!p) throw forbidden('You cannot view this student.');
+  return withUrls(tenant, p);
 };
