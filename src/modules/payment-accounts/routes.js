@@ -15,11 +15,18 @@ import { createSchema, updateSchema, idParam, listQuery, primaryBulkSchema } fro
 const router = express.Router();
 router.use(authRequired, tenantRequired);
 
-// Writes are admin-only. Reads are also available to account managers, who
-// need to pick which account a student should pay into when sharing the
-// admission form / recording receipts (they can't create/edit accounts).
+// Writes are admin-only. Reads are available to everyone who can open the
+// Configure Fee Offer modal / share an admission link and thus needs to pick
+// the account a student pays into: account managers, counsellors (their own
+// converted students — see lead-fee-offers), and branch managers. They can
+// read but not create/edit accounts (that stays super_admin).
 const adminOnly = requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN);
-const readRoles = requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER);
+const readRoles = requireRole(
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
+  SYSTEM_TENANT_ROLES.COUNSELLOR,
+);
 
 // GET /payment-accounts — list (active by default; ?include_inactive=true for all, ?type=bank|upi)
 router.get('/', readRoles, validate({ query: listQuery }), async (req, res, next) => {
