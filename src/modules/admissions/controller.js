@@ -16,6 +16,15 @@ export const get = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// Counsellor "My Students": their converted leads (awaiting the student's
+// form → configure + send link) + their submitted admissions (→ view form).
+export const myStudents = async (req, res, next) => {
+  try {
+    const rows = await service.myStudents(req.tenant, req.user);
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const create = async (req, res, next) => {
   try {
     const row = await service.create(req.tenant, req.user, req.body);

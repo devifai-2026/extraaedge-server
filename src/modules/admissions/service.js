@@ -537,6 +537,12 @@ export const paySchedule = (tenant, q) => repo.paySchedule(tenant, q);
 export const collectionReceiptWise = (tenant, q) => repo.collectionReceiptWise(tenant, q);
 export const dashboard = (tenant) => repo.dashboard(tenant);
 
+// Counsellor "My Students": their converted leads + submitted admissions,
+// scoped to the acting counsellor. (For super_admin/account_manager, who might
+// hit this endpoint, fall back to their own id too — but the sidebar surfaces
+// it only for counsellors.)
+export const myStudents = (tenant, actor) => repo.myStudents(tenant, actor?.id);
+
 export const pendingAdmissions = (tenant) => repo.pendingAdmissions(tenant);
 export const pendingAdmissionsCount = (tenant) => repo.pendingAdmissionsCount(tenant);
 export const emiDigest = (tenant, upcomingDays) => repo.emiDigest(tenant, upcomingDays);

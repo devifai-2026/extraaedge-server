@@ -45,6 +45,10 @@ router.get('/emi-digest', acctRole, controller.emiDigest);
 // + a section on the main analytics dashboard). Must come BEFORE /:id.
 router.get('/lead-status-snapshot', acctRole, controller.leadStatusSnapshot);
 
+// Counsellor "My Students" — their converted leads + submitted admissions.
+// Scoped to the acting user server-side. Must come BEFORE /:id.
+router.get('/my-students', acctOrCounsellor, controller.myStudents);
+
 // Per-lead timeline lookup for the lead drawer's Admission Timeline tab.
 // The drawer only has lead.id; this hop resolves the admission internally.
 // Counsellors can view the timeline of THEIR own converted lead's admission.

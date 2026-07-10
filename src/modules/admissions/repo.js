@@ -965,6 +965,63 @@ export const collectionReceiptWise = async (tenant, q = {}) => {
 //      accounts hasn't filled the full form / verified yet.
 // Unified into one ranked list newest-first so accounts has a single
 // queue to chew through.
+// Counsellor "My Students": their converted leads unified with any admission,
+// ACROSS ALL statuses. `source_kind='lead'` = converted but the student hasn't
+// filled the public form yet → counsellor configures the offer + sends the
+// link. `source_kind='admission'` = the student HAS submitted → counsellor
+// views the filled form (read-only). Scoped to leads the counsellor owns
+// (leads.assigned_to) / admissions they guided (guided_by_counsellor_id).
+export const myStudents = async (tenant, counsellorId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `WITH unified AS (
+       -- Converted leads with NO admission yet → awaiting the student's form.
+       SELECT
+         l.id                AS lead_id,
+         NULL::uuid          AS admission_id,
+         'lead'              AS source_kind,
+         l.name              AS student_name,
+         l.email             AS email,
+         l.whatsapp_number   AS whatsapp_number,
+         p.name              AS program_name,
+         l.converted_at      AS event_at,
+         NULL::text          AS admission_status,
+         EXISTS (SELECT 1 FROM lead_fee_offers o WHERE o.lead_id = l.id) AS has_fee_offer,
+         false               AS has_admission
+       FROM leads l
+       LEFT JOIN programs p ON p.id = l.program_id
+       WHERE l.converted_at IS NOT NULL
+         AND l.deleted_at IS NULL
+         AND l.assigned_to = $1
+         AND NOT EXISTS (SELECT 1 FROM admissions a WHERE a.lead_id = l.id AND a.deleted_at IS NULL)
+
+       UNION ALL
+
+       -- Admissions the student HAS submitted (any status) that this
+       -- counsellor guided.
+       SELECT
+         a.lead_id           AS lead_id,
+         a.id                AS admission_id,
+         'admission'         AS source_kind,
+         COALESCE(NULLIF(TRIM(a.first_name || ' ' || COALESCE(a.last_name, '')), ''), a.email) AS student_name,
+         a.email             AS email,
+         a.whatsapp_number   AS whatsapp_number,
+         p.name              AS program_name,
+         a.admission_date    AS event_at,
+         a.status            AS admission_status,
+         true                AS has_fee_offer,
+         true                AS has_admission
+       FROM admissions a
+       LEFT JOIN programs p ON p.id = a.program_id
+       WHERE a.deleted_at IS NULL
+         AND a.guided_by_counsellor_id = $1
+     )
+     SELECT * FROM unified ORDER BY event_at DESC NULLS LAST`,
+    [counsellorId],
+  );
+  return rows;
+};
+
 export const pendingAdmissions = async (tenant) => {
   const { rows } = await tenantQuery(
     tenant,
