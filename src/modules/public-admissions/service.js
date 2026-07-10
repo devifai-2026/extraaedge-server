@@ -402,6 +402,14 @@ export const submitFromToken = async (token, input) => {
         registration_amount: Number(offer.registration_amount),
         payment_mode: offer.payment_mode,
       },
+      // Payment the student declared at submit — surfaced on the timeline
+      // (counsellor + accounts) so the collected amount + UTR + proof are
+      // visible before the accounts team verifies it at approval.
+      payment: (admission.payment_amount != null || admission.payment_utr || admission.payment_proof_r2_key) ? {
+        amount: admission.payment_amount != null ? Number(admission.payment_amount) : null,
+        utr: admission.payment_utr || null,
+        has_proof: Boolean(admission.payment_proof_r2_key),
+      } : null,
     },
   });
 
