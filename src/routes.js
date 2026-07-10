@@ -76,6 +76,7 @@ import classesRouter from './modules/classes/routes.js';
 import communityRouter from './modules/community/routes.js';
 import forumRouter from './modules/forum/routes.js';
 import assessmentsRouter from './modules/assessments/routes.js';
+import interviewsRouter from './modules/interviews/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
@@ -203,6 +204,8 @@ export const mountRoutes = (app) => {
   api.use('/forum', forumRouter);
   // LMS assessments — mock tests, projects, leaderboard (router self-gates).
   api.use('/assessments', assessmentsRouter);
+  // LMS mock interviews — meeting link + slot assignment + marks (self-gates).
+  api.use('/interviews', interviewsRouter);
   // Per-lead customised fee offer — accounts team's tweak of the
   // program-level defaults for a specific converted lead.
   api.use('/lead-fee-offers', leadFeeOffersRouter);
