@@ -88,6 +88,24 @@ export const makePublic = async (key) => {
   return publicUrl(key);
 };
 
+// Stream a (possibly private) object straight through the app, using the
+// server's own GCS credentials — no signed URL, no public ACL, no TTL. Used by
+// the branding proxy to serve the tenant logo to every visitor (navbar on all
+// roles + public receipt) even though the uploads bucket is private. Returns
+// `{ stream, contentType, contentLength, etag }`, or null if the key is missing.
+export const getObjectStream = async (key) => {
+  const file = bucket().file(key);
+  const [exists] = await file.exists();
+  if (!exists) return null;
+  const [metadata] = await file.getMetadata();
+  return {
+    stream: file.createReadStream(),
+    contentType: metadata.contentType || 'application/octet-stream',
+    contentLength: metadata.size != null ? Number(metadata.size) : undefined,
+    etag: metadata.etag,
+  };
+};
+
 // Returns null on 404, mirroring the previous S3 behaviour. On success,
 // returns an object that resembles the S3 HEAD shape just enough for
 // callers (uploads/service.js reads ContentType + ContentLength).

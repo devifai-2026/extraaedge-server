@@ -2,20 +2,35 @@
 // (Distinct from /platform/tenants, which is product-owner-only.) Writes to the
 // system-DB tenants row and invalidates the tenant cache so /auth/me reflects
 // the new logo immediately for every role.
+import { createHash } from 'crypto';
 import * as tenantsRepo from '../tenants/repo.js';
 import { invalidateTenantCache } from '../../db/tenant.js';
-import { makePublic } from '../../lib/r2.js';
 import { notFound } from '../../lib/errors.js';
 
+// The logo lives in a PRIVATE bucket, so we DON'T hand out a raw storage URL
+// (it 403s under uniform bucket-level access). Instead we persist the opaque
+// GCS key and point logo_url at our own streaming proxy
+// (GET /public/branding/:slug/logo). We store a ROOT-RELATIVE path (no host)
+// so the value is environment-independent — the frontend prefixes it with
+// whichever backend host it's talking to (localhost in dev, the Render host in
+// prod), so a URL saved in one environment renders correctly in the other.
+// A ?v=<hash-of-key> query busts the CDN / browser cache whenever the logo
+// changes (new key -> new hash -> new URL).
+const proxyLogoUrl = (slug, key) => {
+  const v = createHash('sha1').update(key).digest('hex').slice(0, 10);
+  return `/api/v1/public/branding/${encodeURIComponent(slug)}/logo?v=${v}`;
+};
+
 // Update the caller's own tenant branding. `logo_r2_key` is a GCS key from a
-// prior /uploads presign+confirm (purpose 'tenant_logo'); we make it public and
-// store the stable URL on tenants.logo_url. Pass logo_r2_key=null to clear.
+// prior /uploads presign+confirm (purpose 'tenant_logo'); we store the key and
+// point logo_url at the branding proxy. Pass logo_r2_key=null to clear.
 // Other branding fields (brand_name, colors) pass through if provided.
 export const updateBranding = async (tenant, { logo_r2_key, ...rest }) => {
   const updates = { ...rest };
 
   if (logo_r2_key !== undefined) {
-    updates.logo_url = logo_r2_key ? await makePublic(logo_r2_key) : null;
+    updates.logo_r2_key = logo_r2_key || null;
+    updates.logo_url = logo_r2_key ? proxyLogoUrl(tenant.slug, logo_r2_key) : null;
   }
 
   if (!Object.keys(updates).length) {

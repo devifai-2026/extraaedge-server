@@ -69,6 +69,7 @@ import workSessionsRouter from './modules/work-sessions/routes.js';
 import admissionsRouter from './modules/admissions/routes.js';
 import publicAdmissionsRouter from './modules/public-admissions/routes.js';
 import publicReceiptsRouter from './modules/public-receipts/routes.js';
+import publicBrandingRouter from './modules/public-branding/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
@@ -205,6 +206,10 @@ export const mountRoutes = (app) => {
   // the credential). Lets accounts share a printable receipt URL with
   // the student / parent without forcing them to sign in.
   api.use('/public/receipts', publicReceiptsRouter);
+  // Tenant logo proxy — streams the private GCS object so the navbar (all
+  // roles) can render it as <img src> without a public bucket or a short-lived
+  // signed URL. URL in the tenant's logo_url column points here.
+  api.use('/public/branding', publicBrandingRouter);
 
   app.use('/api/v1', api);
 };
