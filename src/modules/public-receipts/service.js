@@ -7,6 +7,7 @@
 import { sysQuery } from '../../db/system.js';
 import { resolveTenantById } from '../../db/tenant.js';
 import { tenantQuery } from '../../db/tenant.js';
+import * as tenantsRepo from '../tenants/repo.js';
 import { notFound } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 
@@ -25,12 +26,15 @@ const findReceiptAcrossTenants = async (token) => {
       const { rows } = await tenantQuery(
         tenant,
         `SELECT r.*, a.id AS adm_id,
-                TRIM(COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) AS student_name,
-                a.admission_date, a.email, a.whatsapp_number,
-                p.name AS program_name
+                TRIM(COALESCE(a.first_name, '') || ' ' || COALESCE(a.middle_name, '') || ' ' || COALESCE(a.last_name, '')) AS student_name,
+                a.admission_date, a.email, a.whatsapp_number, a.alternate_contact,
+                a.mode_of_training, a.admission_code,
+                p.name AS program_name,
+                c.name AS center_name
            FROM admission_receipts r
            JOIN admissions a ON a.id = r.admission_id
            LEFT JOIN programs p ON p.id = a.program_id
+           LEFT JOIN admission_centers c ON c.id = a.center_id
           WHERE r.share_token = $1
             AND r.deleted_at IS NULL
           LIMIT 1`,
@@ -100,6 +104,13 @@ export const lookupByToken = async (token) => {
   if (!hit) throw notFound('Receipt not found');
   const { tenant, receipt: r } = hit;
   const fee_schedule = await buildScheduleWithStatus(tenant, r.adm_id);
+  // The resolved tenant (from db/tenant cache) carries only a subset of
+  // columns. Pull the full system row for the header (address/phone/website)
+  // + receipt config (terms lines, signatory label). Best-effort — fall back
+  // to the lean object so the receipt still renders if this lookup fails.
+  let full = null;
+  try { full = await tenantsRepo.findById(tenant.id); } catch { /* use lean tenant */ }
+  const t = full || tenant;
   // If accounts attached a payment screenshot when they captured the
   // receipt, mint a signed URL the public page can render inline. The
   // r2_key itself never leaves the server — we hand back a time-limited
@@ -110,6 +121,9 @@ export const lookupByToken = async (token) => {
       payment_screenshot_url = await getDownloadSignedUrl({ key: r.payment_screenshot_r2_key });
     } catch { /* swallow — render the receipt without the image */ }
   }
+  // Upcoming = unpaid schedule rows that have a due date (the "UPCOMING
+  // INSTALLMENT SCHEDULE" table on the receipt shows only what's still owed).
+  const upcoming = (fee_schedule.rows || []).filter((row) => !row.paid && row.due_date);
   return {
     receipt: {
       id: r.id,
@@ -124,19 +138,39 @@ export const lookupByToken = async (token) => {
     },
     admission: {
       id: r.adm_id,
+      admission_code: r.admission_code,
       student_name: r.student_name || r.email || '—',
       admission_date: r.admission_date,
       program_name: r.program_name,
+      center_name: r.center_name,
+      mode_of_training: r.mode_of_training,
+      // Prefer the WhatsApp number as the contact; fall back to alternate.
+      contact: r.whatsapp_number || r.alternate_contact || null,
       email: r.email,
       whatsapp_number: r.whatsapp_number,
     },
     tenant: {
-      name: tenant.company_name || tenant.name,
-      logo_url: tenant.logo_url,
-      brand_primary_color: tenant.brand_primary_color || null,
+      name: t.company_name || t.brand_name || t.name,
+      brand_name: t.brand_name || t.company_name || t.name,
+      logo_url: t.logo_url,
+      brand_primary_color: t.brand_primary_color || null,
+      phone: t.phone || null,
+      website: t.website || null,
+      email: t.email || null,
+      address_line1: t.address_line1 || null,
+      address_line2: t.address_line2 || null,
+      city: t.city || null,
+      state: t.state || null,
+      pincode: t.pincode || null,
+      currency: t.currency || 'INR',
+      // Footer config (defaulted in the migration; safe if the lean row lacks them).
+      receipt_terms: Array.isArray(t.receipt_terms) ? t.receipt_terms : [],
+      receipt_signatory_label: t.receipt_signatory_label || 'Authorized Signatory',
     },
     // Full plan with Paid/Due per row + totals, so the receipt shows the
     // student their whole schedule, not just this single payment.
     fee_schedule,
+    // Only the still-owed installments, for the receipt's upcoming table.
+    upcoming,
   };
 };

@@ -65,6 +65,13 @@ const projectTenantBranding = (tenant) => ({
   timezone: tenant.timezone,
   currency: tenant.currency,
   default_language: tenant.default_language,
+  // Fee-receipt config — lets the admin Receipt Settings page prefill and the
+  // admin PDF download read the same config without an extra round-trip.
+  receipt_terms: Array.isArray(tenant.receipt_terms) ? tenant.receipt_terms : [],
+  receipt_signatory_label: tenant.receipt_signatory_label ?? 'Authorized Signatory',
+  receipt_no_prefix: tenant.receipt_no_prefix ?? null,
+  receipt_no_start: tenant.receipt_no_start ?? 1,
+  receipt_no_pad: tenant.receipt_no_pad ?? 5,
 });
 
 // ---------- login ----------

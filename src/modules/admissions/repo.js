@@ -811,42 +811,83 @@ export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS }
   };
 };
 
-export const insertReceipt = async (tenant, admission_id, input, created_by) => {
-  // Auto-generate receipt_no if not supplied: RC-YYYYMMDD-<seq>
-  let receipt_no = input.receipt_no;
-  if (!receipt_no) {
-    const today = new Date();
-    const stamp = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
-    const { rows: c } = await tenantQuery(
-      tenant,
-      `SELECT count(*)::int AS n FROM admission_receipts
-        WHERE receipt_no LIKE $1 AND deleted_at IS NULL`,
-      [`RC-${stamp}-%`],
-    );
-    receipt_no = `RC-${stamp}-${String((c[0]?.n || 0) + 1).padStart(4, '0')}`;
-  }
+// Legacy fallback number: RC-YYYYMMDD-<count+1>. Kept for tenants that
+// haven't configured a receipt-number prefix, so their receipts (and every
+// receipt issued before this feature) are unaffected.
+const legacyReceiptNo = async (client) => {
+  const today = new Date();
+  const stamp = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+  const { rows: c } = await client.query(
+    `SELECT count(*)::int AS n FROM admission_receipts
+      WHERE receipt_no LIKE $1 AND deleted_at IS NULL`,
+    [`RC-${stamp}-%`],
+  );
+  return `RC-${stamp}-${String((c[0]?.n || 0) + 1).padStart(4, '0')}`;
+};
+
+// Configured number: `<prefix>-<zero-padded counter>` (e.g. 2026-01024). The
+// counter is advanced with a single atomic UPDATE ... RETURNING on the
+// singleton receipt_counters row, which serialises concurrent inserts on the
+// row lock (no COUNT(*) race). Seeded lazily from the admin-set start value on
+// first use, and only ever moves forward.
+const nextConfiguredSeq = async (client, cfg) => {
+  const start = Math.max(1, Number(cfg.start) || 1);
+  await client.query(
+    `INSERT INTO receipt_counters (id, next_seq) VALUES (1, $1)
+       ON CONFLICT (id) DO NOTHING`,
+    [start],
+  );
+  // If the admin RAISED the start above where the counter already sits, jump
+  // forward to honour it; never move backward (would risk collisions).
+  const { rows } = await client.query(
+    `UPDATE receipt_counters
+        SET next_seq = GREATEST(next_seq, $1) + 1
+      WHERE id = 1
+      RETURNING next_seq - 1 AS seq`,
+    [start],
+  );
+  return Number(rows[0].seq);
+};
+
+// receiptConfig: { prefix, start, pad } from the system tenants row. A null/
+// empty prefix means "use the legacy RC- scheme". An explicit input.receipt_no
+// always wins (e.g. imports). Number generation + the INSERT share one
+// transaction so the atomic counter is consistent with the row written.
+export const insertReceipt = async (tenant, admission_id, input, created_by, receiptConfig = null) => {
   // share_token is a 32-byte random URL-safe token. Stamped at create
   // time so the public URL is stable; rotating it would invalidate any
   // links the accounts user has already shared with the student.
   const share_token = randomToken(32);
-  const { rows } = await tenantQuery(
-    tenant,
-    `INSERT INTO admission_receipts
-       (admission_id, receipt_no, receipt_date, amount, mode_of_payment,
-        transaction_details, is_old_collection, receipt_kind, installment_no,
-        share_token, payment_screenshot_r2_key, payment_account_id, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-     RETURNING *`,
-    [admission_id, receipt_no, input.receipt_date, input.amount, input.mode_of_payment,
-     input.transaction_details ?? null, input.is_old_collection ?? false,
-     input.receipt_kind ?? 'misc',
-     input.receipt_kind === 'installment' ? (input.installment_no ?? null) : null,
-     share_token,
-     input.payment_screenshot_r2_key ?? null,
-     input.payment_account_id ?? null,
-     created_by ?? null],
-  );
-  return rows[0];
+  return tenantTx(tenant, async (client) => {
+    let receipt_no = input.receipt_no;
+    if (!receipt_no) {
+      const prefix = receiptConfig?.prefix ? String(receiptConfig.prefix).trim() : '';
+      if (prefix) {
+        const pad = Math.max(1, Number(receiptConfig?.pad) || 5);
+        const seq = await nextConfiguredSeq(client, receiptConfig);
+        receipt_no = `${prefix}-${String(seq).padStart(pad, '0')}`;
+      } else {
+        receipt_no = await legacyReceiptNo(client);
+      }
+    }
+    const { rows } = await client.query(
+      `INSERT INTO admission_receipts
+         (admission_id, receipt_no, receipt_date, amount, mode_of_payment,
+          transaction_details, is_old_collection, receipt_kind, installment_no,
+          share_token, payment_screenshot_r2_key, payment_account_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING *`,
+      [admission_id, receipt_no, input.receipt_date, input.amount, input.mode_of_payment,
+       input.transaction_details ?? null, input.is_old_collection ?? false,
+       input.receipt_kind ?? 'misc',
+       input.receipt_kind === 'installment' ? (input.installment_no ?? null) : null,
+       share_token,
+       input.payment_screenshot_r2_key ?? null,
+       input.payment_account_id ?? null,
+       created_by ?? null],
+    );
+    return rows[0];
+  });
 };
 
 export const deleteReceipt = async (tenant, id) => {

@@ -27,8 +27,11 @@ export const resolveTenantBySlug = async (slug) => {
   const cached = tenantMetaCache.get(slug);
   if (cached) return cached;
   const { rows } = await sysQuery(
-    `SELECT id, slug, name, company_name, status, db_name, db_user, db_password_encrypted, logo_url,
-            brand_primary_color, timezone, currency
+    `SELECT id, slug, name, company_name, brand_name, status, db_name, db_user, db_password_encrypted, logo_url,
+            brand_primary_color, brand_secondary_color, phone, website, email,
+            address_line1, address_line2, city, state, pincode,
+            receipt_terms, receipt_signatory_label, receipt_no_prefix, receipt_no_start, receipt_no_pad,
+            timezone, currency
        FROM tenants
       WHERE slug = $1
         AND deleted_at IS NULL
@@ -43,8 +46,11 @@ export const resolveTenantBySlug = async (slug) => {
 
 export const resolveTenantById = async (id) => {
   const { rows } = await sysQuery(
-    `SELECT id, slug, name, company_name, status, db_name, db_user, db_password_encrypted, logo_url,
-            brand_primary_color, timezone, currency
+    `SELECT id, slug, name, company_name, brand_name, status, db_name, db_user, db_password_encrypted, logo_url,
+            brand_primary_color, brand_secondary_color, phone, website, email,
+            address_line1, address_line2, city, state, pincode,
+            receipt_terms, receipt_signatory_label, receipt_no_prefix, receipt_no_start, receipt_no_pad,
+            timezone, currency
        FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
     [id],
   );

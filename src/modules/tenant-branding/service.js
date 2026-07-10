@@ -24,13 +24,20 @@ const proxyLogoUrl = (slug, key) => {
 // Update the caller's own tenant branding. `logo_r2_key` is a GCS key from a
 // prior /uploads presign+confirm (purpose 'tenant_logo'); we store the key and
 // point logo_url at the branding proxy. Pass logo_r2_key=null to clear.
-// Other branding fields (brand_name, colors) pass through if provided.
-export const updateBranding = async (tenant, { logo_r2_key, ...rest }) => {
+// Other branding fields (brand_name, colors) + fee-receipt config pass through
+// if provided.
+export const updateBranding = async (tenant, { logo_r2_key, receipt_terms, ...rest }) => {
   const updates = { ...rest };
 
   if (logo_r2_key !== undefined) {
     updates.logo_r2_key = logo_r2_key || null;
     updates.logo_url = logo_r2_key ? proxyLogoUrl(tenant.slug, logo_r2_key) : null;
+  }
+
+  // receipt_terms is a jsonb column — serialise the array so node-pg writes
+  // JSON, not a Postgres text[] literal.
+  if (receipt_terms !== undefined) {
+    updates.receipt_terms = JSON.stringify(Array.isArray(receipt_terms) ? receipt_terms : []);
   }
 
   if (!Object.keys(updates).length) {

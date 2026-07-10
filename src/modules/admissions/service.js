@@ -1,4 +1,5 @@
 import * as repo from './repo.js';
+import * as tenantsRepo from '../tenants/repo.js';
 import { notFound, forbidden } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
@@ -6,6 +7,20 @@ import { notifyUser } from '../../lib/socket.js';
 import { pushNotification } from '../notifications/service.js';
 import { logger } from '../../lib/logger.js';
 import * as events from './events-repo.js';
+
+// Receipt-number config lives on the system tenants row (see the
+// tenant_receipt_config migration). The tenant object threaded through the
+// request only carries a subset of columns, so fetch the full row to read
+// prefix/start/pad. Returns null (→ legacy RC- numbering) if unavailable.
+const getReceiptConfig = async (tenant) => {
+  try {
+    const t = await tenantsRepo.findById(tenant.id);
+    if (!t) return null;
+    return { prefix: t.receipt_no_prefix, start: t.receipt_no_start, pad: t.receipt_no_pad };
+  } catch {
+    return null; // never block receipt creation on a config lookup
+  }
+};
 
 // Field whitelist for the field_edited audit diff. We only log the
 // metadata-meaningful fields; status changes are emitted separately
@@ -153,6 +168,7 @@ export const approve = async (tenant, actor, id) => {
     try {
       const already = await repo.hasRegistrationReceipt(tenant, id);
       if (!already) {
+        const receiptConfig = await getReceiptConfig(tenant);
         const receipt = await repo.insertReceipt(tenant, id, {
           receipt_date: new Date(),
           amount: paidNow,
@@ -163,7 +179,7 @@ export const approve = async (tenant, actor, id) => {
           receipt_kind: 'registration',
           payment_screenshot_r2_key: row.payment_proof_r2_key ?? null,
           payment_account_id: row.payment_account_id ?? null,
-        }, actor?.id);
+        }, actor?.id, receiptConfig);
         events.log(tenant, {
           admission_id: id, lead_id: row.lead_id ?? null,
           event_type: events.EVENT_TYPES.RECEIPT_ADDED,
@@ -282,7 +298,8 @@ export const paymentAnalytics = (tenant, q) => repo.paymentAnalytics(tenant, q);
 export const createReceipt = async (tenant, actor, admission_id, input) => {
   const adm = await repo.findById(tenant, admission_id);
   if (!adm) throw notFound('Admission not found');
-  const row = await repo.insertReceipt(tenant, admission_id, input, actor?.id);
+  const receiptConfig = await getReceiptConfig(tenant);
+  const row = await repo.insertReceipt(tenant, admission_id, input, actor?.id, receiptConfig);
   // Build a friendly summary fragment that names what the money paid for
   // — installment N, registration, or generic — so the audit timeline
   // reads naturally.
