@@ -35,6 +35,24 @@ export const mintSetPasswordToken = async (tenant, studentId) => {
   return raw;
 };
 
+// Generate a short, human-friendly temporary password (easy to read out over
+// the phone / paste into WhatsApp). Avoids ambiguous characters (0/O, 1/l/I).
+export const generateTempPassword = () => {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const raw = randomToken(24); // base64url random source
+  let out = '';
+  for (let i = 0; i < 10; i += 1) out += chars[raw.charCodeAt(i) % chars.length];
+  return `${out.slice(0, 5)}-${out.slice(5)}`; // e.g. Kp7Rq-mN4xT
+};
+
+// Set an initial/temp password directly (no token) and ACTIVATE the student —
+// used by Accounts course-confirm so they can hand the student credentials to
+// use immediately. Clears any pending set-password token.
+export const setInitialPassword = async (tenant, studentId, plainPassword) => {
+  const hash = await argon2.hash(plainPassword, HASH_OPTS);
+  return repo.setPassword(tenant, studentId, hash); // repo.setPassword also flips status→active + clears token
+};
+
 // Absolute set-password URL the student opens. FE route: /student/set-password?token=…
 export const setPasswordUrl = (rawToken, tenantSlug) => {
   const base = env.APP_WEB_URL.replace(/\/+$/, '');

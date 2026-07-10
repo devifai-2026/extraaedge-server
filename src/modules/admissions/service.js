@@ -209,11 +209,12 @@ export const approve = async (tenant, actor, id) => {
 
 // Accounts "course-confirm": the step after approval that moves the enrolled
 // student into the LMS. Creates the authenticated `students` row from the
-// admission, mints a one-time set-password link (emailed via Brevo, and
-// returned so the FE can offer a copy-link fallback), and stamps the admission.
-// The student lands in the course's "Unassigned pool" (no batch) — the course's
-// head_trainer places them into a batch later. Idempotent: a re-confirm reuses
-// the existing student and just re-issues a fresh set-password link.
+// admission, sets a TEMPORARY PASSWORD, and returns the login credentials
+// (email + temp password) for Accounts to share with the student manually
+// (WhatsApp / call) — no email dependency. The student logs in immediately and
+// can change their password later. Lands in the course's "Unassigned pool";
+// the head_trainer places them into a batch. Idempotent: a re-confirm reissues
+// a fresh temp password so Accounts can re-share it.
 export const confirmCourse = async (tenant, actor, id) => {
   const adm = await repo.findById(tenant, id);
   if (!adm) throw notFound('Admission not found');
@@ -227,7 +228,7 @@ export const confirmCourse = async (tenant, actor, id) => {
 
   const name = [adm.first_name, adm.middle_name, adm.last_name].filter(Boolean).join(' ').trim() || email;
 
-  // Create (or reuse) the student, then mint + email a fresh set-password link.
+  // Create (or reuse) the student, then set a fresh temporary password + activate.
   const student = await studentsRepo.create(tenant, {
     admission_id: adm.id,
     program_id: adm.program_id,
@@ -236,15 +237,8 @@ export const confirmCourse = async (tenant, actor, id) => {
     phone: adm.whatsapp_number || adm.alternate_contact || null,
     created_by: actor?.id ?? null,
   });
-  const rawToken = await studentAuth.mintSetPasswordToken(tenant, student.id);
-  let emailed = false;
-  let link = studentAuth.setPasswordUrl(rawToken, tenant.slug);
-  try {
-    const r = await studentAuth.emailSetPasswordLink(tenant, student, rawToken);
-    emailed = r.emailed; link = r.url;
-  } catch (err) {
-    logger.error({ err: err.message, studentId: student.id }, 'set-password email failed (copy-link fallback available)');
-  }
+  const tempPassword = studentAuth.generateTempPassword();
+  await studentAuth.setInitialPassword(tenant, student.id, tempPassword);
 
   await repo.stampCourseConfirmed(tenant, id, actor?.id);
   events.log(tenant, {
@@ -252,14 +246,22 @@ export const confirmCourse = async (tenant, actor, id) => {
     event_type: events.EVENT_TYPES.STATUS_CHANGED,
     actor_user_id: actor?.id ?? null,
     actor_kind: events.ACTOR_KINDS.USER,
-    summary: `Course confirmed · student portal ${emailed ? 'invite emailed' : 'invite link ready'}`,
-    metadata: { student_id: student.id, program_id: adm.program_id, emailed },
+    summary: 'Course confirmed · student portal credentials issued',
+    metadata: { student_id: student.id, program_id: adm.program_id },
+    // NOTE: the temp password is intentionally NOT logged.
   });
 
+  // Credentials returned ONCE for Accounts to copy + share. The temp password
+  // is not stored in plaintext, so it can't be shown again — a re-confirm
+  // reissues a new one.
   return {
-    student: { id: student.id, name: student.name, email: student.email, status: student.status },
-    set_password_url: link,  // FE shows a "copy link" fallback
-    emailed,
+    student: { id: student.id, name: student.name, email: student.email, status: 'active' },
+    credentials: {
+      login_url: '/student/login',
+      tenant_slug: tenant.slug,
+      email: student.email,
+      temp_password: tempPassword,
+    },
   };
 };
 
