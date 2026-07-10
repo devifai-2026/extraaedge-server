@@ -79,6 +79,7 @@ const ADMISSION_COLS = `
   a.payment_amount, a.payment_verified_at, a.payment_verified_by,
   a.guided_by_counsellor_id, a.guided_by_manager_id, a.source,
   a.created_by, a.approved_by, a.approved_at,
+  a.course_confirmed_at, a.course_confirmed_by,
   a.created_at, a.updated_at
 `;
 
