@@ -211,6 +211,21 @@ export const findByIdWithRelations = async (tenant, id) => {
     const synth = Number(adm.total_fees || 0) - sumInst;
     if (synth > 0.01) registration_amount = synth;
   }
+  // Registration paid/due split (so a partial reg payment — e.g. reg 5000 but
+  // student paid 2500 now — surfaces a "2500 still to collect" balance).
+  //   - registration_paid: sum of VERIFIED registration receipts.
+  //   - registration_declared_unverified: the student's declared pay-now that
+  //     hasn't become a receipt yet (submitted, pre-approval).
+  //   - registration_due: what's still to collect against the reg amount.
+  const registration_paid = receipts.rows
+    .filter((r) => r.receipt_kind === 'registration')
+    .reduce((s, r) => s + Number(r.amount || 0), 0);
+  const hasRegReceipt = receipts.rows.some((r) => r.receipt_kind === 'registration');
+  const registration_declared_unverified = (!hasRegReceipt && Number(adm.payment_amount || 0) > 0)
+    ? Number(adm.payment_amount) : 0;
+  const registration_due = registration_amount != null
+    ? Math.max(0, registration_amount - registration_paid - registration_declared_unverified)
+    : null;
   return {
     ...adm,
     education: edu.rows,
@@ -218,6 +233,9 @@ export const findByIdWithRelations = async (tenant, id) => {
     receipts: receipts.rows,
     fee_offer: feeOffer,
     registration_amount,
+    registration_paid,                    // verified reg receipts
+    registration_declared_unverified,     // submitted-but-unverified pay-now
+    registration_due,                     // still to collect on registration
     paid_till_date,
     pending_fees: Number(adm.total_fees || 0) - paid_till_date,
   };
