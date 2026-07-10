@@ -108,6 +108,19 @@ export const requestReset = async (tenant, { email }) => {
   return { ok: true };
 };
 
+// Sudo-login as a student (org admin → student panel). No password check —
+// mints a student access token for the target. Gated to super_admin at the
+// route layer, mirroring the staff sudo-login carve-out.
+export const sudoLoginAsStudent = async (tenant, targetStudentId) => {
+  const student = await repo.findById(tenant, targetStudentId);
+  if (!student) throw notFound('Student not found');
+  return {
+    access_token: issueStudentToken(tenant, student),
+    student: { id: student.id, name: student.name, email: student.email, program_id: student.program_id },
+    tenantSlug: tenant.slug,
+  };
+};
+
 // Current student (for /student-auth/me).
 export const me = async (tenant, studentId) => {
   const student = await repo.findById(tenant, studentId);

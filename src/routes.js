@@ -78,6 +78,7 @@ import forumRouter from './modules/forum/routes.js';
 import assessmentsRouter from './modules/assessments/routes.js';
 import interviewsRouter from './modules/interviews/routes.js';
 import catalogRouter from './modules/catalog/routes.js';
+import lmsAnalyticsRouter from './modules/lms-analytics/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
@@ -209,6 +210,8 @@ export const mountRoutes = (app) => {
   api.use('/interviews', interviewsRouter);
   // LMS student course catalog + "Enrol" enquiry (raises a lead). Student-only.
   api.use('/catalog', catalogRouter);
+  // LMS admin analytics dashboards + student sudo-login (super_admin/branch_mgr).
+  api.use('/lms-analytics', lmsAnalyticsRouter);
   // Per-lead customised fee offer — accounts team's tweak of the
   // program-level defaults for a specific converted lead.
   api.use('/lead-fee-offers', leadFeeOffersRouter);
