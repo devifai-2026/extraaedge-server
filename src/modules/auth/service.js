@@ -65,6 +65,16 @@ const projectTenantBranding = (tenant) => ({
   timezone: tenant.timezone,
   currency: tenant.currency,
   default_language: tenant.default_language,
+  // Organisation contact block (shown on the fee-receipt header + editable on
+  // the admin settings page).
+  phone: tenant.phone ?? null,
+  website: tenant.website ?? null,
+  email: tenant.email ?? null,
+  address_line1: tenant.address_line1 ?? null,
+  address_line2: tenant.address_line2 ?? null,
+  city: tenant.city ?? null,
+  state: tenant.state ?? null,
+  pincode: tenant.pincode ?? null,
   // Fee-receipt config — lets the admin Receipt Settings page prefill and the
   // admin PDF download read the same config without an extra round-trip.
   receipt_terms: Array.isArray(tenant.receipt_terms) ? tenant.receipt_terms : [],

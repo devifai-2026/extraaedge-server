@@ -26,8 +26,19 @@ const proxyLogoUrl = (slug, key) => {
 // point logo_url at the branding proxy. Pass logo_r2_key=null to clear.
 // Other branding fields (brand_name, colors) + fee-receipt config pass through
 // if provided.
+// Contact/address fields where a blank string means "clear it" — normalise to
+// NULL so the receipt header omits the line rather than printing an empty one.
+const BLANK_TO_NULL = ['phone', 'website', 'email', 'address_line1', 'address_line2', 'city', 'state', 'pincode'];
+
 export const updateBranding = async (tenant, { logo_r2_key, receipt_terms, ...rest }) => {
   const updates = { ...rest };
+
+  for (const k of BLANK_TO_NULL) {
+    if (updates[k] !== undefined) {
+      const v = typeof updates[k] === 'string' ? updates[k].trim() : updates[k];
+      updates[k] = v || null;
+    }
+  }
 
   if (logo_r2_key !== undefined) {
     updates.logo_r2_key = logo_r2_key || null;
