@@ -2,7 +2,7 @@ import * as service from './service.js';
 
 export const get = async (req, res, next) => {
   try {
-    const data = await service.getForLead(req.tenant, req.params.leadId);
+    const data = await service.getForLead(req.tenant, req.params.leadId, req.user);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

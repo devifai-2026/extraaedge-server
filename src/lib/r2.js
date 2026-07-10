@@ -68,6 +68,26 @@ export const deleteObject = async (key) => {
   await bucket().file(key).delete({ ignoreNotFound: true });
 };
 
+// Stable, non-expiring public URL for an object. Only meaningful for objects
+// that are actually readable without auth (see makePublic). Used for the
+// tenant logo, which the navbar (all roles) + the public receipt render
+// directly as <img src>, so a short-lived signed URL won't do.
+export const publicUrl = (key) => `https://storage.googleapis.com/${env.GCS_BUCKET}/${key}`;
+
+// Grant public read on a single object + return its public URL. Best-effort:
+// on a uniform-bucket-level-access bucket, per-object ACLs are rejected — in
+// that case the bucket's IAM must already allow public reads, and the URL
+// still works. We swallow the ACL error so callers get the URL regardless.
+export const makePublic = async (key) => {
+  try {
+    await bucket().file(key).makePublic();
+  } catch {
+    // Uniform bucket-level access (or already public) — ignore; the public
+    // URL is valid as long as the bucket policy permits anonymous reads.
+  }
+  return publicUrl(key);
+};
+
 // Returns null on 404, mirroring the previous S3 behaviour. On success,
 // returns an object that resembles the S3 HEAD shape just enough for
 // callers (uploads/service.js reads ContentType + ContentLength).

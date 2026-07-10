@@ -4,14 +4,14 @@ import * as publicService from '../public-admissions/service.js';
 // ---------- Admissions ----------
 export const list = async (req, res, next) => {
   try {
-    const { rows, total } = await service.list(req.tenant, req.query);
+    const { rows, total } = await service.list(req.tenant, req.query, req.user);
     res.json({ data: rows, meta: { requestId: req.id, total, page: req.query.page, limit: req.query.limit } });
   } catch (err) { next(err); }
 };
 
 export const get = async (req, res, next) => {
   try {
-    const row = await service.get(req.tenant, req.params.id);
+    const row = await service.get(req.tenant, req.params.id, req.user);
     res.json({ data: row, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -48,7 +48,7 @@ export const update = async (req, res, next) => {
 // rest of the admissions router (account_manager + super_admin).
 export const timeline = async (req, res, next) => {
   try {
-    const data = await service.timeline(req.tenant, req.params.id);
+    const data = await service.timeline(req.tenant, req.params.id, req.user);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -56,7 +56,7 @@ export const timeline = async (req, res, next) => {
 // Lookup helper for the lead drawer.
 export const timelineByLead = async (req, res, next) => {
   try {
-    const data = await service.timelineByLead(req.tenant, req.params.leadId);
+    const data = await service.timelineByLead(req.tenant, req.params.leadId, req.user);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

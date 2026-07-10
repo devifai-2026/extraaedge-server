@@ -1,5 +1,6 @@
 import * as repo from './repo.js';
-import { notFound } from '../../lib/errors.js';
+import { notFound, forbidden } from '../../lib/errors.js';
+import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notifyUser } from '../../lib/socket.js';
 import { pushNotification } from '../notifications/service.js';
@@ -38,10 +39,26 @@ export const updateCenter = async (tenant, id, patch) => {
 };
 export const deleteCenter = (tenant, id) => repo.softDeleteCenter(tenant, id);
 
-export const list = (tenant, q) => repo.list(tenant, q);
-export const get = async (tenant, id) => {
+// A counsellor only ever sees admissions for leads THEY own/converted
+// (admissions.guided_by_counsellor_id = lead.assigned_to at conversion time).
+// account_manager / super_admin see all. Enforced by forcing the filter here
+// so a counsellor can't widen it via query params.
+const scopeForActor = (q, actor) => {
+  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    return { ...q, guided_by_counsellor_id: actor.id };
+  }
+  return q;
+};
+
+export const list = (tenant, q, actor) => repo.list(tenant, scopeForActor(q, actor));
+
+export const get = async (tenant, id, actor) => {
   const row = await repo.findByIdWithRelations(tenant, id);
   if (!row) throw notFound('Admission not found');
+  // Counsellors can only open their own converted students' admissions.
+  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR && row.guided_by_counsellor_id !== actor.id) {
+    throw forbidden('This admission is not in your scope');
+  }
   return row;
 };
 
@@ -316,9 +333,12 @@ export const deleteReceipt = async (tenant, id) => {
   }
 };
 
-export const timeline = async (tenant, id) => {
+export const timeline = async (tenant, id, actor) => {
   const existing = await repo.findById(tenant, id);
   if (!existing) throw notFound('Admission not found');
+  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR && existing.guided_by_counsellor_id !== actor.id) {
+    throw forbidden('This admission is not in your scope');
+  }
   return events.listByAdmission(tenant, id);
 };
 
@@ -332,7 +352,16 @@ export const timeline = async (tenant, id) => {
 // schedule, education, receipts, and money rollups) so the FE can render
 // "Payment details" and "Admission form" sections above the event log
 // without a second round-trip.
-export const timelineByLead = async (tenant, lead_id) => {
+export const timelineByLead = async (tenant, lead_id, actor) => {
+  // Counsellors can only view the admission timeline for their OWN leads.
+  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    const { rows: own } = await tenantQuery(
+      tenant,
+      `SELECT 1 FROM leads WHERE id = $1 AND assigned_to = $2 AND deleted_at IS NULL`,
+      [lead_id, actor.id],
+    );
+    if (!own[0]) throw forbidden('This lead is not in your scope');
+  }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id FROM admissions

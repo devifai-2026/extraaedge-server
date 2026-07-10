@@ -23,11 +23,12 @@ export const UPLOAD_SIZE_LIMITS = {
   admission_photo: 10 * MB,
   receipt_screenshot: 10 * MB,
   payment_qr: 10 * MB,
+  tenant_logo: 5 * MB,
 };
 const DEFAULT_UPLOAD_SIZE_LIMIT = 1024 * MB; // 1 GB fallback
 
 export const presignSchema = z.object({
-  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr']),
+  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr', 'tenant_logo']),
   content_type: z.string().min(1),
   size_bytes: z.coerce.number().int().positive().max(1024 * 1024 * 1024), // up to 1 GB signed
   ref_entity_type: z.string().optional(),
@@ -48,10 +49,10 @@ export const confirmSchema = z.object({
   r2_key: z.string().min(1),
   size_bytes: z.coerce.number().int().positive().optional(),
   checksum_sha256: z.string().optional(),
-  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr']),
+  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr', 'tenant_logo']),
   ref_entity_type: z.string().optional(),
   ref_entity_id: z.string().uuid().optional(),
-  visibility: z.enum(['private', 'tenant', 'public_signed']).default('private'),
+  visibility: z.enum(['private', 'tenant', 'public_signed', 'public']).default('private'),
 });
 
 export const idParam = z.object({ id: z.string().uuid() });

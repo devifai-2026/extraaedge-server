@@ -2,20 +2,31 @@ import * as repo from './repo.js';
 import * as discountRepo from '../lead-discounts/repo.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, forbidden } from '../../lib/errors.js';
+import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+
+// A counsellor may only touch the fee offer for a lead they own. account_manager
+// / super_admin are unrestricted. Throws forbidden otherwise.
+const assertLeadOwnership = async (tenant, lead, actor) => {
+  if (actor?.role !== SYSTEM_TENANT_ROLES.COUNSELLOR) return;
+  if (lead.assigned_to !== actor.id) {
+    throw forbidden('This lead is not assigned to you');
+  }
+};
 
 // Returns the saved offer for a lead, or null if accounts hasn't
 // configured one yet. Also returns the program's defaults so the FE
 // modal can prefill its inputs when no offer exists.
-export const getForLead = async (tenant, lead_id) => {
+export const getForLead = async (tenant, lead_id, actor) => {
   const { rows: leadRows } = await tenantQuery(
     tenant,
     `SELECT id, name, first_name, last_name, email, whatsapp_number,
-            converted_at, program_id
+            converted_at, program_id, assigned_to
        FROM leads WHERE id = $1 AND deleted_at IS NULL`,
     [lead_id],
   );
   const lead = leadRows[0];
   if (!lead) throw notFound('Lead not found');
+  await assertLeadOwnership(tenant, lead, actor);
   if (!lead.converted_at) throw forbidden('Lead has not converted yet — no offer applicable.');
 
   const offer = await repo.findByLead(tenant, lead_id);
@@ -52,10 +63,11 @@ export const getForLead = async (tenant, lead_id) => {
 export const saveOffer = async (tenant, actor, lead_id, body) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT id, converted_at FROM leads WHERE id = $1 AND deleted_at IS NULL`,
+    `SELECT id, converted_at, assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`,
     [lead_id],
   );
   if (!rows[0]) throw notFound('Lead not found');
+  await assertLeadOwnership(tenant, rows[0], actor);
   if (!rows[0].converted_at) throw forbidden('Lead has not converted yet.');
   const existing = await repo.findByLead(tenant, lead_id);
   const saved = await repo.upsert(tenant, lead_id, body, actor?.id ?? null);

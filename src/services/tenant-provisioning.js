@@ -88,6 +88,8 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
         dashboard: 'full', leads: 'full', raw_data: 'read_only', failed_leads: 'read_only',
         followups: 'full', whatsapp: 'full', bulk_upload: 'full',
         'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
+        // Scoped admissions tab: their own converted students (configure offer + send link).
+        'admissions.my_students': 'full',
       } },
       // Post-conversion account ops. No team beneath them, reports to
       // super_admin. Lead visibility is scoped server-side to converted

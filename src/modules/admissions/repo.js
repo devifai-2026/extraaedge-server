@@ -106,6 +106,9 @@ export const list = async (tenant, q = {}) => {
   const conds = ['a.deleted_at IS NULL'];
   const params = [];
   if (q.status) { params.push(q.status); conds.push(`a.status = $${params.length}`); }
+  // Counsellor scope (forced server-side in service.list): only their own
+  // converted students.
+  if (q.guided_by_counsellor_id) { params.push(q.guided_by_counsellor_id); conds.push(`a.guided_by_counsellor_id = $${params.length}`); }
   if (q.program_id) { params.push(q.program_id); conds.push(`a.program_id = $${params.length}`); }
   if (q.center_id) { params.push(q.center_id); conds.push(`a.center_id = $${params.length}`); }
   if (q.date_from) { params.push(q.date_from); conds.push(`a.admission_date >= $${params.length}`); }

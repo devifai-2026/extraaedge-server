@@ -227,4 +227,8 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // converted lead's admission status without leaving their normal
   // surfaces. Defaulted to super_admin only at provisioning time.
   'admissions.pipeline',
+  // Counsellor-facing admissions tab: shows ONLY the students they converted
+  // (scoped server-side by guided_by_counsellor_id). They configure the fee
+  // offer + send the admission link from here. Seeded to counsellor.
+  'admissions.my_students',
 ]);

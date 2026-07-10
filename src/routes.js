@@ -27,6 +27,7 @@ import leadRecordingsRouter from './modules/lead-recordings/routes.js';
 import leadAssignmentsRouter from './modules/lead-assignments/routes.js';
 import leadDiscountsRouter from './modules/lead-discounts/routes.js';
 import branchesRouter from './modules/branches/routes.js';
+import tenantBrandingRouter from './modules/tenant-branding/routes.js';
 import leadActivitiesRouter from './modules/lead-activities/routes.js';
 import leadNotesRouter from './modules/lead-notes/routes.js';
 import tagsRouter from './modules/tags/routes.js';
@@ -104,6 +105,7 @@ export const mountRoutes = (app) => {
   api.use('/users', usersRouter);
   api.use('/teams', teamsRouter);
   api.use('/branches', branchesRouter);
+  api.use('/tenant-branding', tenantBrandingRouter);
 
   // Tenant — config
   api.use('/dropdowns', dropdownsRouter);
