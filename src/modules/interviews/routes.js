@@ -35,7 +35,11 @@ router.post('/', validate({ body: z.object({
   max_marks: z.number().min(1).max(1000).optional(), categories: categorySchema, branch_id: uuid.optional().nullable(),
 }) }), controller.create);
 router.get('/:id/slots', validate({ params: idParam }), controller.listSlots);
-router.post('/:id/slots', validate({ params: idParam, body: z.object({ student_id: uuid, slot_at: z.string().optional().nullable() }) }), controller.assignSlot);
+router.post('/:id/slots', validate({ params: idParam, body: z.object({ student_id: uuid, slot_at: z.string().optional().nullable(), starts_at: z.string().optional().nullable(), ends_at: z.string().optional().nullable() }) }), controller.assignSlot);
+// Bulk-assign the same interview to many students, each with a start/end window.
+router.post('/:id/slots/bulk', validate({ params: idParam, body: z.object({
+  assignments: z.array(z.object({ student_id: uuid, starts_at: z.string().optional().nullable(), ends_at: z.string().optional().nullable() })).min(1).max(200),
+}) }), controller.assignSlots);
 router.post('/:id/assign-hr', validate({ params: idParam, body: z.object({ hr_user_id: uuid.nullable() }) }), controller.assignHr);
 router.post('/slots/:slotId/grade', validate({ params: z.object({ slotId: uuid }), body: z.object({ marks: z.number().min(0).max(1000), feedback: z.string().max(4000).optional() }) }), controller.gradeSlot);
 router.post('/slots/:slotId/score', validate({ params: z.object({ slotId: uuid }), body: z.object({ scores: z.array(z.object({ category_id: uuid, marks: z.number().min(0).max(1000), comment: z.string().max(2000).optional().nullable() })).min(1) }) }), controller.scoreSlot);

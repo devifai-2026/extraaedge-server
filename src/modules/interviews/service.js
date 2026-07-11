@@ -80,13 +80,28 @@ export const listSlots = async (tenant, actor, interviewId) => {
   return { interview: { id: iv.id, title: iv.title, max_marks: iv.max_marks, hr_user_id: iv.hr_user_id, hr_user_name: iv.hr_user_name }, categories, slots: await withScores(tenant, slots, categories) };
 };
 
-export const assignSlot = async (tenant, actor, interviewId, studentId, slotAt) => {
+export const assignSlot = async (tenant, actor, interviewId, studentId, slotAt, startsAt, endsAt) => {
   const iv = await repo.get(tenant, interviewId);
   if (!iv) throw notFound('Interview not found');
   await assertProgramTrainer(tenant, iv.program_id, actor);
-  const slot = await repo.assignSlot(tenant, interviewId, studentId, slotAt);
-  pushStudentNotification(tenant, studentId, { type: 'interview_assigned', message: `You've been assigned a mock interview: "${iv.title}".`, link: '/student/interviews', metadata: { interview_id: interviewId, slot_at: slotAt } });
+  const slot = await repo.assignSlot(tenant, interviewId, studentId, slotAt, startsAt, endsAt);
+  pushStudentNotification(tenant, studentId, { type: 'interview_assigned', message: `You've been assigned a mock interview: "${iv.title}".`, link: '/student/interviews', metadata: { interview_id: interviewId, slot_at: startsAt ?? slotAt } });
   return slot;
+};
+
+// Assign the same interview (+ its one meeting URL) to MANY students at once,
+// each with their own start/end window. Notifies every assigned student.
+export const assignSlots = async (tenant, actor, interviewId, assignments) => {
+  const iv = await repo.get(tenant, interviewId);
+  if (!iv) throw notFound('Interview not found');
+  await assertProgramTrainer(tenant, iv.program_id, actor);
+  if (!Array.isArray(assignments) || !assignments.length) throw validationError({ students: 'Select at least one student' });
+  const n = await repo.assignSlots(tenant, interviewId, assignments);
+  for (const a of assignments) {
+    if (!a.student_id) continue; // eslint-disable-line no-continue
+    pushStudentNotification(tenant, a.student_id, { type: 'interview_assigned', message: `You've been assigned a mock interview: "${iv.title}".`, link: '/student/interviews', metadata: { interview_id: interviewId, slot_at: a.starts_at ?? null } });
+  }
+  return { assigned: n };
 };
 
 export const assignHr = async (tenant, actor, interviewId, hrUserId) => {

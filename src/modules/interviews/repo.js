@@ -152,9 +152,9 @@ export const listForHr = async (tenant, hrUserId, branchScope = null) => {
 export const listSlots = async (tenant, interviewId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT s.id, s.student_id, st.name, s.slot_at, s.marks, s.feedback, s.graded_at
+    `SELECT s.id, s.student_id, st.name, s.slot_at, s.starts_at, s.ends_at, s.marks, s.feedback, s.graded_at
        FROM interview_slots s JOIN students st ON st.id = s.student_id
-      WHERE s.interview_id = $1 AND s.deleted_at IS NULL ORDER BY s.slot_at NULLS LAST, st.name`,
+      WHERE s.interview_id = $1 AND s.deleted_at IS NULL ORDER BY s.starts_at NULLS LAST, s.slot_at NULLS LAST, st.name`,
     [interviewId],
   );
   return rows;
@@ -177,16 +177,31 @@ export const finalizedInterviewMarks = async (tenant, programId) => {
   return rows;
 };
 
-export const assignSlot = async (tenant, interviewId, studentId, slotAt) => {
+export const assignSlot = async (tenant, interviewId, studentId, slotAt, startsAt = null, endsAt = null) => {
+  const start = startsAt ?? slotAt ?? null;
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO interview_slots (interview_id, student_id, slot_at)
-     VALUES ($1,$2,$3)
-     ON CONFLICT (interview_id, student_id) WHERE deleted_at IS NULL DO UPDATE SET slot_at = EXCLUDED.slot_at, updated_at = now()
+    `INSERT INTO interview_slots (interview_id, student_id, slot_at, starts_at, ends_at)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (interview_id, student_id) WHERE deleted_at IS NULL
+       DO UPDATE SET slot_at = EXCLUDED.slot_at, starts_at = EXCLUDED.starts_at, ends_at = EXCLUDED.ends_at, updated_at = now()
      RETURNING *`,
-    [interviewId, studentId, slotAt ?? null],
+    [interviewId, studentId, start, start, endsAt ?? null],
   );
   return rows[0];
+};
+
+// Bulk-assign the SAME interview (+ its one meeting URL) to many students, each
+// with their own start/end window. Returns the number of slots written.
+export const assignSlots = async (tenant, interviewId, assignments) => {
+  let n = 0;
+  for (const a of assignments) {
+    if (!a.student_id) continue; // eslint-disable-line no-continue
+    // eslint-disable-next-line no-await-in-loop
+    await assignSlot(tenant, interviewId, a.student_id, a.starts_at ?? null, a.starts_at ?? null, a.ends_at ?? null);
+    n += 1;
+  }
+  return n;
 };
 
 export const gradeSlot = async (tenant, slotId, marks, feedback, graderId) => {
@@ -256,10 +271,10 @@ export const programStudents = async (tenant, programId) => {
 export const studentSlots = async (tenant, studentId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT s.id, s.interview_id, i.title, i.meeting_url, s.slot_at, s.marks, s.feedback, s.graded_at, i.max_marks
+    `SELECT s.id, s.interview_id, i.title, i.meeting_url, s.slot_at, s.starts_at, s.ends_at, s.marks, s.feedback, s.graded_at, i.max_marks
        FROM interview_slots s JOIN mock_interviews i ON i.id = s.interview_id
       WHERE s.student_id = $1 AND s.deleted_at IS NULL AND i.deleted_at IS NULL
-      ORDER BY s.slot_at NULLS LAST`,
+      ORDER BY s.starts_at NULLS LAST, s.slot_at NULLS LAST`,
     [studentId],
   );
   return rows;
