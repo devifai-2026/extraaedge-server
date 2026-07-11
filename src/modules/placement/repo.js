@@ -192,8 +192,11 @@ export const fireToStudents = async (tenant, openingId, studentIds, actorId) => 
 export const listApplications = async (tenant, openingId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT a.id, a.student_id, st.name, st.email, st.cv_r2_key, a.status, a.note, a.offer_ctc, a.applied_at, a.created_at
-       FROM job_applications a JOIN students st ON st.id = a.student_id
+    `SELECT a.id, a.student_id, st.name, st.email, st.cv_r2_key, a.status, a.note, a.offer_ctc,
+            a.stage_id, ps.name AS stage_name, ps.kind AS stage_kind, a.applied_at, a.created_at
+       FROM job_applications a
+       JOIN students st ON st.id = a.student_id
+       LEFT JOIN placement_stages ps ON ps.id = a.stage_id
       WHERE a.opening_id = $1 ORDER BY st.name`,
     [openingId],
   );
@@ -217,6 +220,79 @@ export const setApplicationStatus = async (tenant, applicationId, status, note, 
 export const applicationById = async (tenant, id) => {
   const { rows } = await tenantQuery(tenant, `SELECT * FROM job_applications WHERE id=$1`, [id]);
   return rows[0] || null;
+};
+
+// ---------- Dynamic pipeline stages (tenant-defined, no seed) ----------
+export const listStages = async (tenant, branchScope = null) => {
+  const params = [];
+  let where = 'deleted_at IS NULL';
+  if (Array.isArray(branchScope) && branchScope.length) {
+    params.push(branchScope); where += ` AND (branch_id IS NULL OR branch_id = ANY($${params.length}))`;
+  }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, name, kind, order_index, branch_id FROM placement_stages WHERE ${where} ORDER BY order_index, created_at`,
+    params,
+  );
+  return rows;
+};
+
+export const createStage = async (tenant, s, actorId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO placement_stages (name, kind, order_index, branch_id, created_by)
+     VALUES ($1,$2,$3,$4,$5) RETURNING id, name, kind, order_index, branch_id`,
+    [s.name, s.kind || 'in_progress', s.order_index ?? 0, s.branch_id ?? null, actorId ?? null],
+  );
+  return rows[0];
+};
+
+export const updateStage = async (tenant, id, s) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE placement_stages SET
+        name = COALESCE($2,name), kind = COALESCE($3,kind), order_index = COALESCE($4,order_index), updated_at = now()
+      WHERE id=$1 AND deleted_at IS NULL RETURNING id, name, kind, order_index, branch_id`,
+    [id, s.name ?? null, s.kind ?? null, s.order_index ?? null],
+  );
+  return rows[0] || null;
+};
+
+export const deleteStage = async (tenant, id) => {
+  await tenantQuery(tenant, `UPDATE placement_stages SET deleted_at = now() WHERE id=$1`, [id]);
+};
+
+export const stageById = async (tenant, id) => {
+  const { rows } = await tenantQuery(tenant, `SELECT id, name, kind, order_index, branch_id FROM placement_stages WHERE id=$1 AND deleted_at IS NULL`, [id]);
+  return rows[0] || null;
+};
+
+// Move an application to a stage + append a timestamped history row (stage name
+// and kind are denormalized so the trail survives a later stage rename/delete).
+export const moveApplicationStage = async (tenant, applicationId, stage, reason, actorId) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE job_applications SET stage_id=$2, status=$3, note=COALESCE($4,note), updated_at=now() WHERE id=$1`,
+    [applicationId, stage.id, stage.kind === 'rejected' ? 'rejected' : (stage.kind === 'success' ? 'selected' : 'shortlisted'), reason ?? null],
+  );
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO application_stage_history (application_id, stage_id, stage_name, stage_kind, reason, moved_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [applicationId, stage.id, stage.name, stage.kind, reason ?? null, actorId ?? null],
+  );
+  return rows[0];
+};
+
+export const applicationHistory = async (tenant, applicationId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT h.id, h.stage_id, h.stage_name, h.stage_kind, h.reason, h.created_at, u.name AS moved_by_name
+       FROM application_stage_history h LEFT JOIN users u ON u.id = h.moved_by
+      WHERE h.application_id = $1 ORDER BY h.created_at`,
+    [applicationId],
+  );
+  return rows;
 };
 
 // ---------- Counts (dashboard) ----------

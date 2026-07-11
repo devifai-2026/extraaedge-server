@@ -63,4 +63,12 @@ router.delete('/openings/:id', validate({ params: idParam }), controller.deleteO
 router.get('/openings/:id/applications', validate({ params: idParam }), controller.listApplications);
 router.post('/applications/:id/status', validate({ params: idParam, body: z.object({ status: z.enum(['fired', 'applied', 'shortlisted', 'offer', 'selected', 'rejected']), note: z.string().max(2000).optional(), offer_ctc: z.string().max(120).optional().nullable() }) }), controller.setApplicationStatus);
 
+// Dynamic pipeline stages (tenant-defined, no seed) + candidate stage moves.
+router.get('/stages', controller.listStages);
+router.post('/stages', validate({ body: z.object({ name: z.string().min(1).max(120), kind: z.enum(['in_progress', 'success', 'rejected']).optional(), order_index: z.coerce.number().int().optional(), branch_id: uuid.optional().nullable() }) }), controller.createStage);
+router.put('/stages/:id', validate({ params: idParam, body: z.object({ name: z.string().min(1).max(120).optional(), kind: z.enum(['in_progress', 'success', 'rejected']).optional(), order_index: z.coerce.number().int().optional() }) }), controller.updateStage);
+router.delete('/stages/:id', validate({ params: idParam }), controller.deleteStage);
+router.post('/applications/:id/move', validate({ params: idParam, body: z.object({ stage_id: uuid, reason: z.string().max(2000).optional().nullable() }) }), controller.moveStage);
+router.get('/applications/:id/history', validate({ params: idParam }), controller.applicationHistory);
+
 export default router;

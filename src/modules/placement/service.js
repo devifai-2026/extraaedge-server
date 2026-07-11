@@ -143,6 +143,45 @@ export const setApplicationStatus = async (tenant, actor, applicationId, status,
   return repo.setApplicationStatus(tenant, applicationId, status, note, offerCtc);
 };
 
+// ---------- Dynamic stages (tenant-defined pipeline) ----------
+export const listStages = async (tenant, actor, branchId) => {
+  const scope = await resolveScope(tenant, actor, branchId);
+  return repo.listStages(tenant, scope);
+};
+export const createStage = async (tenant, actor, input) => {
+  if (!input.name || !String(input.name).trim()) throw validationError({ name: 'Stage name is required' });
+  const kind = ['in_progress', 'success', 'rejected'].includes(input.kind) ? input.kind : 'in_progress';
+  const branch_id = await resolveWriteBranch(tenant, actor, input.branch_id);
+  return repo.createStage(tenant, { name: input.name.trim(), kind, order_index: input.order_index, branch_id }, actor?.id);
+};
+export const updateStage = async (tenant, actor, id, input) => {
+  if (input.kind && !['in_progress', 'success', 'rejected'].includes(input.kind)) throw validationError({ kind: 'Invalid stage kind' });
+  const row = await repo.updateStage(tenant, id, input);
+  if (!row) throw notFound('Stage not found');
+  return row;
+};
+export const deleteStage = async (tenant, actor, id) => { await repo.deleteStage(tenant, id); return { ok: true }; };
+
+// Move a candidate to a stage. A 'rejected'-kind stage REQUIRES a reason
+// (candidate dropped / client dropped / rejected). Every move is recorded with
+// a timestamp in the application's history.
+export const moveStage = async (tenant, actor, applicationId, stageId, reason) => {
+  const a = await repo.applicationById(tenant, applicationId);
+  if (!a) throw notFound('Application not found');
+  const stage = await repo.stageById(tenant, stageId);
+  if (!stage) throw notFound('Stage not found');
+  if (stage.kind === 'rejected' && !(reason && String(reason).trim())) {
+    throw validationError({ reason: 'A reason is required when rejecting or dropping a candidate.' });
+  }
+  return repo.moveApplicationStage(tenant, applicationId, stage, reason?.trim?.() ?? reason ?? null, actor?.id);
+};
+
+export const applicationHistory = async (tenant, actor, applicationId) => {
+  const a = await repo.applicationById(tenant, applicationId);
+  if (!a) throw notFound('Application not found');
+  return repo.applicationHistory(tenant, applicationId);
+};
+
 // ---------- Student ----------
 export const studentFeed = async (tenant, studentId) => {
   const branchId = await repo.studentBranchId(tenant, studentId);
