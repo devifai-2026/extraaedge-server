@@ -102,5 +102,6 @@ export const studentFeed = async (tenant, studentId) => {
 export const applyToOpening = async (tenant, studentId, openingId) => {
   const o = await repo.getOpening(tenant, openingId);
   if (!o) throw notFound('Opening not found');
+  if (o.status !== 'open') throw validationError({ opening: 'This opening is closed.' });
   return repo.applyToOpening(tenant, openingId, studentId);
 };

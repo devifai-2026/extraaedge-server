@@ -15,7 +15,7 @@ export const list = async (tenant, programId) => {
     tenant,
     `SELECT i.id, i.title, i.meeting_url, i.max_marks, i.created_at,
             (SELECT count(*)::int FROM interview_slots s WHERE s.interview_id = i.id AND s.deleted_at IS NULL) AS slot_count,
-            (SELECT count(*)::int FROM interview_slots s WHERE s.interview_id = i.id AND s.deleted_at IS NULL AND s.marks IS NOT NULL) AS graded_count
+            (SELECT count(*)::int FROM interview_slots s WHERE s.interview_id = i.id AND s.deleted_at IS NULL AND s.graded_at IS NOT NULL) AS graded_count
        FROM mock_interviews i
       WHERE i.program_id = $1 AND i.deleted_at IS NULL ORDER BY i.created_at DESC`,
     [programId],
@@ -88,13 +88,28 @@ export const upsertSlotScore = async (tenant, slotId, categoryId, marks, userId)
   );
 };
 
+// Recompute the slot roll-up. `marks` always reflects the running sum so graders
+// see progress, but the slot is only FINALIZED (graded_at set) once every rubric
+// category has a score — a slot with the HR soft-skill category still pending
+// stays graded_at = NULL and is excluded from the leaderboard (see
+// finalizedInterviewMarks). If a category is later cleared, graded_at reverts.
 export const recomputeSlotTotal = async (tenant, slotId, graderId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `UPDATE interview_slots SET
+    `WITH cats AS (
+       SELECT count(*)::int AS total
+         FROM interview_categories c
+         JOIN interview_slots s ON s.id = $1
+        WHERE c.interview_id = s.interview_id
+     ), scored AS (
+       SELECT count(*)::int AS done FROM interview_slot_scores WHERE slot_id = $1
+     )
+     UPDATE interview_slots s SET
         marks = COALESCE((SELECT sum(marks) FROM interview_slot_scores WHERE slot_id = $1), 0),
-        graded_by = $2, graded_at = now(), updated_at = now()
-      WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+        graded_by = $2,
+        graded_at = CASE WHEN (SELECT total FROM cats) > 0 AND (SELECT done FROM scored) >= (SELECT total FROM cats) THEN now() ELSE NULL END,
+        updated_at = now()
+      WHERE s.id = $1 AND s.deleted_at IS NULL RETURNING *`,
     [slotId, graderId ?? null],
   );
   return rows[0] || null;
@@ -127,10 +142,27 @@ export const listForHr = async (tenant, hrUserId) => {
 export const listSlots = async (tenant, interviewId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT s.id, s.student_id, st.name, s.slot_at, s.marks, s.feedback
+    `SELECT s.id, s.student_id, st.name, s.slot_at, s.marks, s.feedback, s.graded_at
        FROM interview_slots s JOIN students st ON st.id = s.student_id
       WHERE s.interview_id = $1 AND s.deleted_at IS NULL ORDER BY s.slot_at NULLS LAST, st.name`,
     [interviewId],
+  );
+  return rows;
+};
+
+// Per-student SUM of interview marks for a program, counting ONLY finalized
+// slots (graded_at IS NOT NULL — all rubric categories scored, or a flat grade).
+// Used by the leaderboard so a slot awaiting HR soft-skill scores doesn't count.
+export const finalizedInterviewMarks = async (tenant, programId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT s.student_id, COALESCE(sum(s.marks),0)::numeric AS m
+       FROM interview_slots s
+       JOIN mock_interviews i ON i.id = s.interview_id
+      WHERE i.program_id = $1 AND i.deleted_at IS NULL AND s.deleted_at IS NULL
+        AND s.graded_at IS NOT NULL AND s.marks IS NOT NULL
+      GROUP BY s.student_id`,
+    [programId],
   );
   return rows;
 };
@@ -195,7 +227,7 @@ export const programStudents = async (tenant, programId) => {
 export const studentSlots = async (tenant, studentId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT s.id, i.title, i.meeting_url, s.slot_at, s.marks, s.feedback, i.max_marks
+    `SELECT s.id, s.interview_id, i.title, i.meeting_url, s.slot_at, s.marks, s.feedback, s.graded_at, i.max_marks
        FROM interview_slots s JOIN mock_interviews i ON i.id = s.interview_id
       WHERE s.student_id = $1 AND s.deleted_at IS NULL AND i.deleted_at IS NULL
       ORDER BY s.slot_at NULLS LAST`,

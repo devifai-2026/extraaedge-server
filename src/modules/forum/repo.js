@@ -10,9 +10,14 @@ export const createThread = async (tenant, { program_id, student_id, title, body
   return rows[0];
 };
 
-// Feed for a program with author name + reply count. `mineStudentId` marks the
-// student's own threads.
-export const listThreads = async (tenant, programId) => {
+// Feed for a program with author name + reply count. When `studentId` is passed
+// (the student self-view), the feed is scoped to that student's own threads — a
+// student must never see a classmate's doubts. Trainers/admins omit it to see
+// every thread on the course.
+export const listThreads = async (tenant, programId, studentId = null) => {
+  const params = [programId];
+  let mineClause = '';
+  if (studentId) { params.push(studentId); mineClause = ` AND th.student_id = $${params.length}`; }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT th.id, th.title, th.body, th.status, th.mentions, th.created_at,
@@ -20,9 +25,9 @@ export const listThreads = async (tenant, programId) => {
             (SELECT count(*)::int FROM forum_replies r WHERE r.thread_id = th.id AND r.deleted_at IS NULL) AS reply_count
        FROM forum_threads th
        JOIN students s ON s.id = th.student_id
-      WHERE th.program_id = $1 AND th.deleted_at IS NULL
+      WHERE th.program_id = $1 AND th.deleted_at IS NULL${mineClause}
       ORDER BY th.created_at DESC`,
-    [programId],
+    params,
   );
   return rows;
 };

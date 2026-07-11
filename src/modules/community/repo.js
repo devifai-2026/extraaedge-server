@@ -183,12 +183,22 @@ export const studentProgram = async (tenant, studentId) => {
   return rows[0] || null;
 };
 
-// Is a student allowed to view/comment on an announcement (their program)?
+// Is a student allowed to view/comment on an announcement? Must match their
+// program AND — for a batch-targeted announcement — their batch. This mirrors
+// the feed predicate in listAnnouncements so comment/like can't reach a
+// different batch's announcement.
 export const studentCanSeeAnnouncement = async (tenant, announcementId, studentId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT 1 FROM announcements a JOIN students s ON s.id = $2
-      WHERE a.id = $1 AND a.deleted_at IS NULL AND a.program_id = s.program_id LIMIT 1`,
+    `SELECT 1
+       FROM announcements a
+       JOIN students s ON s.id = $2
+      WHERE a.id = $1 AND a.deleted_at IS NULL
+        AND a.program_id = s.program_id
+        AND (a.batch_id IS NULL OR a.batch_id IN (
+              SELECT bs.batch_id FROM batch_students bs
+               WHERE bs.student_id = s.id AND bs.deleted_at IS NULL))
+      LIMIT 1`,
     [announcementId, studentId],
   );
   return rows.length > 0;

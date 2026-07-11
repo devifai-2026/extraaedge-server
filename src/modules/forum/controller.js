@@ -13,7 +13,7 @@ export const myThreads = async (req, res, next) => {
   try { ok(res, req, await service.listMyThreads(req.tenant, req.student.id)); } catch (e) { next(e); }
 };
 export const studentReplies = async (req, res, next) => {
-  try { ok(res, req, await service.repliesFor(req.tenant, req.params.id)); } catch (e) { next(e); }
+  try { ok(res, req, await service.studentRepliesFor(req.tenant, req.student.id, req.params.id)); } catch (e) { next(e); }
 };
 export const studentReply = async (req, res, next) => {
   try { ok(res, req, await service.replyAsStudent(req.tenant, req.student.id, req.params.id, req.body.body), 201); } catch (e) { next(e); }

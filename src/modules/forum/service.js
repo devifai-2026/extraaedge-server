@@ -53,14 +53,21 @@ export const createThread = async (tenant, studentId, input) => {
 export const listMyThreads = async (tenant, studentId) => {
   const programId = await repo.studentProgram(tenant, studentId);
   if (!programId) return [];
-  return repo.listThreads(tenant, programId);
+  // Scope to the student's OWN threads — never a classmate's.
+  return repo.listThreads(tenant, programId, studentId);
+};
+
+// A student may only read replies on a thread they own.
+export const studentRepliesFor = async (tenant, studentId, threadId) => {
+  const thread = await repo.getThread(tenant, threadId);
+  if (!thread || String(thread.student_id) !== String(studentId)) throw notFound('Thread not found');
+  return repo.listReplies(tenant, threadId);
 };
 
 export const replyAsStudent = async (tenant, studentId, threadId, body) => {
   const thread = await repo.getThread(tenant, threadId);
-  if (!thread) throw notFound('Thread not found');
-  const programId = await repo.studentProgram(tenant, studentId);
-  if (thread.program_id !== programId) throw forbidden('Not your course');
+  // Ownership check (not just same-course) — a student replies only on their own thread.
+  if (!thread || String(thread.student_id) !== String(studentId)) throw notFound('Thread not found');
   return repo.addReply(tenant, threadId, { kind: 'student', id: studentId }, body);
 };
 

@@ -40,15 +40,30 @@ export const assignableHr = async (tenant, actor) => {
   return repo.assignableHr(tenant);
 };
 
-// A slot with its per-category scores attached.
-const withScores = async (tenant, slots) => Promise.all(slots.map(async (s) => ({ ...s, scores: await repo.slotScores(tenant, s.id) })));
+// A slot with its per-category scores attached, plus completeness flags:
+// `complete` = every rubric category scored (or flat-graded); `pending_hr` =
+// an HR soft-skill category still needs a score. A slot is only final when
+// complete (see recomputeSlotTotal / the leaderboard).
+const decorateSlot = (slot, scores, categories) => {
+  const scoredIds = new Set(scores.map((sc) => String(sc.category_id)));
+  const total = categories.length;
+  const pendingCats = categories.filter((c) => !scoredIds.has(String(c.id)));
+  const complete = total > 0 ? pendingCats.length === 0 : !!slot.graded_at;
+  const pending_hr = pendingCats.some((c) => c.scored_by === 'hr');
+  const pending_trainer = pendingCats.some((c) => c.scored_by === 'trainer');
+  return { ...slot, scores, complete, pending_hr, pending_trainer };
+};
+const withScores = async (tenant, slots, categories = null) => Promise.all(slots.map(async (s) => {
+  const cats = categories ?? [];
+  return decorateSlot(s, await repo.slotScores(tenant, s.id), cats);
+}));
 
 export const listSlots = async (tenant, actor, interviewId) => {
   const iv = await repo.get(tenant, interviewId);
   if (!iv) throw notFound('Interview not found');
   await assertProgramTrainer(tenant, iv.program_id, actor);
   const [slots, categories] = await Promise.all([repo.listSlots(tenant, interviewId), repo.listCategories(tenant, interviewId)]);
-  return { interview: { id: iv.id, title: iv.title, max_marks: iv.max_marks, hr_user_id: iv.hr_user_id, hr_user_name: iv.hr_user_name }, categories, slots: await withScores(tenant, slots) };
+  return { interview: { id: iv.id, title: iv.title, max_marks: iv.max_marks, hr_user_id: iv.hr_user_id, hr_user_name: iv.hr_user_name }, categories, slots: await withScores(tenant, slots, categories) };
 };
 
 export const assignSlot = async (tenant, actor, interviewId, studentId, slotAt) => {
@@ -112,12 +127,18 @@ export const hrQueue = async (tenant, actor) => {
   const interviews = await repo.listForHr(tenant, actor?.id);
   return Promise.all(interviews.map(async (iv) => {
     const [slots, categories] = await Promise.all([repo.listSlots(tenant, iv.id), repo.listCategories(tenant, iv.id)]);
-    return { ...iv, categories, slots: await withScores(tenant, slots) };
+    return { ...iv, categories, slots: await withScores(tenant, slots, categories) };
   }));
 };
 
 // ---------- Student ----------
 export const studentSlots = async (tenant, studentId) => {
   const slots = await repo.studentSlots(tenant, studentId);
-  return withScores(tenant, slots);
+  // Categories vary per interview — fetch each interview's rubric once.
+  const byInterview = new Map();
+  await Promise.all([...new Set(slots.map((s) => s.interview_id))].map(async (iid) => {
+    byInterview.set(String(iid), await repo.listCategories(tenant, iid));
+  }));
+  return Promise.all(slots.map(async (s) =>
+    decorateSlot(s, await repo.slotScores(tenant, s.id), byInterview.get(String(s.interview_id)) ?? [])));
 };
