@@ -259,8 +259,18 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'student.catalog',
   'student.materials',
   'student.certificate',
+  'student.jobs',
   // LMS analytics dashboards — super_admin + branch_manager (branch-scoped).
   'lms.analytics',
+  // HR department (operations: interview scoring, certificates).
+  'hr.dashboard',
+  'hr.interviews',
+  'hr.certificates',
+  // Placement department (companies, job openings, applications).
+  'placement.dashboard',
+  'placement.companies',
+  'placement.openings',
+  'placement.applications',
 ]);
 
 // LMS tenant roles (teaching staff + the authenticated learner). Kept separate
@@ -271,6 +281,8 @@ export const LMS_TENANT_ROLES = Object.freeze({
   HEAD_TRAINER: 'head_trainer',
   TRAINER: 'trainer',
   STUDENT: 'student',
+  HR: 'hr',
+  PLACEMENT: 'placement',
 });
 
 // Tab bundles per LMS role — used by provisioning + the seed migration so the
@@ -287,5 +299,11 @@ export const HEAD_TRAINER_TAB_KEYS = Object.freeze([
 export const STUDENT_TAB_KEYS = Object.freeze([
   'student.home', 'student.classes', 'student.forum', 'student.tests',
   'student.projects', 'student.leaderboard', 'student.catalog',
-  'student.materials', 'student.certificate',
+  'student.materials', 'student.certificate', 'student.jobs',
+]);
+export const HR_TAB_KEYS = Object.freeze([
+  'hr.dashboard', 'hr.interviews', 'hr.certificates',
+]);
+export const PLACEMENT_TAB_KEYS = Object.freeze([
+  'placement.dashboard', 'placement.companies', 'placement.openings', 'placement.applications',
 ]);

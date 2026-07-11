@@ -16,7 +16,7 @@ import { z } from 'zod';
 // separate principal created via Accounts course-confirm, never as a staff user.
 const roleBucket = z.enum([
   'super_admin', 'branch_manager', 'sales_manager', 'counsellor', 'account_manager',
-  'head_trainer', 'trainer',
+  'head_trainer', 'trainer', 'hr', 'placement',
 ]);
 
 export const createUserSchema = z.object({

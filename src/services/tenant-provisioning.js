@@ -7,6 +7,7 @@ import { logger } from '../lib/logger.js';
 import {
   DEFAULT_BUSINESS_HOURS, DEFAULT_TAB_KEYS, CALL_DISPOSITIONS,
   HEAD_TRAINER_TAB_KEYS, TRAINER_TAB_KEYS, STUDENT_TAB_KEYS,
+  HR_TAB_KEYS, PLACEMENT_TAB_KEYS,
 } from '../config/constants.js';
 
 const { Client } = pg;
@@ -108,6 +109,10 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       { name: 'trainer', description: 'Teaches assigned modules of a course', scope: 'trainer', is_system: true, tab_permissions: Object.fromEntries(TRAINER_TAB_KEYS.map((t) => [t, 'full'])) },
       // student is the authenticated learner (email+password, separate JWT).
       { name: 'student', description: 'Enrolled learner — student panel access', scope: 'student', is_system: true, tab_permissions: Object.fromEntries(STUDENT_TAB_KEYS.map((t) => [t, 'full'])) },
+      // hr runs operations: mock-interview soft-skill scoring + certificate issuance.
+      { name: 'hr', description: 'HR — interview evaluation + certificates', scope: 'hr', is_system: true, tab_permissions: Object.fromEntries(HR_TAB_KEYS.map((t) => [t, 'full'])) },
+      // placement team: companies, job openings, applications, criteria firing.
+      { name: 'placement', description: 'Placement — companies, openings, applications', scope: 'placement', is_system: true, tab_permissions: Object.fromEntries(PLACEMENT_TAB_KEYS.map((t) => [t, 'full'])) },
     ];
     const roleIds = {};
     for (const r of roleBundles) {

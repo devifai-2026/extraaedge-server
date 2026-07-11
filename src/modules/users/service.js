@@ -227,7 +227,7 @@ export const createUser = async (tenant, input, actor) => {
   if (ids.length) await repo.setManagers(tenant, user.id, ids);
   // Additional branches for teaching staff (multi-branch). insert() ignores
   // branch_ids (explicit column list), so we sync the join table here.
-  if (['head_trainer', 'trainer'].includes(role) && Array.isArray(input.branch_ids)) {
+  if (['head_trainer', 'trainer', 'hr', 'placement'].includes(role) && Array.isArray(input.branch_ids)) {
     await repo.setUserBranches(tenant, user.id, input.branch_ids);
   }
 
@@ -343,7 +343,7 @@ export const updateUser = async (tenant, id, updates, actor) => {
   delete patch.branch_ids;
   const result = await repo.update(tenant, id, patch);
   const effRole = updates.role ?? existing.role;
-  if (['head_trainer', 'trainer'].includes(effRole) && Array.isArray(branchIds)) {
+  if (['head_trainer', 'trainer', 'hr', 'placement'].includes(effRole) && Array.isArray(branchIds)) {
     await repo.setUserBranches(tenant, id, branchIds);
   }
 
