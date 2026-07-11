@@ -32,6 +32,8 @@ router.get('/', controller.listCourses);
 // all users; this returns just head_trainer/trainer users). MUST be before the
 // /:programId route so it isn't captured as a programId.
 router.get('/assignable-staff', controller.assignableStaff);
+// Trainer dashboard insights (totals + student roster across the actor's courses).
+router.get('/insights', controller.trainerInsights);
 router.get('/:programId', validate({ params: programParam }), controller.getCourse);
 
 // Modules
@@ -55,6 +57,11 @@ router.post('/:programId/trainers', validate({ params: programParam, body: z.obj
   user_id: uuid, role: z.enum(['head', 'trainer']).optional(), module_id: uuid.nullable().optional(),
 }) }), controller.addTrainer);
 router.delete('/:programId/trainers/:id', validate({ params: z.object({ programId: uuid, id: uuid }) }), controller.removeTrainer);
+// Head/admin creates a NEW teaching user and binds them to this course.
+router.post('/:programId/create-trainer', validate({ params: programParam, body: z.object({
+  name: z.string().min(1).max(160), email: z.string().email(), password: z.string().min(10),
+  role: z.enum(['head', 'trainer']).default('trainer'), module_id: uuid.nullable().optional(),
+}) }), controller.createTrainer);
 
 // Batches
 router.get('/:programId/batches', validate({ params: programParam }), controller.listBatches);
@@ -64,8 +71,9 @@ router.post('/:programId/batches', validate({ params: programParam, body: z.obje
 router.get('/:programId/batches/:batchId/students', validate({ params: z.object({ programId: uuid, batchId: uuid }) }), controller.listBatchStudents);
 router.get('/:programId/unassigned-students', validate({ params: programParam }), controller.listUnassignedStudents);
 router.post('/:programId/batches/place', validate({ params: programParam, body: z.object({
-  batch_id: uuid, student_id: uuid, share_recordings: z.boolean().optional(),
+  batch_id: uuid, student_id: uuid.optional(), student_ids: z.array(uuid).optional(), share_recordings: z.boolean().optional(),
 }) }), controller.placeStudent);
+router.post('/:programId/batches/:batchId/complete', validate({ params: z.object({ programId: uuid, batchId: uuid }) }), controller.completeBatch);
 router.post('/:programId/batches/merge', validate({ params: programParam, body: z.object({
   source_batch_id: uuid, target_batch_id: uuid, share_recordings: z.boolean().optional(),
 }) }), controller.mergeBatches);

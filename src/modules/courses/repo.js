@@ -169,6 +169,50 @@ export const attendanceHistory = async (tenant, programId) => {
   });
 };
 
+export const firstBranchId = async (tenant) => {
+  const { rows } = await tenantQuery(tenant, `SELECT id FROM branches WHERE deleted_at IS NULL ORDER BY created_at LIMIT 1`, []);
+  return rows[0]?.id || null;
+};
+
+export const setBatchCompleted = async (tenant, batchId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE batches SET status = 'completed', end_date = COALESCE(end_date, CURRENT_DATE), updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+    [batchId],
+  );
+  return rows[0];
+};
+
+// ---------- Dashboard insights (across a trainer's courses) ----------
+export const countStudentsForPrograms = async (tenant, programIds) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE status = 'active')::int AS active
+       FROM students WHERE program_id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+    [programIds],
+  );
+  return rows[0] || { total: 0, active: 0 };
+};
+
+// Recent students (for the avatar roster) with their batch + photo key.
+export const studentsForPrograms = async (tenant, programIds, limit = 24) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT s.id, s.name, s.email, s.status, s.photo_r2_key, p.name AS program_name,
+            (SELECT b.name FROM batch_students bs JOIN batches b ON b.id = bs.batch_id
+              WHERE bs.student_id = s.id AND bs.deleted_at IS NULL ORDER BY bs.joined_at DESC LIMIT 1) AS batch_name
+       FROM students s
+       LEFT JOIN programs p ON p.id = s.program_id
+      WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL
+      ORDER BY s.created_at DESC
+      LIMIT $2`,
+    [programIds, limit],
+  );
+  return rows;
+};
+
 // Teaching staff who can be added to a course roster (head_trainer / trainer),
 // so a head trainer (who can't list all users) can populate the picker.
 export const assignableStaff = async (tenant) => {

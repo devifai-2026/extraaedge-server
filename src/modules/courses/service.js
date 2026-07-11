@@ -7,7 +7,11 @@
 // Scope is enforced here via course_trainers membership (the trainer-scope
 // key), mirroring the admissions guided_by_counsellor_id pattern.
 import * as repo from './repo.js';
+import * as usersService from '../users/service.js';
+import * as usersRepo from '../users/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
+import { getDownloadSignedUrl } from '../../lib/r2.js';
+import { env } from '../../config/env.js';
 import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 
 const isSuperAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN;
@@ -97,6 +101,31 @@ export const attendanceHistory = async (tenant, actor, programId) => {
   return repo.attendanceHistory(tenant, programId);
 };
 
+// Trainer-dashboard insights: totals + a student roster (avatars) across the
+// courses the actor teaches (admins see all).
+export const trainerInsights = async (tenant, actor) => {
+  const courses = await repo.listCourses(tenant, { trainerId: isSuperAdmin(actor) ? undefined : actor?.id });
+  const programIds = courses.map((c) => c.id);
+  const zero = { courses: courses.length, modules: 0, batches: 0, students: 0, active_students: 0 };
+  if (!programIds.length) return { totals: zero, students: [] };
+  const [counts, roster] = await Promise.all([
+    repo.countStudentsForPrograms(tenant, programIds),
+    repo.studentsForPrograms(tenant, programIds, 24),
+  ]);
+  const students = await Promise.all(roster.map(async (s) => ({
+    id: s.id, name: s.name, status: s.status, batch_name: s.batch_name, program_name: s.program_name,
+    photo_url: s.photo_r2_key ? await getDownloadSignedUrl({ key: s.photo_r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS }).catch(() => null) : null,
+  })));
+  const totals = {
+    courses: courses.length,
+    modules: courses.reduce((a, c) => a + (Number(c.module_count) || 0), 0),
+    batches: courses.reduce((a, c) => a + (Number(c.batch_count) || 0), 0),
+    students: counts.total || 0,
+    active_students: counts.active || 0,
+  };
+  return { totals, students };
+};
+
 // ---------- Batches (head_trainer / admin only) ----------
 export const listBatches = async (tenant, actor, programId) => {
   await assertCanRead(tenant, programId, actor);
@@ -122,9 +151,39 @@ export const placeStudent = async (tenant, actor, programId, input) => {
   await assertCanManage(tenant, programId, actor);
   const batch = await repo.getBatch(tenant, input.batch_id);
   if (!batch || batch.program_id !== programId) throw validationError({ batch_id: 'Batch not in this course' });
-  return repo.placeStudentInBatch(tenant, {
-    batchId: input.batch_id, studentId: input.student_id, shareRecordings: !!input.share_recordings,
-  }, actor?.id);
+  // Accept a single student_id (legacy) or a student_ids[] (multi-select).
+  const ids = (input.student_ids && input.student_ids.length) ? input.student_ids : (input.student_id ? [input.student_id] : []);
+  if (!ids.length) throw validationError({ student_id: 'Select at least one student' });
+  for (const sid of ids) {
+    // eslint-disable-next-line no-await-in-loop
+    await repo.placeStudentInBatch(tenant, { batchId: input.batch_id, studentId: sid, shareRecordings: !!input.share_recordings }, actor?.id);
+  }
+  return { placed: ids.length };
+};
+
+// Head/admin creates a NEW teaching user (trainer or head) and binds them to
+// this course in one step — so a head trainer can onboard trainers without the
+// full admin Users screen. Role is whitelisted to teaching roles only.
+export const createTrainer = async (tenant, actor, programId, input) => {
+  await assertCanManage(tenant, programId, actor);
+  const role = input.role === 'head' ? LMS_TENANT_ROLES.HEAD_TRAINER : LMS_TENANT_ROLES.TRAINER;
+  let branchId = null;
+  if (actor?.id) { const a = await usersRepo.findById(tenant, actor.id); branchId = a?.branch_id || null; }
+  if (!branchId) branchId = await repo.firstBranchId(tenant);
+  const user = await usersService.createUser(tenant, {
+    name: input.name, email: input.email, password: input.password, role, branch_id: branchId,
+  }, actor);
+  const binding = await repo.addTrainer(tenant, programId, { user_id: user.id, role: input.role === 'head' ? 'head' : 'trainer', module_id: input.module_id ?? null }, actor?.id);
+  return { user, binding };
+};
+
+// Mark a batch completed (batch lifecycle: active → completed). status already
+// supports it; we stamp end_date if unset.
+export const completeBatch = async (tenant, actor, programId, batchId) => {
+  await assertCanManage(tenant, programId, actor);
+  const batch = await repo.getBatch(tenant, batchId);
+  if (!batch || batch.program_id !== programId) throw notFound('Batch not in this course');
+  return repo.setBatchCompleted(tenant, batchId);
 };
 
 export const mergeBatches = async (tenant, actor, programId, input) => {
