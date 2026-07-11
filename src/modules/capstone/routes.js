@@ -27,7 +27,7 @@ router.use(authRequired, tenantRequired, requireRole(
 ));
 router.get('/', controller.list); // ?programId=
 router.post('/', validate({ body: z.object({
-  program_id: uuid, title: z.string().min(1).max(200), brief: z.string().max(4000).optional().nullable(),
+  program_id: uuid, batch_id: uuid.optional().nullable(), title: z.string().min(1).max(200), brief: z.string().max(4000).optional().nullable(),
   marking_scheme: z.string().max(4000).optional().nullable(), max_marks: z.number().min(1).max(1000).optional(), deadline: z.string().optional().nullable(),
 }) }), controller.create);
 router.delete('/:id', validate({ params: idParam }), controller.remove);

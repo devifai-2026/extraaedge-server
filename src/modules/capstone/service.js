@@ -24,7 +24,8 @@ export const list = async (tenant, actor, programId) => {
 export const create = async (tenant, actor, input) => {
   await assertProgramTrainer(tenant, input.program_id, actor);
   const row = await repo.create(tenant, input, actor?.id);
-  notifyBatch(tenant, { programId: input.program_id }, {
+  // Notify just the targeted batch when set, else the whole program (all batches).
+  notifyBatch(tenant, input.batch_id ? { batchId: input.batch_id } : { programId: input.program_id }, {
     type: 'capstone_assigned', message: `New capstone project: ${input.title}`, link: '/student/capstone', metadata: { capstone_id: row?.id },
   });
   return row;

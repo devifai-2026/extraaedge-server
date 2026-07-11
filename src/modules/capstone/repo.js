@@ -4,10 +4,11 @@ import { tenantQuery } from '../../db/tenant.js';
 export const list = async (tenant, programId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT c.id, c.program_id, c.title, c.brief, c.marking_scheme, c.max_marks, c.deadline, c.created_at,
+    `SELECT c.id, c.program_id, c.batch_id, b.name AS batch_name, c.title, c.brief, c.marking_scheme, c.max_marks, c.deadline, c.created_at,
             (SELECT count(*)::int FROM capstone_submissions s WHERE s.capstone_id = c.id) AS submission_count,
             (SELECT count(*)::int FROM capstone_submissions s WHERE s.capstone_id = c.id AND s.marks IS NOT NULL) AS graded_count
        FROM capstone_projects c
+       LEFT JOIN batches b ON b.id = c.batch_id
       WHERE c.program_id = $1 AND c.deleted_at IS NULL
       ORDER BY c.created_at DESC`,
     [programId],
@@ -23,9 +24,9 @@ export const get = async (tenant, id) => {
 export const create = async (tenant, input, actorId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO capstone_projects (program_id, title, brief, marking_scheme, max_marks, deadline, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-    [input.program_id, input.title, input.brief ?? null, input.marking_scheme ?? null, input.max_marks ?? 100, input.deadline ?? null, actorId ?? null],
+    `INSERT INTO capstone_projects (program_id, batch_id, title, brief, marking_scheme, max_marks, deadline, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    [input.program_id, input.batch_id ?? null, input.title, input.brief ?? null, input.marking_scheme ?? null, input.max_marks ?? 100, input.deadline ?? null, actorId ?? null],
   );
   return rows[0];
 };
@@ -79,6 +80,9 @@ export const studentCapstones = async (tenant, studentId, programId) => {
        FROM capstone_projects c
        LEFT JOIN capstone_submissions s ON s.capstone_id = c.id AND s.student_id = $1
       WHERE c.program_id = $2 AND c.deleted_at IS NULL
+        AND (c.batch_id IS NULL OR c.batch_id IN (
+              SELECT bs.batch_id FROM batch_students bs
+               WHERE bs.student_id = $1 AND bs.deleted_at IS NULL))
       ORDER BY c.created_at DESC`,
     [studentId, programId],
   );
