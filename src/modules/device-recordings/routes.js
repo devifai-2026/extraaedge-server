@@ -22,7 +22,7 @@
 import express from 'express';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import { apiKeyRequired } from '../../middleware/apiKey.js';
+import { apiKeyOrAuthRequired } from '../../middleware/apiKey.js';
 import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
@@ -93,12 +93,33 @@ const presignSchema = z.object({
   size_bytes: z.coerce.number().int().positive().max(MAX_BYTES),
 });
 
-router.post('/presign', apiKeyRequired, tenantRequired, validate({ body: presignSchema }), async (req, res, next) => {
+// GCS key extension by upload content type (cosmetic — playback trusts the
+// stored Content-Type — but keeps object keys honest for .mp3 app uploads).
+const EXT_BY_TYPE = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/aac': 'aac',
+  'audio/amr': 'amr',
+  'audio/wav': 'wav',
+  'audio/ogg': 'ogg',
+};
+
+// A JWT caller must be a tenant user — blocks a platform-user token combined
+// with an X-Tenant-Slug header from uploading into an arbitrary tenant.
+const tenantUserOnly = (req, _res, next) => {
+  if (req.user && !req.user.tenantId) return next(forbidden('A tenant user token is required'));
+  next();
+};
+
+router.post('/presign', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, validate({ body: presignSchema }), async (req, res, next) => {
   try {
     if (!req.body.content_type.startsWith('audio/')) {
       throw validationError([{ path: 'content_type', message: 'Only audio/* uploads are allowed' }]);
     }
-    const key = buildKey({ tenantSlug: req.tenant.slug, purpose: 'recording', id: nanoid(20), ext: 'm4a' });
+    const ext = EXT_BY_TYPE[req.body.content_type] ?? 'm4a';
+    const key = buildKey({ tenantSlug: req.tenant.slug, purpose: 'recording', id: nanoid(20), ext });
     const signed = await getUploadSignedUrl({
       key,
       contentType: req.body.content_type,
@@ -129,7 +150,7 @@ const confirmSchema = z.object({
   client_ref: z.string().max(255).optional(),
 });
 
-router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirmSchema }), async (req, res, next) => {
+router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, validate({ body: confirmSchema }), async (req, res, next) => {
   try {
     const { r2_key, phone, counsellor_phone, file_name, duration_seconds, client_ref } = req.body;
     const clientRef = client_ref || null;
@@ -167,7 +188,10 @@ router.post('/confirm', apiKeyRequired, tenantRequired, validate({ body: confirm
     }
 
     const { status, lead_ids, digits } = await matchLeads(req.tenant, phone);
-    const uploadedBy = counsellor_phone ? await resolveUploader(req.tenant, counsellor_phone) : null;
+    // JWT-authed app: the uploader IS the logged-in counsellor. Legacy api-key
+    // devices still resolve by the counsellor's own phone number.
+    const uploadedBy = req.user?.id
+      ?? (counsellor_phone ? await resolveUploader(req.tenant, counsellor_phone) : null);
     const multiMatch = lead_ids.length > 1;
     // The primary lead (first match) stays on device_recordings.lead_id for
     // backward-compatible single-lead reads; the join carries the full set.
@@ -344,18 +368,18 @@ router.post('/:id/attach', validate({ params: idParam, body: attachBody }), asyn
   } catch (err) { next(err); }
 });
 
-// Soft-delete + best-effort drop of the GCS object. Super-admins only.
+// Soft-delete + best-effort drop of the GCS object. All review-tab roles may
+// delete; counsellors only recordings they uploaded (404 like the other
+// own-only routes, so existence isn't leaked).
 router.delete('/:id', validate({ params: idParam }), async (req, res, next) => {
   try {
-    if (req.user.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
-      throw forbidden('Only an admin can delete a recording');
-    }
     const { rows } = await tenantQuery(
       req.tenant,
-      `SELECT id, r2_key FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT id, r2_key, uploaded_by FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
       [req.params.id],
     );
     if (!rows[0]) throw notFound('Recording not found');
+    if (isOwnOnly(req.user) && rows[0].uploaded_by !== req.user.id) throw notFound('Recording not found');
     await tenantQuery(req.tenant, `UPDATE device_recordings SET deleted_at = now() WHERE id = $1`, [req.params.id]);
     deleteObject(rows[0].r2_key).catch(() => { /* leak the file rather than fail the delete */ });
     res.status(204).end();

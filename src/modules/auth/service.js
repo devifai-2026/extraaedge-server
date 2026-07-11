@@ -3,12 +3,16 @@ import { env, isDevelopment } from '../../config/env.js';
 import * as repo from './repo.js';
 import * as platformSvc from '../platform-users/service.js';
 import * as branchesRepo from '../branches/repo.js';
-import { resolveTenantBySlug } from '../../db/tenant.js';
+import { resolveTenantBySlug, tenantQuery } from '../../db/tenant.js';
 import { signAccessToken, signRefreshToken, verifyToken, ACCESS_TTL_SECONDS, REFRESH_TTL_SECONDS } from '../../lib/jwt.js';
 import { sha256Hex } from '../../lib/crypto.js';
-import { forbidden, unauthenticated, sessionIdle, tenantSuspended, notFound } from '../../lib/errors.js';
+import { forbidden, unauthenticated, sessionIdle, tenantSuspended, notFound, conflict, validationError } from '../../lib/errors.js';
 import { PLATFORM_ROLES } from '../../config/constants.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
+import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
+import { last10Digits } from '../../lib/phone.js';
+import { sendPhoneOtp } from '../../lib/providers/whatsapp-wabridge.js';
+import { logger } from '../../lib/logger.js';
 
 // Tries to sign a download URL for the user's avatar object. Swallows
 // errors because the FE will simply show the initials fallback if
@@ -83,6 +87,10 @@ const projectTenantBranding = (tenant) => ({
   receipt_no_prefix: tenant.receipt_no_prefix ?? null,
   receipt_no_start: tenant.receipt_no_start ?? 1,
   receipt_no_pad: tenant.receipt_no_pad ?? 5,
+  // Counsellor recorder app config — the app reads these at login and via
+  // /auth/me before each sync. null path = admin hasn't configured it yet.
+  recorder_folder_path: tenant.recorder_folder_path ?? null,
+  recorder_sync_hour: tenant.recorder_sync_hour ?? 21,
 });
 
 // ---------- login ----------
@@ -173,6 +181,13 @@ const loginTenantUser = async ({ email, password, tenant_slug, ip, user_agent })
     console.warn(`[AUTH BYPASS] password check skipped for tenant=${tenant.slug} user=${user.email}`);
   }
 
+  return mintTenantSession(tenant, user, { ip, user_agent });
+};
+
+// Shared tail of every credential-verified tenant login (password or mobile
+// OTP): create the session, audit, mint access + rotating refresh tokens and
+// project the login response. Callers verify credentials BEFORE calling this.
+const mintTenantSession = async (tenant, user, { ip, user_agent }) => {
   const refreshExpiry = new Date(Date.now() + REFRESH_TTL_SECONDS() * 1000);
   const session = await repo.createSession(tenant, { user_id: user.id, ip, user_agent, expires_at: refreshExpiry });
   await repo.touchLogin(tenant, user.id);
@@ -229,6 +244,88 @@ const loginTenantUser = async ({ email, password, tenant_slug, ip, user_agent })
     feature_permissions: user.feature_permissions ?? {},
     ...tokens,
   };
+};
+
+// ---------- mobile OTP login (counsellor recorder app) ----------
+//
+// The counsellor identifies by institute code (tenant slug) + the phone number
+// saved on their web-portal profile. Any active tenant user may log in — the
+// minted JWT's role gates everything downstream, so there's no value in
+// restricting roles here.
+//
+// Demo mode (env.MOBILE_OTP_DEMO): the code is a fixed '1234' and nothing is
+// sent. We still store hashOtp('1234', digits) in otp_verifications, so the
+// verify path has zero demo branching — and once the flag is off, '1234' can
+// never verify because the stored hash is of a random 6-digit code.
+
+const findMobileLoginUser = async (tenant, phone) => {
+  const digits = last10Digits(phone);
+  if (digits.length < 10) {
+    throw validationError([{ path: 'phone', message: 'Enter a valid 10-digit phone number' }]);
+  }
+  const users = (await repo.findUsersByPhone(tenant, digits)).filter((u) => u.is_active);
+  if (users.length === 0) {
+    throw unauthenticated('No active user with this phone number in this institute. Ask your admin to set your phone number on your profile.');
+  }
+  if (users.length > 1) {
+    throw conflict('This phone number is linked to more than one user — contact your admin');
+  }
+  return { user: users[0], digits };
+};
+
+export const requestMobileLoginOtp = async ({ tenant_slug, phone }) => {
+  const tenant = await resolveTenantBySlug(tenant_slug);
+  if (tenant.status !== 'active') throw tenantSuspended();
+  const { user, digits } = await findMobileLoginUser(tenant, phone);
+
+  const code = env.MOBILE_OTP_DEMO ? '1234' : generateOtp(6);
+  // Invalidate prior pending mobile-login OTPs by EXPIRING them (not by
+  // setting verified_at — that would make verified_at ambiguous, and the
+  // platform recorder metrics count verified_at IS NOT NULL as real logins).
+  await tenantQuery(
+    tenant,
+    `UPDATE otp_verifications SET expires_at = now()
+      WHERE user_id = $1 AND purpose = 'mobile_login' AND verified_at IS NULL AND expires_at > now()`,
+    [user.id],
+  );
+  await tenantQuery(
+    tenant,
+    `INSERT INTO otp_verifications (user_id, purpose, channel, address, otp_hash, expires_at, max_attempts)
+     VALUES ($1, 'mobile_login', $2, $3, $4, $5, 5)`,
+    [user.id, env.MOBILE_OTP_DEMO ? 'demo' : 'whatsapp', digits, hashOtp(code, digits), otpExpiryDate()],
+  );
+  if (!env.MOBILE_OTP_DEMO) {
+    await sendPhoneOtp({ to: user.phone, code });
+  }
+  logger.info({ user_id: user.id, tenant: tenant.slug, demo: env.MOBILE_OTP_DEMO }, 'mobile-login OTP issued');
+  return { sent: true, expires_in_minutes: env.OTP_TTL_MINUTES };
+};
+
+export const verifyMobileLoginOtp = async ({ tenant_slug, phone, otp, ip, user_agent }) => {
+  const tenant = await resolveTenantBySlug(tenant_slug);
+  if (tenant.status !== 'active') throw tenantSuspended();
+  const { user, digits } = await findMobileLoginUser(tenant, phone);
+
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE otp_verifications SET verified_at = now()
+      WHERE user_id = $1 AND purpose = 'mobile_login' AND address = $2
+        AND verified_at IS NULL AND expires_at > now()
+        AND otp_hash = $3 AND attempts < max_attempts
+      RETURNING id`,
+    [user.id, digits, hashOtp(otp, digits)],
+  );
+  if (!rows[0]) {
+    await tenantQuery(
+      tenant,
+      `UPDATE otp_verifications SET attempts = attempts + 1
+        WHERE user_id = $1 AND purpose = 'mobile_login' AND address = $2 AND verified_at IS NULL`,
+      [user.id, digits],
+    );
+    throw validationError([{ path: 'otp', message: 'Invalid or expired OTP' }]);
+  }
+
+  return mintTenantSession(tenant, user, { ip, user_agent });
 };
 
 // ---------- sudo-login (org admin → any user) ----------

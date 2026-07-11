@@ -7,6 +7,7 @@ const SELECT_COLUMNS = `
   status, trial_ends_at, subscription_ends_at, timezone, currency, default_language,
   db_name, db_user, ip_allowlist, require_2fa,
   receipt_terms, receipt_signatory_label, receipt_thankyou, receipt_no_prefix, receipt_no_start, receipt_no_pad,
+  recorder_folder_path, recorder_sync_hour,
   provisioned_by_platform_user_id, created_at, updated_at
 `;
 

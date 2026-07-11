@@ -7,6 +7,7 @@ import platformUsersRouter from './modules/platform-users/routes.js';
 import platformPlansRouter from './modules/plans/routes.js';
 import platformAuditRouter from './modules/platform-audit/routes.js';
 import platformRequestLogRouter from './modules/platform-requests/routes.js';
+import platformRecorderMetricsRouter from './modules/platform-recorder-metrics/routes.js';
 import platformLeadInspectorRouter from './modules/platform-lead-inspector/routes.js';
 import platformTicketsRouter from './modules/platform-tickets/routes.js';
 import impersonationRouter from './modules/impersonation/routes.js';
@@ -111,6 +112,8 @@ export const mountRoutes = (app) => {
   api.use('/platform/audit-log', platformAuditRouter);
   // Danger Request Log — full cross-tenant API activity (product_owner only).
   api.use('/platform/request-log', platformRequestLogRouter);
+  // Recorder-app rollout metrics — APK account setups + per-number upload counts.
+  api.use('/platform/recorder-metrics', platformRecorderMetricsRouter);
   // Cross-tenant lead inspector — drill into any tenant's lead + bulk imports.
   api.use('/platform/inspect', platformLeadInspectorRouter);
   api.use('/platform/tickets', platformTicketsRouter);

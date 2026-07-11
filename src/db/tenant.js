@@ -31,6 +31,7 @@ export const resolveTenantBySlug = async (slug) => {
             brand_primary_color, brand_secondary_color, phone, website, email,
             address_line1, address_line2, city, state, pincode,
             receipt_terms, receipt_signatory_label, receipt_thankyou, receipt_no_prefix, receipt_no_start, receipt_no_pad,
+            recorder_folder_path, recorder_sync_hour,
             timezone, currency
        FROM tenants
       WHERE slug = $1
@@ -50,6 +51,7 @@ export const resolveTenantById = async (id) => {
             brand_primary_color, brand_secondary_color, phone, website, email,
             address_line1, address_line2, city, state, pincode,
             receipt_terms, receipt_signatory_label, receipt_thankyou, receipt_no_prefix, receipt_no_start, receipt_no_pad,
+            recorder_folder_path, recorder_sync_hour,
             timezone, currency
        FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
     [id],

@@ -31,6 +31,9 @@ if (env.QUEUE_DRIVER === 'inprocess') {
 const app = buildApp();
 const server = app.listen(env.PORT, () => {
   logger.info({ port: env.PORT, env: env.NODE_ENV }, 'extraaedge-backend listening');
+  if (env.MOBILE_OTP_DEMO && env.NODE_ENV === 'production') {
+    logger.warn('MOBILE_OTP_DEMO is ON in production — recorder-app login accepts the fixed OTP 1234');
+  }
 });
 
 // Attach socket.io to the same HTTP server.

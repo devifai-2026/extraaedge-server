@@ -1,6 +1,7 @@
 import { env } from '../config/env.js';
 import { safeEqual } from '../lib/crypto.js';
 import { unauthenticated } from '../lib/errors.js';
+import { authRequired } from './auth.js';
 
 // Guards the device-upload endpoint (POST /device-recordings) with a single
 // fixed shared secret, sent by the Android call-recorder app as `X-Api-Key`.
@@ -21,4 +22,16 @@ export const apiKeyRequired = (req, _res, next) => {
   // so downstream handlers must not assume one (e.g. uploaded_by stays null).
   req.deviceUpload = true;
   next();
+};
+
+// Device endpoints accept EITHER the recorder app user's JWT (preferred — the
+// uploader is then req.user, no counsellor_phone resolution needed) OR the
+// legacy X-Api-Key shared secret (no user). Presence of a Bearer header picks
+// the branch so a bad JWT fails auth rather than silently falling back.
+export const apiKeyOrAuthRequired = (req, res, next) => {
+  const authz = req.headers.authorization;
+  if (typeof authz === 'string' && authz.startsWith('Bearer ')) {
+    return authRequired(req, res, next);
+  }
+  return apiKeyRequired(req, res, next);
 };

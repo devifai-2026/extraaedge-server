@@ -28,7 +28,7 @@ const proxyLogoUrl = (slug, key) => {
 // if provided.
 // Contact/address fields where a blank string means "clear it" — normalise to
 // NULL so the receipt header omits the line rather than printing an empty one.
-const BLANK_TO_NULL = ['phone', 'website', 'email', 'address_line1', 'address_line2', 'city', 'state', 'pincode', 'receipt_thankyou'];
+const BLANK_TO_NULL = ['phone', 'website', 'email', 'address_line1', 'address_line2', 'city', 'state', 'pincode', 'receipt_thankyou', 'recorder_folder_path'];
 
 export const updateBranding = async (tenant, { logo_r2_key, receipt_terms, ...rest }) => {
   const updates = { ...rest };

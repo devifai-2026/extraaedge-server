@@ -121,6 +121,11 @@ const schema = z.object({
   // (feature effectively off) rather than blocking server boot.
   DEVICE_UPLOAD_API_KEY: z.string().optional().default(''),
 
+  // Counsellor recorder app login: when true the OTP is a fixed '1234' and no
+  // message is sent. Flip to false to deliver real OTPs over WhatsApp — no app
+  // or verify-path change needed (demo mode just stores the hash of '1234').
+  MOBILE_OTP_DEMO: boolLike.default(true),
+
   // Platform-wide user-phone uniqueness. Soft rollout: while false, a phone
   // collision across tenants is logged but NOT rejected (existing data may
   // still have duplicates). Flip to true once backfill collisions are cleaned

@@ -39,6 +39,10 @@ const brandingSchema = z.object({
   receipt_no_prefix: z.string().max(40).nullable().optional(),
   receipt_no_start: z.number().int().min(1).max(9_999_999_999).optional(),
   receipt_no_pad: z.number().int().min(1).max(12).optional(),
+  // Counsellor recorder app: folder scanned for call .mp3 files and the
+  // device-local hour the daily upload sync runs (see tenant_recorder_config).
+  recorder_folder_path: optText(300),
+  recorder_sync_hour: z.number().int().min(0).max(23).optional(),
 });
 
 router.put(
@@ -68,6 +72,8 @@ router.put(
           receipt_no_prefix: row.receipt_no_prefix ?? null,
           receipt_no_start: row.receipt_no_start ?? null,
           receipt_no_pad: row.receipt_no_pad ?? null,
+          recorder_folder_path: row.recorder_folder_path ?? null,
+          recorder_sync_hour: row.recorder_sync_hour ?? 21,
         },
         meta: { requestId: req.id },
       });

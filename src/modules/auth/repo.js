@@ -19,6 +19,22 @@ export const findUserByEmail = async (tenant, email) => {
   return rows[0] ?? null;
 };
 
+// Mobile-app login: find the user owning a phone number. Matches on the last
+// 10 digits (same expression as users_phone_digits_idx and the device-recordings
+// uploader resolution) so '+91 98765-43210' and '9876543210' both hit.
+export const findUsersByPhone = async (tenant, digits10) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT ${USER_COLS}, r.tab_permissions, r.feature_permissions, r.scope AS role_scope, r.name AS role_name
+       FROM users u
+       LEFT JOIN custom_roles r ON r.id = u.role_id
+      WHERE u.deleted_at IS NULL
+        AND right(regexp_replace(coalesce(u.phone, ''), '\\D', '', 'g'), 10) = $1`,
+    [digits10],
+  );
+  return rows;
+};
+
 export const findUserById = async (tenant, id) => {
   const { rows } = await tenantQuery(
     tenant,
