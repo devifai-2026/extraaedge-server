@@ -2,6 +2,7 @@ import * as repo from './repo.js';
 import * as tenantsRepo from '../tenants/repo.js';
 import * as studentsRepo from '../student-auth/repo.js';
 import * as studentAuth from '../student-auth/service.js';
+import * as coursesRepo from '../courses/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
@@ -250,6 +251,19 @@ export const confirmCourse = async (tenant, actor, id) => {
     metadata: { student_id: student.id, program_id: adm.program_id },
     // NOTE: the temp password is intentionally NOT logged.
   });
+
+  // Notify the course's teaching team (head + trainers) that a new student
+  // joined — surfaces in their notification bell. Best-effort.
+  try {
+    const trainerIds = await coursesRepo.courseTrainerUserIds(tenant, adm.program_id);
+    await Promise.all(trainerIds.map((uid) => pushNotification(tenant, {
+      user_id: uid,
+      type: 'lms_new_student',
+      message: `New student enrolled in your course: ${name}`,
+      link: '/trainer/students',
+      metadata_json: { student_id: student.id, program_id: adm.program_id },
+    }).catch(() => {})));
+  } catch { /* best-effort */ }
 
   // Credentials returned ONCE for Accounts to copy + share. The temp password
   // is not stored in plaintext, so it can't be shown again — a re-confirm

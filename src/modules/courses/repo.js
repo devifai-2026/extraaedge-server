@@ -143,6 +143,17 @@ export const removeTrainer = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE course_trainers SET deleted_at = now() WHERE id = $1`, [id]);
 };
 
+// Distinct user_ids on a course's trainer roster — for notifying the teaching
+// team (e.g. when a new student is confirmed into the course).
+export const courseTrainerUserIds = async (tenant, programId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT DISTINCT user_id FROM course_trainers WHERE program_id = $1 AND deleted_at IS NULL`,
+    [programId],
+  );
+  return rows.map((r) => r.user_id).filter(Boolean);
+};
+
 // Per-student attendance summary across a course's ended classes (their batch's
 // classes). Drives the trainer "attendance history" view.
 export const attendanceHistory = async (tenant, programId) => {
