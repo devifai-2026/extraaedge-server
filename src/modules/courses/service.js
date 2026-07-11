@@ -108,9 +108,10 @@ export const trainerInsights = async (tenant, actor) => {
   const programIds = courses.map((c) => c.id);
   const zero = { courses: courses.length, modules: 0, batches: 0, students: 0, active_students: 0 };
   if (!programIds.length) return { totals: zero, students: [] };
-  const [counts, roster] = await Promise.all([
+  const [counts, roster, perCourse] = await Promise.all([
     repo.countStudentsForPrograms(tenant, programIds),
     repo.studentsForPrograms(tenant, programIds, 24),
+    repo.perCourseStats(tenant, programIds),
   ]);
   const students = await Promise.all(roster.map(async (s) => ({
     id: s.id, name: s.name, status: s.status, batch_name: s.batch_name, program_name: s.program_name,
@@ -122,8 +123,12 @@ export const trainerInsights = async (tenant, actor) => {
     batches: courses.reduce((a, c) => a + (Number(c.batch_count) || 0), 0),
     students: counts.total || 0,
     active_students: counts.active || 0,
+    on_break: counts.on_break || 0,
+    dropped: counts.dropped || 0,
+    pending: counts.pending || 0,
+    unassigned: counts.unassigned || 0,
   };
-  return { totals, students };
+  return { totals, students, per_course: perCourse, courses: courses.map((c) => ({ id: c.id, name: c.name })) };
 };
 
 // ---------- Batches (head_trainer / admin only) ----------

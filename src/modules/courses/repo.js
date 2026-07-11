@@ -189,11 +189,34 @@ export const countStudentsForPrograms = async (tenant, programIds) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT count(*)::int AS total,
-            count(*) FILTER (WHERE status = 'active')::int AS active
+            count(*) FILTER (WHERE status = 'active')::int AS active,
+            count(*) FILTER (WHERE status = 'on_break')::int AS on_break,
+            count(*) FILTER (WHERE status = 'dropped')::int AS dropped,
+            count(*) FILTER (WHERE status NOT IN ('active','on_break','dropped'))::int AS pending,
+            count(*) FILTER (WHERE NOT EXISTS (
+              SELECT 1 FROM batch_students bs WHERE bs.student_id = students.id AND bs.deleted_at IS NULL
+            ) AND status <> 'dropped')::int AS unassigned
        FROM students WHERE program_id = ANY($1::uuid[]) AND deleted_at IS NULL`,
     [programIds],
   );
-  return rows[0] || { total: 0, active: 0 };
+  return rows[0] || { total: 0, active: 0, on_break: 0, dropped: 0, pending: 0, unassigned: 0 };
+};
+
+// Per-course rollup for the dashboard (students + batches + modules + classes).
+export const perCourseStats = async (tenant, programIds) => {
+  if (!programIds.length) return [];
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT p.id AS program_id, p.name,
+            (SELECT count(*)::int FROM students s WHERE s.program_id = p.id AND s.deleted_at IS NULL) AS students,
+            (SELECT count(*)::int FROM batches b WHERE b.program_id = p.id AND b.deleted_at IS NULL AND b.status <> 'merged') AS batches,
+            (SELECT count(*)::int FROM course_modules m WHERE m.program_id = p.id AND m.deleted_at IS NULL) AS modules,
+            (SELECT count(*)::int FROM classes c WHERE c.program_id = p.id AND c.deleted_at IS NULL) AS classes
+       FROM programs p WHERE p.id = ANY($1::uuid[]) AND p.deleted_at IS NULL
+      ORDER BY p.name`,
+    [programIds],
+  );
+  return rows;
 };
 
 // Recent students (for the avatar roster) with their batch + photo key.
