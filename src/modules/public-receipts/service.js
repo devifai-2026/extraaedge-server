@@ -53,7 +53,7 @@ const findReceiptAcrossTenants = async (token) => {
 // public receipt can show the student their whole plan (not just this one
 // payment). Registration (if any) is row 0; installments follow. "Paid" = a
 // non-deleted receipt exists for that slot.
-const buildScheduleWithStatus = async (tenant, admissionId) => {
+export const buildScheduleWithStatus = async (tenant, admissionId) => {
   if (!admissionId) return { rows: [], totals: { total: 0, paid: 0, due: 0 } };
   const [{ rows: schedule }, { rows: receipts }, { rows: offers }, { rows: adms }] = await Promise.all([
     tenantQuery(tenant, `SELECT installment_no, due_date, amount FROM admission_fee_schedule WHERE admission_id = $1 ORDER BY installment_no`, [admissionId]),

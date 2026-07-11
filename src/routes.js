@@ -71,6 +71,7 @@ import publicAdmissionsRouter from './modules/public-admissions/routes.js';
 import publicReceiptsRouter from './modules/public-receipts/routes.js';
 import publicBrandingRouter from './modules/public-branding/routes.js';
 import studentAuthRouter from './modules/student-auth/routes.js';
+import studentBillingRouter from './modules/student-billing/routes.js';
 import coursesRouter from './modules/courses/routes.js';
 import classesRouter from './modules/classes/routes.js';
 import communityRouter from './modules/community/routes.js';
@@ -249,6 +250,7 @@ export const mountRoutes = (app) => {
   // Student authentication (LMS). Separate principal (type:'student' JWT),
   // tenant-scoped via the x-tenant-slug header. NOT behind the staff auth chain.
   api.use('/student-auth', studentAuthRouter);
+  api.use('/student-billing', studentBillingRouter);
 
   app.use('/api/v1', api);
 };
