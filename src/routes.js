@@ -81,6 +81,7 @@ import catalogRouter from './modules/catalog/routes.js';
 import lmsAnalyticsRouter from './modules/lms-analytics/routes.js';
 import studentNotificationsRouter from './modules/student-notifications/routes.js';
 import learningRouter from './modules/learning/routes.js';
+import capstoneRouter from './modules/capstone/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
@@ -217,6 +218,7 @@ export const mountRoutes = (app) => {
   // Student notifications feed (student principal; router self-gates).
   api.use('/student-notifications', studentNotificationsRouter);
   api.use('/learning', learningRouter);
+  api.use('/capstone', capstoneRouter);
   // Per-lead customised fee offer — accounts team's tweak of the
   // program-level defaults for a specific converted lead.
   api.use('/lead-fee-offers', leadFeeOffersRouter);
