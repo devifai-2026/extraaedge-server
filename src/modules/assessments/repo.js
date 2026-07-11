@@ -177,38 +177,111 @@ export const studentProgram = async (tenant, studentId) => {
 
 // ---------- Leaderboard (derived) ----------
 // Combines: mock-test score sum, project marks sum, attendance %, and
-// interview marks sum (interview_slots may not exist until Phase 7 — guard with
-// to_regclass so this query works before/after that migration).
+// Weighted leaderboard (0–100). Each component is normalized to a 0–100 subscore
+// (earned / achievable-max × 100), then combined by DEFAULT_WEIGHTS. Components
+// with no achievable max in this program (e.g. no capstone defined yet) are
+// dropped and the remaining weights renormalize, so an empty component never
+// drags everyone to zero. Attendance uses the canonical "ended classes only"
+// denominator (matches the student dashboard). Interview counts only FINALIZED
+// slots (all rubric categories scored), program-scoped — fixing the prior
+// cross-program leak and raw-sum-with-a-percentage bug.
+//
+// Guards with to_regclass so it works before/after the interview + capstone
+// migrations.
+export const LEADERBOARD_WEIGHTS = { tests: 30, projects: 25, capstone: 15, interview: 15, attendance: 15 };
+
 export const leaderboard = async (tenant, programId) => {
-  const { rows: hasInterview } = await tenantQuery(tenant, `SELECT to_regclass('interview_slots') IS NOT NULL AS ok`, []);
-  const interviewJoin = hasInterview[0]?.ok
-    ? `LEFT JOIN (SELECT student_id, COALESCE(sum(marks),0) AS m FROM interview_slots WHERE marks IS NOT NULL GROUP BY student_id) iv ON iv.student_id = s.id`
+  const { rows: reg } = await tenantQuery(
+    tenant,
+    `SELECT to_regclass('interview_slots') IS NOT NULL AS has_iv,
+            to_regclass('capstone_submissions') IS NOT NULL AS has_cap`,
+    [],
+  );
+  const hasIv = !!reg[0]?.has_iv;
+  const hasCap = !!reg[0]?.has_cap;
+
+  // Achievable maxes for the program (the denominators for normalization).
+  const ivMaxJoin = hasIv
+    ? `LEFT JOIN (SELECT COALESCE(sum(max_marks),0) AS mx FROM mock_interviews WHERE program_id=$1 AND deleted_at IS NULL) ivm ON true`
     : '';
-  const interviewExpr = hasInterview[0]?.ok ? 'COALESCE(iv.m,0)' : '0';
+  const capSel = hasCap ? 'COALESCE(cap.m,0)' : '0';
+  const capMaxJoin = hasCap
+    ? `LEFT JOIN (SELECT COALESCE(sum(max_marks),0) AS mx FROM capstone_projects WHERE program_id=$1 AND deleted_at IS NULL) capm ON true`
+    : '';
+  const capEarnedJoin = hasCap
+    ? `LEFT JOIN (SELECT cs.student_id, sum(cs.marks) AS m FROM capstone_submissions cs JOIN capstone_projects cp ON cp.id=cs.capstone_id WHERE cp.program_id=$1 AND cs.marks IS NOT NULL GROUP BY cs.student_id) cap ON cap.student_id = s.id`
+    : '';
+  // Interview earned = finalized slots only.
+  const ivEarnedJoin = hasIv
+    ? `LEFT JOIN (SELECT sl.student_id, sum(sl.marks) AS m FROM interview_slots sl JOIN mock_interviews i ON i.id=sl.interview_id WHERE i.program_id=$1 AND i.deleted_at IS NULL AND sl.deleted_at IS NULL AND sl.graded_at IS NOT NULL AND sl.marks IS NOT NULL GROUP BY sl.student_id) iv ON iv.student_id = s.id`
+    : '';
+  const ivEarnedSel = hasIv ? 'COALESCE(iv.m,0)' : '0';
+  const ivMaxSel = hasIv ? 'COALESCE(ivm.mx,0)' : '0';
+  const capMaxSel = hasCap ? 'COALESCE(capm.mx,0)' : '0';
+
   const { rows } = await tenantQuery(
     tenant,
     `SELECT s.id AS student_id, s.name,
-            COALESCE(tt.m,0)::numeric AS test_score,
-            COALESCE(pr.m,0)::numeric AS project_score,
-            COALESCE(att.pct,0)::numeric AS attendance_pct,
-            ${interviewExpr}::numeric AS interview_score,
-            (COALESCE(tt.m,0) + COALESCE(pr.m,0) + ${interviewExpr} + COALESCE(att.pct,0))::numeric AS total
+            COALESCE(tt.m,0)::numeric AS test_marks,
+            COALESCE(pr.m,0)::numeric AS project_marks,
+            ${capSel}::numeric AS capstone_marks,
+            ${ivEarnedSel}::numeric AS interview_marks,
+            COALESCE(tm.mx,0)::numeric AS test_max,
+            COALESCE(pm.mx,0)::numeric AS project_max,
+            ${capMaxSel}::numeric AS capstone_max,
+            ${ivMaxSel}::numeric AS interview_max,
+            COALESCE(att.total,0)::int AS att_total,
+            COALESCE(att.present,0)::int AS att_present
        FROM students s
-       LEFT JOIN (SELECT a.student_id, sum(a.score) AS m FROM mock_test_attempts a JOIN mock_tests t ON t.id=a.test_id WHERE t.program_id=$1 GROUP BY a.student_id) tt ON tt.student_id = s.id
+       LEFT JOIN (SELECT a.student_id, sum(a.score) AS m FROM mock_test_attempts a JOIN mock_tests t ON t.id=a.test_id WHERE t.program_id=$1 AND t.deleted_at IS NULL GROUP BY a.student_id) tt ON tt.student_id = s.id
+       LEFT JOIN (SELECT COALESCE(sum(total_marks),0) AS mx FROM mock_tests WHERE program_id=$1 AND deleted_at IS NULL AND is_published) tm ON true
        LEFT JOIN (SELECT ps.student_id, sum(ps.marks) AS m FROM project_submissions ps JOIN projects p ON p.id=ps.project_id WHERE p.program_id=$1 AND ps.marks IS NOT NULL GROUP BY ps.student_id) pr ON pr.student_id = s.id
+       LEFT JOIN (SELECT COALESCE(sum(max_marks),0) AS mx FROM projects WHERE program_id=$1 AND deleted_at IS NULL) pm ON true
+       ${capEarnedJoin}
+       ${capMaxJoin}
+       ${ivEarnedJoin}
+       ${ivMaxJoin}
        LEFT JOIN (
          SELECT bs.student_id,
-                round(100.0 * count(*) FILTER (WHERE att.status='present') / NULLIF(count(*),0), 1) AS pct
+                count(*) FILTER (WHERE c.ended_at IS NOT NULL)::int AS total,
+                count(*) FILTER (WHERE att.status='present' AND c.ended_at IS NOT NULL)::int AS present
            FROM batch_students bs
            JOIN classes c ON c.batch_id = bs.batch_id AND c.deleted_at IS NULL AND c.program_id = $1
            LEFT JOIN attendance att ON att.class_id = c.id AND att.student_id = bs.student_id
           WHERE bs.deleted_at IS NULL
           GROUP BY bs.student_id
        ) att ON att.student_id = s.id
-       ${interviewJoin}
-      WHERE s.program_id = $1 AND s.deleted_at IS NULL
-      ORDER BY total DESC, s.name`,
+      WHERE s.program_id = $1 AND s.deleted_at IS NULL`,
     [programId],
   );
-  return rows;
+
+  const W = LEADERBOARD_WEIGHTS;
+  const pct = (earned, max) => (max > 0 ? Math.min(100, (Number(earned) / Number(max)) * 100) : null);
+  const scored = rows.map((r) => {
+    const subs = {
+      tests: pct(r.test_marks, r.test_max),
+      projects: pct(r.project_marks, r.project_max),
+      capstone: pct(r.capstone_marks, r.capstone_max),
+      interview: pct(r.interview_marks, r.interview_max),
+      attendance: Number(r.att_total) > 0 ? (Number(r.att_present) / Number(r.att_total)) * 100 : null,
+    };
+    // Renormalize weights across only the components that exist for this program.
+    let wsum = 0; let acc = 0;
+    for (const k of Object.keys(W)) { if (subs[k] != null) { wsum += W[k]; acc += W[k] * subs[k]; } }
+    const total = wsum > 0 ? acc / wsum : 0;
+    const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
+    return {
+      student_id: r.student_id,
+      name: r.name,
+      // 0–100 subscores (null = component not present in this program).
+      test_score: round1(subs.tests),
+      project_score: round1(subs.projects),
+      capstone_score: round1(subs.capstone),
+      interview_score: round1(subs.interview),
+      attendance_pct: round1(subs.attendance),
+      total: round1(total),
+    };
+  });
+  scored.sort((a, b) => (b.total - a.total) || a.name.localeCompare(b.name));
+  return scored;
 };

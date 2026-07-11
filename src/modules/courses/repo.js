@@ -164,8 +164,8 @@ export const attendanceHistory = async (tenant, programId, branchId = null) => {
     tenant,
     `SELECT s.id AS student_id, s.name, b.name AS batch_name,
             count(c.id) FILTER (WHERE c.ended_at IS NOT NULL) AS total,
-            count(*) FILTER (WHERE att.status = 'present') AS present,
-            count(*) FILTER (WHERE att.status = 'absent') AS absent
+            count(*) FILTER (WHERE att.status = 'present' AND c.ended_at IS NOT NULL) AS present,
+            count(*) FILTER (WHERE att.status = 'absent' AND c.ended_at IS NOT NULL) AS absent
        FROM students s
        JOIN batch_students bs ON bs.student_id = s.id AND bs.deleted_at IS NULL
        JOIN batches b ON b.id = bs.batch_id AND b.deleted_at IS NULL

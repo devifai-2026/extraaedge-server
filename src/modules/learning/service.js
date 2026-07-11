@@ -11,7 +11,7 @@ import { env } from '../../config/env.js';
 import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 import { notifyBatch, pushStudentNotification } from '../student-notifications/service.js';
 
-const MIN_ATTENDANCE_PCT = 50; // certificate threshold (informational; auto-issue keys off course completion)
+const MIN_ATTENDANCE_PCT = 50; // certificate threshold — enforced by auto-issue (all modules complete AND attendance ≥ this)
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
 const isHrOrAdmin = (actor) => isAdmin(actor) || actor?.role === LMS_TENANT_ROLES.HR;
@@ -118,26 +118,22 @@ export const markModuleCompletion = async (tenant, actor, { program_id, module_i
   if (completed) {
     for (const sid of student_ids) {
       // eslint-disable-next-line no-await-in-loop
-      await autoIssueIfComplete(tenant, program_id, sid, actor?.id, modules).catch(() => {});
+      await autoIssueIfComplete(tenant, program_id, sid, actor?.id).catch(() => {});
     }
   }
   return repo.studentsWithModuleCompletion(tenant, program_id, module_id);
 };
 
-// True when the student has completed every module of the course (course done).
-const isCourseComplete = async (tenant, studentId, programId, modulesArg) => {
-  const modules = modulesArg || await coursesRepo.listModules(tenant, programId);
-  if (!modules.length) return false;
-  const done = new Set((await repo.completedModuleIds(tenant, studentId, programId)).map(String));
-  return modules.every((m) => done.has(String(m.id)));
-};
-
-// Issue a completion certificate once the course is complete (idempotent).
-const autoIssueIfComplete = async (tenant, programId, studentId, issuedBy, modulesArg) => {
+// Issue a completion certificate once the student is fully ELIGIBLE — all
+// modules complete AND attendance ≥ MIN_ATTENDANCE_PCT (idempotent). Previously
+// this issued on module-completion alone, contradicting the attendance
+// requirement the student's own certificate card advertises; now the auto-issue
+// path and computeEligibility agree.
+const autoIssueIfComplete = async (tenant, programId, studentId, issuedBy) => {
   const existing = await repo.getCertificate(tenant, studentId, programId);
   if (existing) return existing;
-  if (!(await isCourseComplete(tenant, studentId, programId, modulesArg))) return null;
   const elig = await computeEligibility(tenant, studentId, programId);
+  if (!elig.eligible) return null;
   const number = await nextCertNumber(tenant, programId);
   const created = await repo.insertCertificate(tenant, { student_id: studentId, program_id: programId, certificate_number: number, issued_by: issuedBy ?? null, meta: elig.meta });
   if (created) pushStudentNotification(tenant, studentId, { type: 'certificate_issued', message: '🎓 Your course-completion certificate is ready!', link: '/student/certificate', metadata: { certificate_number: created.certificate_number } });
@@ -196,12 +192,11 @@ export const hrListCertificates = async (tenant, actor, programId) => {
 // the whole course (idempotent — already-issued students are skipped).
 export const hrAutoIssueForProgram = async (tenant, actor, programId) => {
   if (!isHrOrAdmin(actor)) throw forbidden('HR or admin only.');
-  const modules = await coursesRepo.listModules(tenant, programId);
   const students = await repo.studentsInProgram(tenant, programId);
   let issued = 0;
   for (const s of students) {
     // eslint-disable-next-line no-await-in-loop
-    const row = await autoIssueIfComplete(tenant, programId, s.id, actor?.id, modules).catch(() => null);
+    const row = await autoIssueIfComplete(tenant, programId, s.id, actor?.id).catch(() => null);
     if (row) issued += 1;
   }
   return { issued, total_students: students.length };
