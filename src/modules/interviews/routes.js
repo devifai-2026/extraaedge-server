@@ -32,7 +32,7 @@ const categorySchema = z.array(z.object({
 })).max(20).optional();
 router.post('/', validate({ body: z.object({
   program_id: uuid, title: z.string().min(1).max(200), meeting_url: z.string().max(1000).optional().nullable(),
-  max_marks: z.number().min(1).max(1000).optional(), categories: categorySchema,
+  max_marks: z.number().min(1).max(1000).optional(), categories: categorySchema, branch_id: uuid.optional().nullable(),
 }) }), controller.create);
 router.get('/:id/slots', validate({ params: idParam }), controller.listSlots);
 router.post('/:id/slots', validate({ params: idParam, body: z.object({ student_id: uuid, slot_at: z.string().optional().nullable() }) }), controller.assignSlot);

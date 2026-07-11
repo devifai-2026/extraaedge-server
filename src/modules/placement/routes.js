@@ -39,10 +39,11 @@ router.get('/companies', controller.listCompanies);
 router.post('/companies', validate({ body: z.object({
   name: z.string().min(1).max(200), website: z.string().max(500).optional().nullable(), industry: z.string().max(200).optional().nullable(),
   location: z.string().max(200).optional().nullable(), about: z.string().max(4000).optional().nullable(), logo_r2_key: z.string().optional().nullable(),
+  branch_id: uuid.optional().nullable(),
 }) }), controller.createCompany);
 router.post('/companies/bulk', validate({ body: z.object({ rows: z.array(z.object({
   name: z.string().min(1), website: z.string().optional().nullable(), industry: z.string().optional().nullable(), location: z.string().optional().nullable(), about: z.string().optional().nullable(),
-})).max(1000) }) }), controller.bulkCreateCompanies);
+})).max(1000), branch_id: uuid.optional().nullable() }) }), controller.bulkCreateCompanies);
 router.put('/companies/:id', validate({ params: idParam }), controller.updateCompany);
 router.delete('/companies/:id', validate({ params: idParam }), controller.deleteCompany);
 
@@ -51,7 +52,7 @@ router.get('/openings', controller.listOpenings); // ?status=open|closed
 router.post('/openings', validate({ body: z.object({
   company_id: uuid, title: z.string().min(1).max(200), description: z.string().max(8000).optional().nullable(),
   ctc: z.string().max(120).optional().nullable(), location: z.string().max(200).optional().nullable(), job_type: z.string().max(60).optional().nullable(),
-  criteria: criteriaSchema, poster_r2_key: z.string().optional().nullable(), program_id: uuid.optional().nullable(),
+  criteria: criteriaSchema, poster_r2_key: z.string().optional().nullable(), program_id: uuid.optional().nullable(), branch_id: uuid.optional().nullable(),
 }) }), controller.createOpening);
 router.get('/openings/:id/preview-audience', validate({ params: idParam }), controller.previewAudience);
 router.post('/openings/:id/fire', validate({ params: idParam, body: z.object({ branch_id: uuid.optional().nullable() }).optional() }), controller.fire);

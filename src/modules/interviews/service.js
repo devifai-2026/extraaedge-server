@@ -17,12 +17,22 @@ const assertProgramTrainer = async (tenant, programId, actor) => {
   if (!m) throw forbidden('You are not assigned to this course.');
 };
 
+// Resolve the branch to stamp on a new interview: an explicit valid branch, or
+// the creator's sole branch, else null (tenant-wide). super_admin isn't
+// branch-bound, so their interviews are tenant-wide unless a branch is passed.
+const interviewBranch = async (tenant, actor, branchId) => {
+  const mine = (await coursesRepo.branchesForUser(tenant, actor?.id)).map((b) => b.id);
+  if (branchId && (isAdmin(actor) || mine.includes(branchId))) return branchId;
+  return mine.length === 1 ? mine[0] : null;
+};
+
 export const create = async (tenant, actor, input) => {
   await assertProgramTrainer(tenant, input.program_id, actor);
   const categories = Array.isArray(input.categories) ? input.categories.filter((c) => c && c.name) : [];
   // With a rubric, the interview max = sum of category maxes.
   const maxMarks = categories.length ? categories.reduce((a, c) => a + (Number(c.max_marks) || 0), 0) : (input.max_marks ?? 100);
-  const iv = await repo.create(tenant, { ...input, max_marks: maxMarks }, actor?.id);
+  const branch_id = await interviewBranch(tenant, actor, input.branch_id);
+  const iv = await repo.create(tenant, { ...input, max_marks: maxMarks, branch_id }, actor?.id);
   if (categories.length) await repo.addCategories(tenant, iv.id, categories);
   return iv;
 };
@@ -35,9 +45,13 @@ export const programStudents = async (tenant, actor, programId) => {
   await assertProgramTrainer(tenant, programId, actor);
   return repo.programStudents(tenant, programId);
 };
-export const assignableHr = async (tenant, actor) => {
+export const assignableHr = async (tenant, actor, interviewId = null) => {
   if (!isAdmin(actor) && actor?.role !== LMS_TENANT_ROLES.HEAD_TRAINER && actor?.role !== LMS_TENANT_ROLES.TRAINER) return [];
-  return repo.assignableHr(tenant);
+  // Scope the HR list to the interview's branch when known, so a trainer can't
+  // assign an HR who doesn't serve that branch. No interview / no branch → all HR.
+  let branchId = null;
+  if (interviewId) { const iv = await repo.get(tenant, interviewId); branchId = iv?.branch_id || null; }
+  return repo.assignableHr(tenant, branchId);
 };
 
 // A slot with its per-category scores attached, plus completeness flags:
@@ -124,7 +138,11 @@ export const scoreSlot = async (tenant, actor, slotId, scores) => {
 
 // ---------- HR queue (interviews the HR user evaluates) ----------
 export const hrQueue = async (tenant, actor) => {
-  const interviews = await repo.listForHr(tenant, actor?.id);
+  // Scope to the HR's own branch(es): admins see all; an HR with branch
+  // memberships sees only interviews in those branches (or legacy NULL).
+  const mine = isAdmin(actor) ? null : (await coursesRepo.branchesForUser(tenant, actor?.id)).map((b) => b.id);
+  const scope = mine && mine.length ? mine : null;
+  const interviews = await repo.listForHr(tenant, actor?.id, scope);
   return Promise.all(interviews.map(async (iv) => {
     const [slots, categories] = await Promise.all([repo.listSlots(tenant, iv.id), repo.listCategories(tenant, iv.id)]);
     return { ...iv, categories, slots: await withScores(tenant, slots, categories) };

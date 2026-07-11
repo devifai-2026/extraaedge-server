@@ -1,15 +1,30 @@
 // Placement data access: companies, job openings, applications, and the
 // criteria-matched student audience. Pure tenantQuery SQL.
+//
+// Branch scoping: read helpers take `branchScope` — null means "all branches"
+// (super_admin / "All branches" switcher), an array of branch ids restricts to
+// those branches. A branch condition always also admits legacy rows with
+// branch_id IS NULL so pre-F3 data stays visible. The service resolves the
+// scope from the actor's branch memberships.
 import { tenantQuery } from '../../db/tenant.js';
 
+// Build a "(alias.branch_id IS NULL OR alias.branch_id = ANY($n))" clause, or ''
+// when branchScope is null (no restriction). Pushes the array param.
+const branchClause = (alias, branchScope, params) => {
+  if (!branchScope) return '';
+  params.push(branchScope);
+  return ` AND (${alias}.branch_id IS NULL OR ${alias}.branch_id = ANY($${params.length}))`;
+};
+
 // ---------- Companies ----------
-export const listCompanies = async (tenant) => {
+export const listCompanies = async (tenant, branchScope = null) => {
+  const params = [];
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT c.id, c.name, c.website, c.industry, c.location, c.about, c.logo_r2_key, c.created_at,
+    `SELECT c.id, c.name, c.website, c.industry, c.location, c.about, c.logo_r2_key, c.branch_id, c.created_at,
             (SELECT count(*)::int FROM job_openings o WHERE o.company_id = c.id AND o.deleted_at IS NULL) AS opening_count
-       FROM companies c WHERE c.deleted_at IS NULL ORDER BY c.name`,
-    [],
+       FROM companies c WHERE c.deleted_at IS NULL${branchClause('c', branchScope, params)} ORDER BY c.name`,
+    params,
   );
   return rows;
 };
@@ -17,9 +32,9 @@ export const listCompanies = async (tenant) => {
 export const createCompany = async (tenant, c, actorId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO companies (name, website, industry, location, about, logo_r2_key, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-    [c.name, c.website ?? null, c.industry ?? null, c.location ?? null, c.about ?? null, c.logo_r2_key ?? null, actorId ?? null],
+    `INSERT INTO companies (name, website, industry, location, about, logo_r2_key, branch_id, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    [c.name, c.website ?? null, c.industry ?? null, c.location ?? null, c.about ?? null, c.logo_r2_key ?? null, c.branch_id ?? null, actorId ?? null],
   );
   return rows[0];
 };
@@ -38,16 +53,17 @@ export const deleteCompany = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE companies SET deleted_at=now(), updated_at=now() WHERE id=$1`, [id]);
 };
 
-// Bulk insert (CSV). Returns inserted count.
-export const bulkCreateCompanies = async (tenant, list, actorId) => {
+// Bulk insert (CSV). All rows land in `branchId` (the importer's active branch,
+// or null for tenant-wide). Returns inserted count.
+export const bulkCreateCompanies = async (tenant, list, actorId, branchId = null) => {
   let n = 0;
   for (const c of list) {
     if (!c.name) continue; // eslint-disable-line no-continue
     // eslint-disable-next-line no-await-in-loop
     await tenantQuery(
       tenant,
-      `INSERT INTO companies (name, website, industry, location, about, created_by) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [c.name, c.website ?? null, c.industry ?? null, c.location ?? null, c.about ?? null, actorId ?? null],
+      `INSERT INTO companies (name, website, industry, location, about, branch_id, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [c.name, c.website ?? null, c.industry ?? null, c.location ?? null, c.about ?? null, branchId ?? null, actorId ?? null],
     );
     n += 1;
   }
@@ -55,10 +71,11 @@ export const bulkCreateCompanies = async (tenant, list, actorId) => {
 };
 
 // ---------- Openings ----------
-export const listOpenings = async (tenant, { status } = {}) => {
+export const listOpenings = async (tenant, { status, branchScope = null } = {}) => {
   const params = [];
   let where = 'o.deleted_at IS NULL';
   if (status) { params.push(status); where += ` AND o.status = $${params.length}`; }
+  where += branchClause('o', branchScope, params);
   const { rows } = await tenantQuery(
     tenant,
     `SELECT o.*, co.name AS company_name, co.logo_r2_key AS company_logo_r2_key, p.name AS program_name,
@@ -84,9 +101,9 @@ export const getOpening = async (tenant, id) => {
 export const createOpening = async (tenant, o, actorId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO job_openings (company_id, title, description, ctc, location, job_type, status, criteria, poster_r2_key, program_id, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,'open',$7,$8,$9,$10) RETURNING *`,
-    [o.company_id, o.title, o.description ?? null, o.ctc ?? null, o.location ?? null, o.job_type ?? null, JSON.stringify(o.criteria ?? {}), o.poster_r2_key ?? null, o.program_id ?? null, actorId ?? null],
+    `INSERT INTO job_openings (company_id, title, description, ctc, location, job_type, status, criteria, poster_r2_key, program_id, branch_id, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,'open',$7,$8,$9,$10,$11) RETURNING *`,
+    [o.company_id, o.title, o.description ?? null, o.ctc ?? null, o.location ?? null, o.job_type ?? null, JSON.stringify(o.criteria ?? {}), o.poster_r2_key ?? null, o.program_id ?? null, o.branch_id ?? null, actorId ?? null],
   );
   return rows[0];
 };
@@ -198,16 +215,31 @@ export const applicationById = async (tenant, id) => {
 };
 
 // ---------- Counts (dashboard) ----------
-export const counts = async (tenant) => {
+// Branch-scoped: openings/companies filter by their own branch_id; applications
+// (no branch column) inherit their opening's branch. Adds a fired→selected
+// funnel for the placement dashboard.
+export const counts = async (tenant, branchScope = null) => {
+  const params = [];
+  const coB = branchClause('companies', branchScope, params);
+  // Openings + application subqueries each need their own placeholder set — build
+  // a fresh clause per correlated subquery so the params line up.
+  const oB1 = branchClause('o', branchScope, params);
+  const oB2 = branchClause('o', branchScope, params);
+  const oB3 = branchClause('o', branchScope, params);
+  const oB4 = branchClause('o', branchScope, params);
+  const oB5 = branchClause('o', branchScope, params);
+  const oB6 = branchClause('o', branchScope, params);
   const { rows } = await tenantQuery(
     tenant,
     `SELECT
-       (SELECT count(*)::int FROM companies WHERE deleted_at IS NULL) AS companies,
-       (SELECT count(*)::int FROM job_openings WHERE deleted_at IS NULL AND status='open') AS open_positions,
-       (SELECT count(*)::int FROM job_openings WHERE deleted_at IS NULL AND status='closed') AS closed_positions,
-       (SELECT count(*)::int FROM job_applications) AS applications,
-       (SELECT count(*)::int FROM job_applications WHERE status='selected') AS selected`,
-    [],
+       (SELECT count(*)::int FROM companies WHERE deleted_at IS NULL${coB}) AS companies,
+       (SELECT count(*)::int FROM job_openings o WHERE o.deleted_at IS NULL AND o.status='open'${oB1}) AS open_positions,
+       (SELECT count(*)::int FROM job_openings o WHERE o.deleted_at IS NULL AND o.status='closed'${oB2}) AS closed_positions,
+       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE o.deleted_at IS NULL${oB3}) AS applications,
+       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status='fired'${oB4}) AS fired,
+       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status IN ('applied','shortlisted','selected')${oB5}) AS applied,
+       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status='selected'${oB6}) AS selected`,
+    params,
   );
   return rows[0] || {};
 };
@@ -229,15 +261,35 @@ export const studentOpenings = async (tenant, studentId) => {
   return rows;
 };
 
-// Public posters: all OPEN openings that carry a poster (student marketing feed).
-export const posterFeed = async (tenant) => {
+// A student's branch (via admission→lead). Null if not derivable.
+export const studentBranchId = async (tenant, studentId) => {
+  const has = await tenantQuery(tenant, `SELECT to_regclass('branches') IS NOT NULL AS ok`, []);
+  if (!has.rows[0]?.ok) return null;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.branch_id FROM students s
+       JOIN admissions a ON a.id = s.admission_id
+       JOIN leads l ON l.id = a.lead_id
+      WHERE s.id = $1 LIMIT 1`,
+    [studentId],
+  );
+  return rows[0]?.branch_id || null;
+};
+
+// Open openings with a poster (student marketing feed), scoped to the student's
+// branch — a student sees their branch's posters + tenant-wide (branch_id NULL)
+// ones, never another branch's marketing.
+export const posterFeed = async (tenant, branchId = null) => {
+  const params = [];
+  let branchCond = '';
+  if (branchId) { params.push(branchId); branchCond = ` AND (o.branch_id IS NULL OR o.branch_id = $${params.length})`; }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT o.id, o.title, o.poster_r2_key, co.name AS company_name
        FROM job_openings o JOIN companies co ON co.id = o.company_id
-      WHERE o.deleted_at IS NULL AND o.status='open' AND o.poster_r2_key IS NOT NULL
+      WHERE o.deleted_at IS NULL AND o.status='open' AND o.poster_r2_key IS NOT NULL${branchCond}
       ORDER BY o.created_at DESC LIMIT 30`,
-    [],
+    params,
   );
   return rows;
 };

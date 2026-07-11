@@ -3,20 +3,20 @@ import * as service from './service.js';
 const ok = (res, req, data, status = 200) => res.status(status).json({ data, meta: { requestId: req.id } });
 
 // Companies
-export const listCompanies = async (req, res, next) => { try { ok(res, req, await service.listCompanies(req.tenant)); } catch (e) { next(e); } };
+export const listCompanies = async (req, res, next) => { try { ok(res, req, await service.listCompanies(req.tenant, req.user, req.query.branch_id || null)); } catch (e) { next(e); } };
 export const createCompany = async (req, res, next) => { try { ok(res, req, await service.createCompany(req.tenant, req.user, req.body), 201); } catch (e) { next(e); } };
 export const updateCompany = async (req, res, next) => { try { ok(res, req, await service.updateCompany(req.tenant, req.user, req.params.id, req.body)); } catch (e) { next(e); } };
 export const deleteCompany = async (req, res, next) => { try { ok(res, req, await service.deleteCompany(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
-export const bulkCreateCompanies = async (req, res, next) => { try { ok(res, req, await service.bulkCreateCompanies(req.tenant, req.user, req.body.rows), 201); } catch (e) { next(e); } };
+export const bulkCreateCompanies = async (req, res, next) => { try { ok(res, req, await service.bulkCreateCompanies(req.tenant, req.user, req.body.rows, req.body?.branch_id || req.query.branch_id || null), 201); } catch (e) { next(e); } };
 
 // Openings
-export const listOpenings = async (req, res, next) => { try { ok(res, req, await service.listOpenings(req.tenant, req.query.status)); } catch (e) { next(e); } };
+export const listOpenings = async (req, res, next) => { try { ok(res, req, await service.listOpenings(req.tenant, req.user, req.query.status, req.query.branch_id || null)); } catch (e) { next(e); } };
 export const createOpening = async (req, res, next) => { try { ok(res, req, await service.createOpening(req.tenant, req.user, req.body), 201); } catch (e) { next(e); } };
 export const setOpeningStatus = async (req, res, next) => { try { ok(res, req, await service.setOpeningStatus(req.tenant, req.user, req.params.id, req.body.status)); } catch (e) { next(e); } };
 export const deleteOpening = async (req, res, next) => { try { ok(res, req, await service.deleteOpening(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
 export const previewAudience = async (req, res, next) => { try { ok(res, req, await service.previewAudience(req.tenant, req.user, req.params.id, req.query.branch_id || null)); } catch (e) { next(e); } };
 export const fire = async (req, res, next) => { try { ok(res, req, await service.fire(req.tenant, req.user, req.params.id, req.body?.branch_id || null), 201); } catch (e) { next(e); } };
-export const counts = async (req, res, next) => { try { ok(res, req, await service.counts(req.tenant)); } catch (e) { next(e); } };
+export const counts = async (req, res, next) => { try { ok(res, req, await service.counts(req.tenant, req.user, req.query.branch_id || null)); } catch (e) { next(e); } };
 export const programModules = async (req, res, next) => { try { ok(res, req, await service.programModules(req.tenant, req.params.programId)); } catch (e) { next(e); } };
 
 // Applications

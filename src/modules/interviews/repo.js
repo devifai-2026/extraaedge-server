@@ -3,9 +3,9 @@ import { tenantQuery } from '../../db/tenant.js';
 export const create = async (tenant, input, actorId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO mock_interviews (program_id, title, meeting_url, max_marks, created_by)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-    [input.program_id, input.title, input.meeting_url ?? null, input.max_marks ?? 100, actorId ?? null],
+    `INSERT INTO mock_interviews (program_id, title, meeting_url, max_marks, branch_id, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [input.program_id, input.title, input.meeting_url ?? null, input.max_marks ?? 100, input.branch_id ?? null, actorId ?? null],
   );
   return rows[0];
 };
@@ -126,15 +126,20 @@ export const slotScores = async (tenant, slotId) => {
   return rows;
 };
 
-// Interviews an HR user is the assigned evaluator on.
-export const listForHr = async (tenant, hrUserId) => {
+// Interviews an HR user is the assigned evaluator on. Branch-scoped: when a
+// branch scope (array of the HR's branch ids) is given, only interviews in one
+// of those branches (or legacy branch_id NULL) are returned.
+export const listForHr = async (tenant, hrUserId, branchScope = null) => {
+  const params = [hrUserId];
+  let branchCond = '';
+  if (branchScope) { params.push(branchScope); branchCond = ` AND (i.branch_id IS NULL OR i.branch_id = ANY($${params.length}))`; }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT i.id, i.title, i.meeting_url, i.max_marks, i.program_id, p.name AS program_name, i.created_at,
             (SELECT count(*)::int FROM interview_slots s WHERE s.interview_id = i.id AND s.deleted_at IS NULL) AS slot_count
        FROM mock_interviews i LEFT JOIN programs p ON p.id = i.program_id
-      WHERE i.hr_user_id = $1 AND i.deleted_at IS NULL ORDER BY i.created_at DESC`,
-    [hrUserId],
+      WHERE i.hr_user_id = $1 AND i.deleted_at IS NULL${branchCond} ORDER BY i.created_at DESC`,
+    params,
   );
   return rows;
 };
@@ -203,12 +208,31 @@ export const studentProgram = async (tenant, studentId) => {
   return rows[0]?.program_id || null;
 };
 
-// HR users to pick as the interview's soft-skill evaluator.
-export const assignableHr = async (tenant) => {
+// HR users to pick as the interview's soft-skill evaluator. When `branchId` is
+// given (the interview's branch), only HR who serve that branch are returned:
+// HR with no branch (tenant-wide) OR who are a member of the branch via their
+// primary users.branch_id or the user_branches join. Guarded by to_regclass so
+// it works whether or not user_branches exists.
+export const assignableHr = async (tenant, branchId = null) => {
+  if (!branchId) {
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT id, name, email FROM users WHERE role = 'hr' AND is_active = true AND deleted_at IS NULL ORDER BY name`,
+      [],
+    );
+    return rows;
+  }
+  const hasUB = await tenantQuery(tenant, `SELECT to_regclass('user_branches') IS NOT NULL AS ok`, []);
+  const ubClause = hasUB.rows[0]?.ok
+    ? `OR EXISTS (SELECT 1 FROM user_branches ub WHERE ub.user_id = u.id AND ub.branch_id = $1)`
+    : '';
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT id, name, email FROM users WHERE role = 'hr' AND is_active = true AND deleted_at IS NULL ORDER BY name`,
-    [],
+    `SELECT u.id, u.name, u.email FROM users u
+      WHERE u.role = 'hr' AND u.is_active = true AND u.deleted_at IS NULL
+        AND (u.branch_id IS NULL OR u.branch_id = $1 ${ubClause})
+      ORDER BY u.name`,
+    [branchId],
   );
   return rows;
 };
