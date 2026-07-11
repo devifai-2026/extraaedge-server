@@ -247,6 +247,7 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'trainer.projects',
   'trainer.interviews',
   'trainer.leaderboard',
+  'trainer.materials',
   // Student panel surfaces (seeded to the student role). Rendered in the
   // separate /student/* layout, gated to the student principal.
   'student.home',
@@ -256,6 +257,8 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'student.projects',
   'student.leaderboard',
   'student.catalog',
+  'student.materials',
+  'student.certificate',
   // LMS analytics dashboards — super_admin + branch_manager (branch-scoped).
   'lms.analytics',
 ]);
@@ -276,6 +279,7 @@ export const TRAINER_TAB_KEYS = Object.freeze([
   'trainer.classes', 'trainer.attendance', 'trainer.recordings',
   'trainer.announcements', 'trainer.forum', 'trainer.tests',
   'trainer.projects', 'trainer.interviews', 'trainer.leaderboard',
+  'trainer.materials',
 ]);
 export const HEAD_TRAINER_TAB_KEYS = Object.freeze([
   'courses.manage', ...TRAINER_TAB_KEYS,
@@ -283,4 +287,5 @@ export const HEAD_TRAINER_TAB_KEYS = Object.freeze([
 export const STUDENT_TAB_KEYS = Object.freeze([
   'student.home', 'student.classes', 'student.forum', 'student.tests',
   'student.projects', 'student.leaderboard', 'student.catalog',
+  'student.materials', 'student.certificate',
 ]);
