@@ -28,6 +28,10 @@ router.use(staff);
 
 // Courses
 router.get('/', controller.listCourses);
+// Teaching-staff pool for the "add trainer" picker (head trainers can't list
+// all users; this returns just head_trainer/trainer users). MUST be before the
+// /:programId route so it isn't captured as a programId.
+router.get('/assignable-staff', controller.assignableStaff);
 router.get('/:programId', validate({ params: programParam }), controller.getCourse);
 
 // Modules
@@ -41,6 +45,9 @@ router.put('/:programId/modules/:moduleId', validate({ params: z.object({ progra
   order_index: z.number().int().optional(), syllabus: z.array(z.any()).optional(),
 }) }), controller.updateModule);
 router.delete('/:programId/modules/:moduleId', validate({ params: z.object({ programId: uuid, moduleId: uuid }) }), controller.deleteModule);
+
+// Attendance history (per-student summary across the course's classes)
+router.get('/:programId/attendance-history', validate({ params: programParam }), controller.attendanceHistory);
 
 // Trainers
 router.get('/:programId/trainers', validate({ params: programParam }), controller.listTrainers);

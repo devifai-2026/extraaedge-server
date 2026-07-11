@@ -34,6 +34,12 @@ export const addTrainer = async (req, res, next) => {
 export const removeTrainer = async (req, res, next) => {
   try { await service.removeTrainer(req.tenant, req.user, req.params.programId, req.params.id); res.status(204).end(); } catch (e) { next(e); }
 };
+export const assignableStaff = async (req, res, next) => {
+  try { ok(res, req, await service.assignableStaff(req.tenant)); } catch (e) { next(e); }
+};
+export const attendanceHistory = async (req, res, next) => {
+  try { ok(res, req, await service.attendanceHistory(req.tenant, req.user, req.params.programId)); } catch (e) { next(e); }
+};
 
 // ---- Batches ----
 export const listBatches = async (req, res, next) => {

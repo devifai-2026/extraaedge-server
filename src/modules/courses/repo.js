@@ -143,6 +143,45 @@ export const removeTrainer = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE course_trainers SET deleted_at = now() WHERE id = $1`, [id]);
 };
 
+// Per-student attendance summary across a course's ended classes (their batch's
+// classes). Drives the trainer "attendance history" view.
+export const attendanceHistory = async (tenant, programId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT s.id AS student_id, s.name, b.name AS batch_name,
+            count(c.id) FILTER (WHERE c.ended_at IS NOT NULL) AS total,
+            count(*) FILTER (WHERE att.status = 'present') AS present,
+            count(*) FILTER (WHERE att.status = 'absent') AS absent
+       FROM students s
+       JOIN batch_students bs ON bs.student_id = s.id AND bs.deleted_at IS NULL
+       JOIN batches b ON b.id = bs.batch_id AND b.deleted_at IS NULL
+       LEFT JOIN classes c ON c.batch_id = bs.batch_id AND c.deleted_at IS NULL AND c.program_id = $1
+       LEFT JOIN attendance att ON att.class_id = c.id AND att.student_id = s.id
+      WHERE s.program_id = $1 AND s.deleted_at IS NULL
+      GROUP BY s.id, s.name, b.name
+      ORDER BY s.name`,
+    [programId],
+  );
+  return rows.map((r) => {
+    const total = Number(r.total) || 0;
+    const present = Number(r.present) || 0;
+    return { student_id: r.student_id, name: r.name, batch_name: r.batch_name, present, absent: Number(r.absent) || 0, total, pct: total ? Math.round((present / total) * 100) : null };
+  });
+};
+
+// Teaching staff who can be added to a course roster (head_trainer / trainer),
+// so a head trainer (who can't list all users) can populate the picker.
+export const assignableStaff = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, name, email, role FROM users
+      WHERE role IN ('head_trainer','trainer') AND is_active = true AND deleted_at IS NULL
+      ORDER BY name`,
+    [],
+  );
+  return rows;
+};
+
 // ---------- Batches ----------
 
 export const listBatches = async (tenant, programId) => {

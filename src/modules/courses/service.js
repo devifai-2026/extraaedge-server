@@ -87,6 +87,16 @@ export const removeTrainer = async (tenant, actor, programId, id) => {
   await repo.removeTrainer(tenant, id);
 };
 
+// The pool of teaching users a head/admin can add to a roster. No course scope
+// needed (it's the tenant's trainer pool), but still staff-gated by the router.
+export const assignableStaff = async (tenant) => repo.assignableStaff(tenant);
+
+// Per-student attendance history for a course (any roster trainer or admin).
+export const attendanceHistory = async (tenant, actor, programId) => {
+  await assertCanRead(tenant, programId, actor);
+  return repo.attendanceHistory(tenant, programId);
+};
+
 // ---------- Batches (head_trainer / admin only) ----------
 export const listBatches = async (tenant, actor, programId) => {
   await assertCanRead(tenant, programId, actor);
