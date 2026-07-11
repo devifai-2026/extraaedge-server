@@ -64,7 +64,10 @@ export const getByRequestId = (requestId) =>
 // 'minute' or 'hour'. Returns { summary, series, statusSeries, topEndpoints }.
 export const metrics = async ({ sinceExpr, bucket }) => {
   const since = `now() - interval '${sinceExpr}'`;
-  const [summary, series, statusSeries, topEndpoints] = await Promise.all([
+  const [
+    summary, series, statusSeries, topEndpoints,
+    byTenant, byCategory, slowest, methodMix, recentErrors, live60s, topErrorEndpoints,
+  ] = await Promise.all([
     selectOne(
       sysQuery,
       `SELECT
@@ -75,7 +78,10 @@ export const metrics = async ({ sinceExpr, bucket }) => {
          percentile_disc(0.50) WITHIN GROUP (ORDER BY duration_ms)::int AS p50_ms,
          percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95_ms,
          percentile_disc(0.99) WITHIN GROUP (ORDER BY duration_ms)::int AS p99_ms,
-         count(DISTINCT tenant_slug)::int AS active_tenants
+         percentile_disc(0.999) WITHIN GROUP (ORDER BY duration_ms)::int AS p999_ms,
+         max(duration_ms)::int AS max_ms,
+         count(DISTINCT tenant_slug)::int AS active_tenants,
+         count(DISTINCT actor_email)::int AS active_users
        FROM platform_request_log WHERE created_at >= ${since}`,
     ),
     selectMany(
@@ -108,8 +114,73 @@ export const metrics = async ({ sinceExpr, bucket }) => {
          FROM platform_request_log WHERE created_at >= ${since}
         GROUP BY 1, 2 ORDER BY requests DESC LIMIT 15`,
     ),
+    // Traffic by tenant — who's driving load (top 10 + error rate each).
+    selectMany(
+      sysQuery,
+      `SELECT COALESCE(tenant_slug, '(platform)') AS tenant,
+              count(*)::int AS requests,
+              count(*) FILTER (WHERE is_error)::int AS errors,
+              round(100.0 * count(*) FILTER (WHERE is_error) / NULLIF(count(*),0), 1)::float AS error_rate,
+              percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95_ms
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1 ORDER BY requests DESC LIMIT 10`,
+    ),
+    // Traffic by request category (lead_create, followup, auth, bulk_import…).
+    selectMany(
+      sysQuery,
+      `SELECT COALESCE(category, 'other') AS category, count(*)::int AS requests
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1 ORDER BY requests DESC LIMIT 10`,
+    ),
+    // Slowest endpoints by p95 (min 5 hits, so a one-off doesn't dominate).
+    selectMany(
+      sysQuery,
+      `SELECT COALESCE(route, path) AS endpoint, method,
+              count(*)::int AS requests,
+              percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95_ms,
+              max(duration_ms)::int AS max_ms
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1, 2 HAVING count(*) >= 5 ORDER BY p95_ms DESC LIMIT 12`,
+    ),
+    // HTTP method mix.
+    selectMany(
+      sysQuery,
+      `SELECT method, count(*)::int AS requests
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1 ORDER BY requests DESC`,
+    ),
+    // Recent errors feed (latest 20 4xx/5xx) for the live "what's breaking" list.
+    selectMany(
+      sysQuery,
+      `SELECT created_at, method, COALESCE(route, path) AS endpoint, status_code,
+              COALESCE(tenant_slug, '(platform)') AS tenant, duration_ms, error_message
+         FROM platform_request_log
+        WHERE created_at >= ${since} AND is_error = true
+        ORDER BY created_at DESC LIMIT 20`,
+    ),
+    // Live pulse: requests + errors in the last 60 seconds (real-time up/down).
+    selectOne(
+      sysQuery,
+      `SELECT count(*)::int AS requests,
+              count(*) FILTER (WHERE is_error)::int AS errors,
+              round(avg(duration_ms))::int AS avg_ms
+         FROM platform_request_log WHERE created_at >= now() - interval '60 seconds'`,
+    ),
+    // Endpoints producing the most errors.
+    selectMany(
+      sysQuery,
+      `SELECT COALESCE(route, path) AS endpoint, method,
+              count(*) FILTER (WHERE is_error)::int AS errors,
+              count(*)::int AS requests
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1, 2 HAVING count(*) FILTER (WHERE is_error) > 0
+        ORDER BY errors DESC LIMIT 10`,
+    ),
   ]);
-  return { summary, series, statusSeries, topEndpoints };
+  return {
+    summary, series, statusSeries, topEndpoints,
+    byTenant, byCategory, slowest, methodMix, recentErrors, live60s, topErrorEndpoints,
+  };
 };
 
 export const facets = async () => {
