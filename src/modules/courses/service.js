@@ -11,6 +11,7 @@ import * as usersService from '../users/service.js';
 import * as usersRepo from '../users/repo.js';
 import * as studentAuthService from '../student-auth/service.js';
 import * as studentAuthRepo from '../student-auth/repo.js';
+import { pushStudentNotification } from '../student-notifications/service.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
@@ -164,6 +165,8 @@ export const placeStudent = async (tenant, actor, programId, input) => {
   for (const sid of ids) {
     // eslint-disable-next-line no-await-in-loop
     await repo.placeStudentInBatch(tenant, { batchId: input.batch_id, studentId: sid, shareRecordings: !!input.share_recordings }, actor?.id);
+    // Notify each placed student they've joined the batch.
+    pushStudentNotification(tenant, sid, { type: 'batch_assigned', message: `You've been added to batch "${batch.name}".`, link: '/student/course', metadata: { batch_id: input.batch_id } });
   }
   return { placed: ids.length };
 };

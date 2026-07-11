@@ -9,6 +9,7 @@ import * as coursesRepo from '../courses/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { emitToBatch } from '../../lib/socket.js';
+import { notifyBatch } from '../student-notifications/service.js';
 
 const isSuperAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN
   || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
@@ -35,7 +36,12 @@ export const listClasses = async (tenant, actor, query) => {
 export const createClass = async (tenant, actor, input) => {
   await assertCourseTrainer(tenant, input.program_id, actor);
   if (new Date(input.ends_at) <= new Date(input.starts_at)) throw validationError({ ends_at: 'End must be after start' });
-  return repo.createClass(tenant, input, actor?.id);
+  const row = await repo.createClass(tenant, input, actor?.id);
+  // Notify the batch's students that a class is on the calendar.
+  notifyBatch(tenant, { batchId: input.batch_id }, {
+    type: 'class_scheduled', message: `New class scheduled: ${input.title}`, link: '/student/classes', metadata: { class_id: row?.id },
+  });
+  return row;
 };
 
 export const updateClass = async (tenant, actor, id, input) => {
@@ -80,6 +86,10 @@ export const fireQuestion = async (tenant, actor, classId, input) => {
   emitToBatch(tenant.id, c.batch_id, 'lms:attendance-question', {
     class_id: classId,
     question: { id: q.id, question: q.question, options: q.options, closes_at: q.closes_at, visible_minutes: q.visible_minutes },
+  });
+  // Also drop a persistent notification so students who aren't looking get nudged.
+  notifyBatch(tenant, { batchId: c.batch_id }, {
+    type: 'attendance_question', message: 'Live attendance question — answer now to be marked present', link: '/student/classes', metadata: { class_id: classId },
   });
   return q;
 };

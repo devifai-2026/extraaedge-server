@@ -9,6 +9,7 @@ import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { notifyBatch } from '../student-notifications/service.js';
 
 const MIN_ATTENDANCE_PCT = 50; // certificate threshold
 
@@ -36,7 +37,11 @@ export const createMaterial = async (tenant, actor, input) => {
   await assertProgramTrainer(tenant, input.program_id, actor);
   if (input.kind === 'link' && !input.url) throw validationError({ url: 'A link URL is required.' });
   if (input.kind === 'file' && !input.r2_key) throw validationError({ r2_key: 'Upload the file first.' });
-  return repo.createMaterial(tenant, input, actor?.id);
+  const row = await repo.createMaterial(tenant, input, actor?.id);
+  notifyBatch(tenant, { programId: input.program_id }, {
+    type: 'material_added', message: `New study material: ${input.title}`, link: '/student/materials', metadata: { material_id: row?.id },
+  });
+  return row;
 };
 
 export const deleteMaterial = async (tenant, actor, id) => {
