@@ -36,6 +36,11 @@ router.get('/assignable-staff', controller.assignableStaff);
 router.get('/insights', controller.trainerInsights);
 // Branches the actor can switch between (multi-branch trainers).
 router.get('/my-branches', controller.myBranches);
+// Trainer leave (Phase G9c). Placed before /:programId so they aren't captured.
+router.get('/leaves/mine', controller.myLeaves);
+router.post('/leaves', validate({ body: z.object({ trainer_id: uuid.optional(), from_date: z.string(), to_date: z.string(), reason: z.string().max(1000).optional().nullable() }) }), controller.markLeave);
+router.delete('/leaves/:id', validate({ params: z.object({ id: uuid }) }), controller.cancelLeave);
+router.get('/leaves', controller.programLeaves); // ?programId= (head/admin roster view)
 // Students management (admin + head trainer, course-scoped): list, reset pw, sudo.
 router.get('/students', controller.listCourseStudents);
 router.post('/students/:studentId/reset-password', validate({ params: z.object({ studentId: uuid }) }), controller.resetStudentPassword);

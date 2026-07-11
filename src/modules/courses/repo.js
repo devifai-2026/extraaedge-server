@@ -543,3 +543,44 @@ export const studentDashboard = async (tenant, studentId) => {
     },
   };
 };
+
+// ---------- Trainer leave (Phase G9c) ----------
+export const createLeave = async (tenant, { trainer_id, from_date, to_date, reason }, actorId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO trainer_leave (trainer_id, from_date, to_date, reason, created_by)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [trainer_id, from_date, to_date, reason ?? null, actorId ?? null],
+  );
+  return rows[0];
+};
+
+export const myLeaves = async (tenant, trainerId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, from_date, to_date, reason, status, created_at
+       FROM trainer_leave WHERE trainer_id = $1 AND deleted_at IS NULL
+      ORDER BY from_date DESC`,
+    [trainerId],
+  );
+  return rows;
+};
+
+export const cancelLeave = async (tenant, id, trainerId) => {
+  await tenantQuery(tenant, `UPDATE trainer_leave SET deleted_at = now() WHERE id = $1 AND trainer_id = $2`, [id, trainerId]);
+};
+
+// Upcoming leaves for the trainers on a course's roster (head-trainer view).
+export const leavesForProgram = async (tenant, programId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.id, l.trainer_id, u.name AS trainer_name, l.from_date, l.to_date, l.reason, l.status
+       FROM trainer_leave l
+       JOIN users u ON u.id = l.trainer_id
+      WHERE l.deleted_at IS NULL AND l.to_date >= current_date
+        AND l.trainer_id IN (SELECT user_id FROM course_trainers WHERE program_id = $1 AND deleted_at IS NULL)
+      ORDER BY l.from_date`,
+    [programId],
+  );
+  return rows;
+};

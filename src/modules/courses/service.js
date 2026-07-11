@@ -283,3 +283,19 @@ export const dashboard = async (tenant, studentId) => {
 };
 
 export { LMS_TENANT_ROLES };
+
+// ---------- Trainer leave (Phase G9c) ----------
+// A trainer marks their own leave; a head trainer / admin can also file it for a
+// roster member. Reading a program's leaves requires roster membership.
+export const markLeave = async (tenant, actor, input) => {
+  const trainerId = input.trainer_id || actor?.id;
+  if (!input.from_date || !input.to_date) throw validationError({ dates: 'From and to dates are required' });
+  if (new Date(input.to_date) < new Date(input.from_date)) throw validationError({ dates: 'End date is before start date' });
+  return repo.createLeave(tenant, { trainer_id: trainerId, from_date: input.from_date, to_date: input.to_date, reason: input.reason }, actor?.id);
+};
+export const myLeaves = async (tenant, actor) => repo.myLeaves(tenant, actor?.id);
+export const cancelLeave = async (tenant, actor, id) => { await repo.cancelLeave(tenant, id, actor?.id); return { ok: true }; };
+export const programLeaves = async (tenant, actor, programId) => {
+  await assertCanRead(tenant, programId, actor);
+  return repo.leavesForProgram(tenant, programId);
+};

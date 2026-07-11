@@ -89,3 +89,9 @@ export const myCourse = async (req, res, next) => {
 export const dashboard = async (req, res, next) => {
   try { ok(res, req, await service.dashboard(req.tenant, req.student.id)); } catch (e) { next(e); }
 };
+
+// ---- Trainer leave (Phase G9c) ----
+export const markLeave = async (req, res, next) => { try { ok(res, req, await service.markLeave(req.tenant, req.user, req.body), 201); } catch (e) { next(e); } };
+export const myLeaves = async (req, res, next) => { try { ok(res, req, await service.myLeaves(req.tenant, req.user)); } catch (e) { next(e); } };
+export const cancelLeave = async (req, res, next) => { try { ok(res, req, await service.cancelLeave(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
+export const programLeaves = async (req, res, next) => { try { ok(res, req, await service.programLeaves(req.tenant, req.user, req.query.programId)); } catch (e) { next(e); } };
