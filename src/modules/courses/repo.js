@@ -251,13 +251,22 @@ export const studentsForPrograms = async (tenant, programIds, limit = 24) => {
 // admin/head "Students" management table.
 export const courseStudents = async (tenant, programIds) => {
   if (!programIds.length) return [];
+  const hasBranches = await tenantQuery(tenant, `SELECT to_regclass('branches') IS NOT NULL AS ok`, []);
+  const branchJoin = hasBranches.rows[0]?.ok
+    ? `LEFT JOIN admissions a ON a.id = s.admission_id
+       LEFT JOIN leads l ON l.id = a.lead_id
+       LEFT JOIN branches br ON br.id = l.branch_id`
+    : '';
+  const branchSel = hasBranches.rows[0]?.ok ? 'br.id AS branch_id, br.name AS branch_name,' : 'NULL::uuid AS branch_id, NULL::text AS branch_name,';
   const { rows } = await tenantQuery(
     tenant,
     `SELECT s.id, s.name, s.email, s.phone, s.status, s.program_id, p.name AS program_name,
+            ${branchSel}
             (SELECT b.name FROM batch_students bs JOIN batches b ON b.id = bs.batch_id
               WHERE bs.student_id = s.id AND bs.deleted_at IS NULL ORDER BY bs.joined_at DESC LIMIT 1) AS batch_name
        FROM students s
        LEFT JOIN programs p ON p.id = s.program_id
+       ${branchJoin}
       WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL
       ORDER BY s.created_at DESC`,
     [programIds],
