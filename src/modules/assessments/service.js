@@ -72,6 +72,22 @@ export const takeTest = async (tenant, studentId, testId) => {
 };
 
 // Auto-score against correct_index, one attempt only.
+// Build the per-question review (question, options, the student's answer, the
+// correct answer, and whether they got it right). Shown to the student after
+// submit and whenever they revisit a completed test — results are published to
+// both the student and the trainer.
+const buildReview = (questions, answers) => questions.map((q, i) => {
+  const your = answers?.[i];
+  const correctIndex = q.correct_index != null ? Number(q.correct_index) : null;
+  const correct = correctIndex != null && Number(your) === correctIndex;
+  return {
+    q: q.q, options: q.options, marks: Number(q.marks) || 0,
+    your_answer: your == null ? null : Number(your),
+    correct_index: correctIndex,
+    correct,
+  };
+});
+
 export const submitTest = async (tenant, studentId, testId, answers) => {
   const test = await repo.getTest(tenant, testId);
   if (!test || !test.is_published) throw notFound('Test not available');
@@ -82,7 +98,23 @@ export const submitTest = async (tenant, studentId, testId, answers) => {
   });
   const saved = await repo.recordAttempt(tenant, testId, studentId, answers ?? [], score);
   if (!saved) throw validationError({ test: 'You have already attempted this test.' });
-  return { score, total_marks: Number(test.total_marks) };
+  return { score, total_marks: Number(test.total_marks), review: buildReview(questions, answers ?? []) };
+};
+
+// A student's own completed-test result with the full per-question review.
+export const studentTestResult = async (tenant, studentId, testId) => {
+  const test = await repo.getTest(tenant, testId);
+  if (!test || !test.is_published) throw notFound('Test not available');
+  const attempt = await repo.studentAttempt(tenant, testId, studentId);
+  if (!attempt) return { attempted: false };
+  return {
+    attempted: true,
+    title: test.title,
+    score: Number(attempt.score),
+    total_marks: Number(test.total_marks),
+    submitted_at: attempt.submitted_at,
+    review: buildReview(test.questions || [], attempt.answers || []),
+  };
 };
 
 // ---------- Projects (trainer) ----------

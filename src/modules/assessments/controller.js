@@ -23,6 +23,7 @@ export const trainerLeaderboard = async (req, res, next) => { try { ok(res, req,
 export const studentTests = async (req, res, next) => { try { ok(res, req, await service.studentTests(req.tenant, req.student.id)); } catch (e) { next(e); } };
 export const takeTest = async (req, res, next) => { try { ok(res, req, await service.takeTest(req.tenant, req.student.id, req.params.id)); } catch (e) { next(e); } };
 export const submitTest = async (req, res, next) => { try { ok(res, req, await service.submitTest(req.tenant, req.student.id, req.params.id, req.body.answers), 201); } catch (e) { next(e); } };
+export const studentTestResult = async (req, res, next) => { try { ok(res, req, await service.studentTestResult(req.tenant, req.student.id, req.params.id)); } catch (e) { next(e); } };
 export const studentProjects = async (req, res, next) => { try { ok(res, req, await service.studentProjects(req.tenant, req.student.id)); } catch (e) { next(e); } };
 export const submitProject = async (req, res, next) => { try { ok(res, req, await service.submitProject(req.tenant, req.student.id, req.params.id, req.body), 201); } catch (e) { next(e); } };
 export const studentLeaderboard = async (req, res, next) => { try { ok(res, req, await service.studentLeaderboard(req.tenant, req.student.id)); } catch (e) { next(e); } };
