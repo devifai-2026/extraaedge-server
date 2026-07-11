@@ -1,10 +1,13 @@
-// Mock interviews — trainer creates one (manual meeting link), assigns students
-// to date/time slots, and records per-student marks (which feed the
-// leaderboard). Students see their own slots + marks.
+// Mock interviews — trainer creates one (manual meeting link) with a per-interview
+// rubric of categories (Coding /30, Communication /20…), each scored by 'trainer'
+// or 'hr'. Trainer assigns students to slots + an HR evaluator; trainer scores the
+// technical categories, HR scores the soft-skill ones. Each category mark is capped
+// at its own max; the slot total (interview_slots.marks) is the roll-up the
+// leaderboard reads. Students see their per-category breakdown + total.
 import * as repo from './repo.js';
 import * as coursesRepo from '../courses/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 import { pushStudentNotification } from '../student-notifications/service.js';
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
@@ -16,8 +19,14 @@ const assertProgramTrainer = async (tenant, programId, actor) => {
 
 export const create = async (tenant, actor, input) => {
   await assertProgramTrainer(tenant, input.program_id, actor);
-  return repo.create(tenant, input, actor?.id);
+  const categories = Array.isArray(input.categories) ? input.categories.filter((c) => c && c.name) : [];
+  // With a rubric, the interview max = sum of category maxes.
+  const maxMarks = categories.length ? categories.reduce((a, c) => a + (Number(c.max_marks) || 0), 0) : (input.max_marks ?? 100);
+  const iv = await repo.create(tenant, { ...input, max_marks: maxMarks }, actor?.id);
+  if (categories.length) await repo.addCategories(tenant, iv.id, categories);
+  return iv;
 };
+
 export const list = async (tenant, actor, programId) => {
   await assertProgramTrainer(tenant, programId, actor);
   return repo.list(tenant, programId);
@@ -26,12 +35,22 @@ export const programStudents = async (tenant, actor, programId) => {
   await assertProgramTrainer(tenant, programId, actor);
   return repo.programStudents(tenant, programId);
 };
+export const assignableHr = async (tenant, actor) => {
+  if (!isAdmin(actor) && actor?.role !== LMS_TENANT_ROLES.HEAD_TRAINER && actor?.role !== LMS_TENANT_ROLES.TRAINER) return [];
+  return repo.assignableHr(tenant);
+};
+
+// A slot with its per-category scores attached.
+const withScores = async (tenant, slots) => Promise.all(slots.map(async (s) => ({ ...s, scores: await repo.slotScores(tenant, s.id) })));
+
 export const listSlots = async (tenant, actor, interviewId) => {
   const iv = await repo.get(tenant, interviewId);
   if (!iv) throw notFound('Interview not found');
   await assertProgramTrainer(tenant, iv.program_id, actor);
-  return repo.listSlots(tenant, interviewId);
+  const [slots, categories] = await Promise.all([repo.listSlots(tenant, interviewId), repo.listCategories(tenant, interviewId)]);
+  return { interview: { id: iv.id, title: iv.title, max_marks: iv.max_marks, hr_user_id: iv.hr_user_id, hr_user_name: iv.hr_user_name }, categories, slots: await withScores(tenant, slots) };
 };
+
 export const assignSlot = async (tenant, actor, interviewId, studentId, slotAt) => {
   const iv = await repo.get(tenant, interviewId);
   if (!iv) throw notFound('Interview not found');
@@ -40,6 +59,15 @@ export const assignSlot = async (tenant, actor, interviewId, studentId, slotAt) 
   pushStudentNotification(tenant, studentId, { type: 'interview_assigned', message: `You've been assigned a mock interview: "${iv.title}".`, link: '/student/interviews', metadata: { interview_id: interviewId, slot_at: slotAt } });
   return slot;
 };
+
+export const assignHr = async (tenant, actor, interviewId, hrUserId) => {
+  const iv = await repo.get(tenant, interviewId);
+  if (!iv) throw notFound('Interview not found');
+  await assertProgramTrainer(tenant, iv.program_id, actor);
+  return repo.setHrEvaluator(tenant, interviewId, hrUserId);
+};
+
+// Flat grade (interviews with no rubric). Kept for back-compat.
 export const gradeSlot = async (tenant, actor, slotId, marks, feedback) => {
   const slot = await repo.slotById(tenant, slotId);
   if (!slot) throw notFound('Slot not found');
@@ -50,5 +78,46 @@ export const gradeSlot = async (tenant, actor, slotId, marks, feedback) => {
   return row;
 };
 
+// Per-category scoring. Each score: { category_id, marks }. Validates the mark
+// against the category max and that the caller may score that category
+// (trainer categories → course trainer/admin; hr categories → assigned HR / admin).
+export const scoreSlot = async (tenant, actor, slotId, scores) => {
+  const slot = await repo.slotById(tenant, slotId);
+  if (!slot) throw notFound('Slot not found');
+  if (!Array.isArray(scores) || !scores.length) throw validationError({ scores: 'No scores provided' });
+  for (const sc of scores) {
+    // eslint-disable-next-line no-await-in-loop
+    const cat = await repo.categoryById(tenant, sc.category_id);
+    if (!cat || cat.interview_id !== slot.interview_id) throw validationError({ scores: 'Invalid category for this interview' });
+    const marks = Number(sc.marks);
+    if (Number.isNaN(marks) || marks < 0) throw validationError({ marks: `Enter valid marks for ${cat.name}` });
+    if (marks > Number(cat.max_marks)) throw validationError({ marks: `${cat.name}: max is ${cat.max_marks}` });
+    if (cat.scored_by === 'hr') {
+      const allowed = isAdmin(actor) || (cat.hr_user_id && cat.hr_user_id === actor?.id);
+      if (!allowed) throw forbidden(`Only the assigned HR can score "${cat.name}".`);
+    } else {
+      // eslint-disable-next-line no-await-in-loop
+      await assertProgramTrainer(tenant, cat.program_id, actor);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await repo.upsertSlotScore(tenant, slotId, sc.category_id, marks, actor?.id);
+  }
+  const row = await repo.recomputeSlotTotal(tenant, slotId, actor?.id);
+  if (row) pushStudentNotification(tenant, row.student_id, { type: 'interview_graded', message: `Your mock interview was scored: ${row.marks} marks.`, link: '/student/interviews', metadata: { slot_id: slotId } });
+  return row;
+};
+
+// ---------- HR queue (interviews the HR user evaluates) ----------
+export const hrQueue = async (tenant, actor) => {
+  const interviews = await repo.listForHr(tenant, actor?.id);
+  return Promise.all(interviews.map(async (iv) => {
+    const [slots, categories] = await Promise.all([repo.listSlots(tenant, iv.id), repo.listCategories(tenant, iv.id)]);
+    return { ...iv, categories, slots: await withScores(tenant, slots) };
+  }));
+};
+
 // ---------- Student ----------
-export const studentSlots = async (tenant, studentId) => repo.studentSlots(tenant, studentId);
+export const studentSlots = async (tenant, studentId) => {
+  const slots = await repo.studentSlots(tenant, studentId);
+  return withScores(tenant, slots);
+};

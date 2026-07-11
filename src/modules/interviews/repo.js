@@ -24,8 +24,104 @@ export const list = async (tenant, programId) => {
 };
 
 export const get = async (tenant, id) => {
-  const { rows } = await tenantQuery(tenant, `SELECT * FROM mock_interviews WHERE id = $1 AND deleted_at IS NULL`, [id]);
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT i.*, u.name AS hr_user_name FROM mock_interviews i
+       LEFT JOIN users u ON u.id = i.hr_user_id
+      WHERE i.id = $1 AND i.deleted_at IS NULL`,
+    [id],
+  );
   return rows[0] || null;
+};
+
+// ---------- Rubric categories ----------
+export const addCategories = async (tenant, interviewId, categories) => {
+  for (let idx = 0; idx < categories.length; idx += 1) {
+    const c = categories[idx];
+    // eslint-disable-next-line no-await-in-loop
+    await tenantQuery(
+      tenant,
+      `INSERT INTO interview_categories (interview_id, name, max_marks, scored_by, order_index)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [interviewId, c.name, c.max_marks ?? 10, c.scored_by === 'hr' ? 'hr' : 'trainer', idx],
+    );
+  }
+};
+
+export const listCategories = async (tenant, interviewId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, name, max_marks, scored_by, order_index FROM interview_categories
+      WHERE interview_id = $1 ORDER BY order_index, name`,
+    [interviewId],
+  );
+  return rows;
+};
+
+export const categoryById = async (tenant, categoryId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT c.*, i.program_id, i.hr_user_id FROM interview_categories c
+       JOIN mock_interviews i ON i.id = c.interview_id WHERE c.id = $1`,
+    [categoryId],
+  );
+  return rows[0] || null;
+};
+
+export const setHrEvaluator = async (tenant, interviewId, hrUserId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE mock_interviews SET hr_user_id = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+    [interviewId, hrUserId ?? null],
+  );
+  return rows[0] || null;
+};
+
+// Upsert one category score for a slot; then recompute the slot roll-up total.
+export const upsertSlotScore = async (tenant, slotId, categoryId, marks, userId) => {
+  await tenantQuery(
+    tenant,
+    `INSERT INTO interview_slot_scores (slot_id, category_id, marks, scored_by_user)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (slot_id, category_id) DO UPDATE SET marks = EXCLUDED.marks, scored_by_user = EXCLUDED.scored_by_user, updated_at = now()`,
+    [slotId, categoryId, marks, userId ?? null],
+  );
+};
+
+export const recomputeSlotTotal = async (tenant, slotId, graderId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE interview_slots SET
+        marks = COALESCE((SELECT sum(marks) FROM interview_slot_scores WHERE slot_id = $1), 0),
+        graded_by = $2, graded_at = now(), updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+    [slotId, graderId ?? null],
+  );
+  return rows[0] || null;
+};
+
+export const slotScores = async (tenant, slotId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT sc.category_id, sc.marks, c.name, c.max_marks, c.scored_by
+       FROM interview_slot_scores sc JOIN interview_categories c ON c.id = sc.category_id
+      WHERE sc.slot_id = $1 ORDER BY c.order_index`,
+    [slotId],
+  );
+  return rows;
+};
+
+// Interviews an HR user is the assigned evaluator on.
+export const listForHr = async (tenant, hrUserId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT i.id, i.title, i.meeting_url, i.max_marks, i.program_id, p.name AS program_name, i.created_at,
+            (SELECT count(*)::int FROM interview_slots s WHERE s.interview_id = i.id AND s.deleted_at IS NULL) AS slot_count
+       FROM mock_interviews i LEFT JOIN programs p ON p.id = i.program_id
+      WHERE i.hr_user_id = $1 AND i.deleted_at IS NULL ORDER BY i.created_at DESC`,
+    [hrUserId],
+  );
+  return rows;
 };
 
 export const listSlots = async (tenant, interviewId) => {
@@ -73,6 +169,16 @@ export const slotById = async (tenant, slotId) => {
 export const studentProgram = async (tenant, studentId) => {
   const { rows } = await tenantQuery(tenant, `SELECT program_id FROM students WHERE id = $1 AND deleted_at IS NULL`, [studentId]);
   return rows[0]?.program_id || null;
+};
+
+// HR users to pick as the interview's soft-skill evaluator.
+export const assignableHr = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, name, email FROM users WHERE role = 'hr' AND is_active = true AND deleted_at IS NULL ORDER BY name`,
+    [],
+  );
+  return rows;
 };
 
 // Students of a program (for the assign picker).
