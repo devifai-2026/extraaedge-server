@@ -327,6 +327,60 @@ export const counts = async (tenant, branchScope = null) => {
   return rows[0] || {};
 };
 
+// ---------- Analytics (Phase G9d) ----------
+// Stage funnel (candidate count per configured stage) + company-wise placed
+// counts + a best-effort average CTC parsed from the free-text offer/opening CTC.
+export const analytics = async (tenant, branchScope = null) => {
+  const p1 = []; const oB1 = branchClause('o', branchScope, p1);
+  // Funnel: how many applications currently sit in each stage.
+  const funnel = (await tenantQuery(
+    tenant,
+    `SELECT ps.id AS stage_id, ps.name, ps.kind, ps.order_index, count(a.id)::int AS count
+       FROM placement_stages ps
+       LEFT JOIN job_applications a ON a.stage_id = ps.id
+       LEFT JOIN job_openings o ON o.id = a.opening_id
+      WHERE ps.deleted_at IS NULL
+      GROUP BY ps.id, ps.name, ps.kind, ps.order_index
+      ORDER BY ps.order_index, ps.name`,
+    [],
+  )).rows;
+
+  const p2 = []; const oB2 = branchClause('o', branchScope, p2);
+  // Company-wise placed (a 'success'-kind stage OR legacy status='selected').
+  const byCompany = (await tenantQuery(
+    tenant,
+    `SELECT co.id AS company_id, co.name,
+            count(*) FILTER (WHERE a.stage_id IS NOT NULL AND sps.kind='success')::int
+              + count(*) FILTER (WHERE a.stage_id IS NULL AND a.status='selected')::int AS placed,
+            count(a.id)::int AS total_candidates
+       FROM companies co
+       JOIN job_openings o ON o.company_id = co.id AND o.deleted_at IS NULL
+       JOIN job_applications a ON a.opening_id = o.id
+       LEFT JOIN placement_stages sps ON sps.id = a.stage_id
+      WHERE co.deleted_at IS NULL${oB2}
+      GROUP BY co.id, co.name
+      HAVING count(a.id) > 0
+      ORDER BY placed DESC, co.name`,
+    p2,
+  )).rows;
+
+  const p3 = []; const oB3 = branchClause('o', branchScope, p3);
+  // Best-effort average offered CTC: extract the first number from the free-text
+  // offer_ctc (e.g. "₹6.5 LPA" → 6.5). Documented as approximate.
+  const ctcRow = (await tenantQuery(
+    tenant,
+    `SELECT avg(v)::numeric(10,2) AS avg_ctc, count(*)::int AS offers_with_ctc
+       FROM (
+         SELECT NULLIF(regexp_replace(a.offer_ctc, '[^0-9.].*$', ''), '')::numeric AS v
+           FROM job_applications a JOIN job_openings o ON o.id = a.opening_id
+          WHERE a.offer_ctc ~ '[0-9]'${oB3}
+       ) x WHERE v IS NOT NULL`,
+    p3,
+  )).rows[0] || {};
+
+  return { funnel, by_company: byCompany, avg_ctc: ctcRow.avg_ctc != null ? Number(ctcRow.avg_ctc) : null, offers_with_ctc: ctcRow.offers_with_ctc || 0 };
+};
+
 // ---------- Student ----------
 export const studentOpenings = async (tenant, studentId) => {
   // Openings fired to the student (with company + their application status).

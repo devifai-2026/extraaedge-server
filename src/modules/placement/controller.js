@@ -17,6 +17,7 @@ export const deleteOpening = async (req, res, next) => { try { ok(res, req, awai
 export const previewAudience = async (req, res, next) => { try { ok(res, req, await service.previewAudience(req.tenant, req.user, req.params.id, req.query.branch_id || null)); } catch (e) { next(e); } };
 export const fire = async (req, res, next) => { try { ok(res, req, await service.fire(req.tenant, req.user, req.params.id, req.body?.branch_id || null), 201); } catch (e) { next(e); } };
 export const counts = async (req, res, next) => { try { ok(res, req, await service.counts(req.tenant, req.user, req.query.branch_id || null)); } catch (e) { next(e); } };
+export const analytics = async (req, res, next) => { try { ok(res, req, await service.analytics(req.tenant, req.user, req.query.branch_id || null)); } catch (e) { next(e); } };
 export const programModules = async (req, res, next) => { try { ok(res, req, await service.programModules(req.tenant, req.params.programId)); } catch (e) { next(e); } };
 
 // Applications

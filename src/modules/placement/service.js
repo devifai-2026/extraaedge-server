@@ -91,6 +91,10 @@ export const setOpeningStatus = async (tenant, actor, id, status) => {
   return row;
 };
 export const deleteOpening = async (tenant, actor, id) => { await repo.deleteOpening(tenant, id); return { ok: true }; };
+export const analytics = async (tenant, actor, branchId) => {
+  const scope = await resolveScope(tenant, actor, branchId);
+  return repo.analytics(tenant, scope);
+};
 export const counts = async (tenant, actor, branchId) => {
   const scope = await resolveScope(tenant, actor, branchId);
   return repo.counts(tenant, scope);
