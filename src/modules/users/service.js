@@ -137,6 +137,7 @@ export const listUsers = (tenant, query) => repo.list(tenant, query);
 export const getUser = async (tenant, id) => {
   const row = await repo.findById(tenant, id);
   if (!row) throw notFound('User not found');
+  row.branch_ids = await repo.listUserBranchIds(tenant, id);
   return row;
 };
 
@@ -224,6 +225,11 @@ export const createUser = async (tenant, input, actor) => {
     password_hash,
   );
   if (ids.length) await repo.setManagers(tenant, user.id, ids);
+  // Additional branches for teaching staff (multi-branch). insert() ignores
+  // branch_ids (explicit column list), so we sync the join table here.
+  if (['head_trainer', 'trainer'].includes(role) && Array.isArray(input.branch_ids)) {
+    await repo.setUserBranches(tenant, user.id, input.branch_ids);
+  }
 
   // Register the phone platform-wide (system DB). In enforced mode a collision
   // throws 409; we roll back the just-created user so we don't leave an
@@ -331,7 +337,15 @@ export const updateUser = async (tenant, id, updates, actor) => {
     delete patch.manager_ids;
     await repo.setManagers(tenant, id, updates.manager_ids);
   }
+  // branch_ids is a join table, not a users column — pull it out of the patch
+  // and sync it separately (only meaningful for teaching roles).
+  const branchIds = updates.branch_ids;
+  delete patch.branch_ids;
   const result = await repo.update(tenant, id, patch);
+  const effRole = updates.role ?? existing.role;
+  if (['head_trainer', 'trainer'].includes(effRole) && Array.isArray(branchIds)) {
+    await repo.setUserBranches(tenant, id, branchIds);
+  }
 
   // After a successful write, release the old number (if it changed / cleared).
   if (phoneChanging && existing.phone) {

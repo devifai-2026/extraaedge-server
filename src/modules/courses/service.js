@@ -99,21 +99,23 @@ export const removeTrainer = async (tenant, actor, programId, id) => {
 export const assignableStaff = async (tenant) => repo.assignableStaff(tenant);
 
 // Per-student attendance history for a course (any roster trainer or admin).
-export const attendanceHistory = async (tenant, actor, programId) => {
+export const attendanceHistory = async (tenant, actor, programId, branchId = null) => {
   await assertCanRead(tenant, programId, actor);
-  return repo.attendanceHistory(tenant, programId);
+  const branch = await resolveBranchScope(tenant, actor, branchId);
+  return repo.attendanceHistory(tenant, programId, branch);
 };
 
 // Trainer-dashboard insights: totals + a student roster (avatars) across the
 // courses the actor teaches (admins see all).
-export const trainerInsights = async (tenant, actor) => {
+export const trainerInsights = async (tenant, actor, branchId = null) => {
   const courses = await repo.listCourses(tenant, { trainerId: isSuperAdmin(actor) ? undefined : actor?.id });
   const programIds = courses.map((c) => c.id);
   const zero = { courses: courses.length, modules: 0, batches: 0, students: 0, active_students: 0 };
   if (!programIds.length) return { totals: zero, students: [] };
+  const branch = await resolveBranchScope(tenant, actor, branchId);
   const [counts, roster, perCourse] = await Promise.all([
-    repo.countStudentsForPrograms(tenant, programIds),
-    repo.studentsForPrograms(tenant, programIds, 24),
+    repo.countStudentsForPrograms(tenant, programIds, branch),
+    repo.studentsForPrograms(tenant, programIds, 24, branch),
     repo.perCourseStats(tenant, programIds),
   ]);
   const students = await Promise.all(roster.map(async (s) => ({
@@ -202,9 +204,26 @@ const actorProgramIds = async (tenant, actor) => {
   return courses.map((c) => c.id);
 };
 
-export const listCourseStudents = async (tenant, actor) => {
+// Branches the actor can switch between: admins → all; teaching staff → their
+// primary branch + user_branches memberships.
+export const myBranches = async (tenant, actor) => {
+  if (isSuperAdmin(actor)) return repo.allBranches(tenant);
+  return repo.branchesForUser(tenant, actor?.id);
+};
+
+// A trainer may only scope to a branch they belong to; anything else is ignored
+// (returns null = no branch filter). Admins may scope to any branch.
+const resolveBranchScope = async (tenant, actor, branchId) => {
+  if (!branchId) return null;
+  if (isSuperAdmin(actor)) return branchId;
+  const allowed = await repo.branchesForUser(tenant, actor?.id);
+  return allowed.some((b) => b.id === branchId) ? branchId : null;
+};
+
+export const listCourseStudents = async (tenant, actor, branchId = null) => {
   const ids = await actorProgramIds(tenant, actor);
-  return repo.courseStudents(tenant, ids);
+  const branch = await resolveBranchScope(tenant, actor, branchId);
+  return repo.courseStudents(tenant, ids, branch);
 };
 
 // A student is in the actor's scope if the actor is a super_admin, or heads/is

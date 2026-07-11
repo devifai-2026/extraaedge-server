@@ -38,10 +38,13 @@ export const assignableStaff = async (req, res, next) => {
   try { ok(res, req, await service.assignableStaff(req.tenant)); } catch (e) { next(e); }
 };
 export const attendanceHistory = async (req, res, next) => {
-  try { ok(res, req, await service.attendanceHistory(req.tenant, req.user, req.params.programId)); } catch (e) { next(e); }
+  try { ok(res, req, await service.attendanceHistory(req.tenant, req.user, req.params.programId, req.query.branch_id || null)); } catch (e) { next(e); }
 };
 export const trainerInsights = async (req, res, next) => {
-  try { ok(res, req, await service.trainerInsights(req.tenant, req.user)); } catch (e) { next(e); }
+  try { ok(res, req, await service.trainerInsights(req.tenant, req.user, req.query.branch_id || null)); } catch (e) { next(e); }
+};
+export const myBranches = async (req, res, next) => {
+  try { ok(res, req, await service.myBranches(req.tenant, req.user)); } catch (e) { next(e); }
 };
 export const createTrainer = async (req, res, next) => {
   try { ok(res, req, await service.createTrainer(req.tenant, req.user, req.params.programId, req.body), 201); } catch (e) { next(e); }
@@ -50,7 +53,7 @@ export const completeBatch = async (req, res, next) => {
   try { ok(res, req, await service.completeBatch(req.tenant, req.user, req.params.programId, req.params.batchId)); } catch (e) { next(e); }
 };
 export const listCourseStudents = async (req, res, next) => {
-  try { ok(res, req, await service.listCourseStudents(req.tenant, req.user)); } catch (e) { next(e); }
+  try { ok(res, req, await service.listCourseStudents(req.tenant, req.user, req.query.branch_id || null)); } catch (e) { next(e); }
 };
 export const resetStudentPassword = async (req, res, next) => {
   try { ok(res, req, await service.resetStudentPassword(req.tenant, req.user, req.params.studentId)); } catch (e) { next(e); }

@@ -34,6 +34,9 @@ export const createUserSchema = z.object({
   // Which branch this user belongs to (multi-branch org). Nullable — the
   // tenant super_admin spans all branches.
   branch_id: z.string().uuid().nullable().optional(),
+  // Additional branches a teaching user (trainer/head_trainer) works across —
+  // beyond their primary branch_id. Ignored for non-teaching roles.
+  branch_ids: z.array(z.string().uuid()).optional(),
   designation: z.string().optional(),
   track_work_time: z.boolean().optional(),
   session_timeout_minutes: z.coerce.number().int().min(5).max(120).optional(),

@@ -156,7 +156,10 @@ export const courseTrainerUserIds = async (tenant, programId) => {
 
 // Per-student attendance summary across a course's ended classes (their batch's
 // classes). Drives the trainer "attendance history" view.
-export const attendanceHistory = async (tenant, programId) => {
+export const attendanceHistory = async (tenant, programId, branchId = null) => {
+  const params = [programId];
+  let join = ''; let filter = '';
+  if (branchId) { params.push(branchId); join = 'LEFT JOIN admissions a ON a.id = s.admission_id LEFT JOIN leads l ON l.id = a.lead_id'; filter = `AND l.branch_id = $${params.length}`; }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT s.id AS student_id, s.name, b.name AS batch_name,
@@ -168,10 +171,11 @@ export const attendanceHistory = async (tenant, programId) => {
        JOIN batches b ON b.id = bs.batch_id AND b.deleted_at IS NULL
        LEFT JOIN classes c ON c.batch_id = bs.batch_id AND c.deleted_at IS NULL AND c.program_id = $1
        LEFT JOIN attendance att ON att.class_id = c.id AND att.student_id = s.id
-      WHERE s.program_id = $1 AND s.deleted_at IS NULL
+       ${join}
+      WHERE s.program_id = $1 AND s.deleted_at IS NULL ${filter}
       GROUP BY s.id, s.name, b.name
       ORDER BY s.name`,
-    [programId],
+    params,
   );
   return rows.map((r) => {
     const total = Number(r.total) || 0;
@@ -185,6 +189,28 @@ export const firstBranchId = async (tenant) => {
   return rows[0]?.id || null;
 };
 
+// All active branches (for admins' switcher).
+export const allBranches = async (tenant) => {
+  const { rows } = await tenantQuery(tenant, `SELECT id, name, code FROM branches WHERE deleted_at IS NULL ORDER BY name`, []);
+  return rows;
+};
+
+// The branches a teaching user can switch between: their primary users.branch_id
+// plus any user_branches rows.
+export const branchesForUser = async (tenant, userId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT b.id, b.name, b.code FROM branches b
+      WHERE b.deleted_at IS NULL AND (
+        b.id = (SELECT branch_id FROM users WHERE id = $1)
+        OR b.id IN (SELECT branch_id FROM user_branches WHERE user_id = $1)
+      )
+      ORDER BY b.name`,
+    [userId],
+  );
+  return rows;
+};
+
 export const setBatchCompleted = async (tenant, batchId) => {
   const { rows } = await tenantQuery(
     tenant,
@@ -196,19 +222,23 @@ export const setBatchCompleted = async (tenant, batchId) => {
 };
 
 // ---------- Dashboard insights (across a trainer's courses) ----------
-export const countStudentsForPrograms = async (tenant, programIds) => {
+export const countStudentsForPrograms = async (tenant, programIds, branchId = null) => {
+  const params = [programIds];
+  let join = ''; let filter = '';
+  if (branchId) { params.push(branchId); join = 'LEFT JOIN admissions a ON a.id = s.admission_id LEFT JOIN leads l ON l.id = a.lead_id'; filter = `AND l.branch_id = $${params.length}`; }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT count(*)::int AS total,
-            count(*) FILTER (WHERE status = 'active')::int AS active,
-            count(*) FILTER (WHERE status = 'on_break')::int AS on_break,
-            count(*) FILTER (WHERE status = 'dropped')::int AS dropped,
-            count(*) FILTER (WHERE status NOT IN ('active','on_break','dropped'))::int AS pending,
+            count(*) FILTER (WHERE s.status = 'active')::int AS active,
+            count(*) FILTER (WHERE s.status = 'on_break')::int AS on_break,
+            count(*) FILTER (WHERE s.status = 'dropped')::int AS dropped,
+            count(*) FILTER (WHERE s.status NOT IN ('active','on_break','dropped'))::int AS pending,
             count(*) FILTER (WHERE NOT EXISTS (
-              SELECT 1 FROM batch_students bs WHERE bs.student_id = students.id AND bs.deleted_at IS NULL
-            ) AND status <> 'dropped')::int AS unassigned
-       FROM students WHERE program_id = ANY($1::uuid[]) AND deleted_at IS NULL`,
-    [programIds],
+              SELECT 1 FROM batch_students bs WHERE bs.student_id = s.id AND bs.deleted_at IS NULL
+            ) AND s.status <> 'dropped')::int AS unassigned
+       FROM students s ${join}
+      WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL ${filter}`,
+    params,
   );
   return rows[0] || { total: 0, active: 0, on_break: 0, dropped: 0, pending: 0, unassigned: 0 };
 };
@@ -231,7 +261,11 @@ export const perCourseStats = async (tenant, programIds) => {
 };
 
 // Recent students (for the avatar roster) with their batch + photo key.
-export const studentsForPrograms = async (tenant, programIds, limit = 24) => {
+export const studentsForPrograms = async (tenant, programIds, limit = 24, branchId = null) => {
+  const params = [programIds];
+  let join = ''; let filter = '';
+  if (branchId) { params.push(branchId); join = 'LEFT JOIN admissions a ON a.id = s.admission_id LEFT JOIN leads l ON l.id = a.lead_id'; filter = `AND l.branch_id = $${params.length}`; }
+  params.push(limit);
   const { rows } = await tenantQuery(
     tenant,
     `SELECT s.id, s.name, s.email, s.status, s.photo_r2_key, p.name AS program_name,
@@ -239,25 +273,30 @@ export const studentsForPrograms = async (tenant, programIds, limit = 24) => {
               WHERE bs.student_id = s.id AND bs.deleted_at IS NULL ORDER BY bs.joined_at DESC LIMIT 1) AS batch_name
        FROM students s
        LEFT JOIN programs p ON p.id = s.program_id
-      WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL
+       ${join}
+      WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL ${filter}
       ORDER BY s.created_at DESC
-      LIMIT $2`,
-    [programIds, limit],
+      LIMIT $${params.length}`,
+    params,
   );
   return rows;
 };
 
 // Full student list (with batch + contact) across a set of programs — for the
 // admin/head "Students" management table.
-export const courseStudents = async (tenant, programIds) => {
+export const courseStudents = async (tenant, programIds, branchId = null) => {
   if (!programIds.length) return [];
   const hasBranches = await tenantQuery(tenant, `SELECT to_regclass('branches') IS NOT NULL AS ok`, []);
-  const branchJoin = hasBranches.rows[0]?.ok
+  const hasB = hasBranches.rows[0]?.ok;
+  const branchJoin = hasB
     ? `LEFT JOIN admissions a ON a.id = s.admission_id
        LEFT JOIN leads l ON l.id = a.lead_id
        LEFT JOIN branches br ON br.id = l.branch_id`
     : '';
-  const branchSel = hasBranches.rows[0]?.ok ? 'br.id AS branch_id, br.name AS branch_name,' : 'NULL::uuid AS branch_id, NULL::text AS branch_name,';
+  const branchSel = hasB ? 'br.id AS branch_id, br.name AS branch_name,' : 'NULL::uuid AS branch_id, NULL::text AS branch_name,';
+  const params = [programIds];
+  let branchFilter = '';
+  if (hasB && branchId) { params.push(branchId); branchFilter = `AND l.branch_id = $${params.length}`; }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT s.id, s.name, s.email, s.phone, s.status, s.program_id, p.name AS program_name,
@@ -267,9 +306,9 @@ export const courseStudents = async (tenant, programIds) => {
        FROM students s
        LEFT JOIN programs p ON p.id = s.program_id
        ${branchJoin}
-      WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL
+      WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL ${branchFilter}
       ORDER BY s.created_at DESC`,
-    [programIds],
+    params,
   );
   return rows;
 };

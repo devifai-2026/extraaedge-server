@@ -1,4 +1,4 @@
-import { tenantQuery } from '../../db/tenant.js';
+import { tenantQuery, tenantTx } from '../../db/tenant.js';
 
 const COLS = `
   u.id, u.email, u.phone, u.name, u.avatar_r2_key, u.role, u.role_id,
@@ -50,6 +50,26 @@ export const findById = async (tenant, id) => {
     [id],
   );
   return rows[0] ?? null;
+};
+
+// Multi-branch membership for teaching staff (user_branches join). Primary
+// branch stays on users.branch_id; these are the ADDITIONAL branches they work.
+export const listUserBranchIds = async (tenant, userId) => {
+  const { rows } = await tenantQuery(tenant, `SELECT branch_id FROM user_branches WHERE user_id = $1`, [userId]);
+  return rows.map((r) => r.branch_id);
+};
+
+export const setUserBranches = async (tenant, userId, branchIds) => {
+  await tenantTx(tenant, async (client) => {
+    await client.query(`DELETE FROM user_branches WHERE user_id = $1`, [userId]);
+    for (const bid of [...new Set((branchIds || []).filter(Boolean))]) {
+      // eslint-disable-next-line no-await-in-loop
+      await client.query(
+        `INSERT INTO user_branches (user_id, branch_id) VALUES ($1,$2) ON CONFLICT (user_id, branch_id) DO NOTHING`,
+        [userId, bid],
+      );
+    }
+  });
 };
 
 export const findByEmail = async (tenant, email) => {
