@@ -8,12 +8,13 @@ import * as assessmentsRepo from '../assessments/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
-import { notifyBatch } from '../student-notifications/service.js';
+import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
+import { notifyBatch, pushStudentNotification } from '../student-notifications/service.js';
 
-const MIN_ATTENDANCE_PCT = 50; // certificate threshold
+const MIN_ATTENDANCE_PCT = 50; // certificate threshold (informational; auto-issue keys off course completion)
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
+const isHrOrAdmin = (actor) => isAdmin(actor) || actor?.role === LMS_TENANT_ROLES.HR;
 const assertProgramTrainer = async (tenant, programId, actor) => {
   if (isAdmin(actor)) return;
   const m = await coursesRepo.isCourseTrainer(tenant, programId, actor?.id);
@@ -113,7 +114,34 @@ export const markModuleCompletion = async (tenant, actor, { program_id, module_i
     // eslint-disable-next-line no-await-in-loop
     else await repo.unmarkModule(tenant, sid, module_id);
   }
+  // Auto-issue a certificate to any student who has now completed EVERY module.
+  if (completed) {
+    for (const sid of student_ids) {
+      // eslint-disable-next-line no-await-in-loop
+      await autoIssueIfComplete(tenant, program_id, sid, actor?.id, modules).catch(() => {});
+    }
+  }
   return repo.studentsWithModuleCompletion(tenant, program_id, module_id);
+};
+
+// True when the student has completed every module of the course (course done).
+const isCourseComplete = async (tenant, studentId, programId, modulesArg) => {
+  const modules = modulesArg || await coursesRepo.listModules(tenant, programId);
+  if (!modules.length) return false;
+  const done = new Set((await repo.completedModuleIds(tenant, studentId, programId)).map(String));
+  return modules.every((m) => done.has(String(m.id)));
+};
+
+// Issue a completion certificate once the course is complete (idempotent).
+const autoIssueIfComplete = async (tenant, programId, studentId, issuedBy, modulesArg) => {
+  const existing = await repo.getCertificate(tenant, studentId, programId);
+  if (existing) return existing;
+  if (!(await isCourseComplete(tenant, studentId, programId, modulesArg))) return null;
+  const elig = await computeEligibility(tenant, studentId, programId);
+  const number = await nextCertNumber(tenant, programId);
+  const created = await repo.insertCertificate(tenant, { student_id: studentId, program_id: programId, certificate_number: number, issued_by: issuedBy ?? null, meta: elig.meta });
+  if (created) pushStudentNotification(tenant, studentId, { type: 'certificate_issued', message: '🎓 Your course-completion certificate is ready!', link: '/student/certificate', metadata: { certificate_number: created.certificate_number } });
+  return created;
 };
 
 // ---------- Certificate eligibility ----------
@@ -156,17 +184,27 @@ const nextCertNumber = async (tenant, programId) => {
   return `CERT-${new Date().getFullYear()}-${String(seq + 1).padStart(4, '0')}`;
 };
 
-export const claimCertificate = async (tenant, studentId) => {
-  const ctx = await repo.getStudentContext(tenant, studentId);
-  if (!ctx || !ctx.program_id) throw notFound('You are not enrolled in a course.');
-  const existing = await repo.getCertificate(tenant, studentId, ctx.program_id);
-  if (existing) return { certificate: existing, student_name: ctx.name, program_name: ctx.program_name };
-  const elig = await computeEligibility(tenant, studentId, ctx.program_id);
-  if (!elig.eligible) throw validationError({ certificate: 'You have not met the completion requirements yet.' });
-  const number = await nextCertNumber(tenant, ctx.program_id);
-  const created = await repo.insertCertificate(tenant, { student_id: studentId, program_id: ctx.program_id, certificate_number: number, issued_by: null, meta: elig.meta });
-  const cert = created || await repo.getCertificate(tenant, studentId, ctx.program_id);
-  return { certificate: cert, student_name: ctx.name, program_name: ctx.program_name };
+// Certificates are issued by the institute (auto on completion or by HR) — no
+// student self-claim. HR/admin manage issuance below.
+export const hrListCertificates = async (tenant, actor, programId) => {
+  if (!isHrOrAdmin(actor)) throw forbidden('HR or admin only.');
+  if (!programId) return [];
+  return repo.listCertificates(tenant, programId);
+};
+
+// HR bulk-issues certificates for every student in a program who has completed
+// the whole course (idempotent — already-issued students are skipped).
+export const hrAutoIssueForProgram = async (tenant, actor, programId) => {
+  if (!isHrOrAdmin(actor)) throw forbidden('HR or admin only.');
+  const modules = await coursesRepo.listModules(tenant, programId);
+  const students = await repo.studentsInProgram(tenant, programId);
+  let issued = 0;
+  for (const s of students) {
+    // eslint-disable-next-line no-await-in-loop
+    const row = await autoIssueIfComplete(tenant, programId, s.id, actor?.id, modules).catch(() => null);
+    if (row) issued += 1;
+  }
+  return { issued, total_students: students.length };
 };
 
 // ---------- Certificate (trainer/admin) ----------

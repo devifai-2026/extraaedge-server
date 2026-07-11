@@ -35,16 +35,18 @@ s.use(studentAuthRequired, tenantRequired);
 s.get('/student/materials', controller.studentMaterials);
 s.get('/student/materials/:id/download', validate({ params: idParam }), controller.studentMaterialUrl);
 s.get('/student/progress', controller.studentProgress); // read-only — trainers certify completion
-s.get('/student/certificate', controller.studentCertificate);
-s.post('/student/certificate/claim', controller.claimCertificate);
+s.get('/student/certificate', controller.studentCertificate); // read-only; issued by the institute (no self-claim)
 s.post('/student/home-extras', controller.studentHomeExtras);
 router.use(s);
 
-// ---------- Trainer / head_trainer / admin ----------
+// ---------- Trainer / head_trainer / admin / HR ----------
 router.use(authRequired, tenantRequired, requireRole(
   SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
-  LMS_TENANT_ROLES.HEAD_TRAINER, LMS_TENANT_ROLES.TRAINER,
+  LMS_TENANT_ROLES.HEAD_TRAINER, LMS_TENANT_ROLES.TRAINER, LMS_TENANT_ROLES.HR,
 ));
+// HR certificate management (HR/admin; not course-roster gated).
+router.get('/hr/certificates', controller.hrListCertificates); // ?programId=
+router.post('/hr/certificates/auto-issue', validate({ body: z.object({ program_id: z.string().uuid() }) }), controller.hrAutoIssue);
 
 router.get('/materials', controller.listMaterials); // ?programId=
 router.post('/materials', validate({ body: materialBody }), controller.createMaterial);
