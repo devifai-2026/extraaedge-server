@@ -52,6 +52,12 @@ export const setOpeningStatus = async (tenant, actor, id, status) => {
 };
 export const deleteOpening = async (tenant, actor, id) => { await repo.deleteOpening(tenant, id); return { ok: true }; };
 export const counts = async (tenant) => repo.counts(tenant);
+// Modules of a program (for the criteria builder's "module completed" option).
+export const programModules = async (tenant, programId) => {
+  if (!programId) return [];
+  const mods = await coursesRepo.listModules(tenant, programId);
+  return mods.map((m) => ({ id: m.id, name: m.name }));
+};
 
 // ---------- Criteria firing ----------
 export const previewAudience = async (tenant, actor, openingId, branchId) => {

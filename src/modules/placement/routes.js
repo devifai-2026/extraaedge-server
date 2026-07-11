@@ -32,6 +32,7 @@ const criteriaSchema = z.object({
 }).optional();
 
 router.get('/counts', controller.counts);
+router.get('/programs/:programId/modules', validate({ params: z.object({ programId: uuid }) }), controller.programModules);
 
 // Companies
 router.get('/companies', controller.listCompanies);
