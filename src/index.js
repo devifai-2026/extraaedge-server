@@ -25,6 +25,7 @@ if (env.QUEUE_DRIVER === 'inprocess') {
   await import('./workers/notification-worker.js');
   await import('./workers/followup-reminder-scheduler.js');
   await import('./workers/missed-followup-scanner.js');
+  await import('./workers/lms-class-reminder.js');
 }
 
 const app = buildApp();
