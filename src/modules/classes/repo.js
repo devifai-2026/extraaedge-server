@@ -225,9 +225,11 @@ export const studentClasses = async (tenant, studentId) => {
     `SELECT c.id, c.title, c.kind, c.mode, c.meeting_url, c.starts_at, c.ends_at, c.started_at, c.ended_at,
             m.name AS module_name,
             CASE
-              WHEN att.status IS NOT NULL THEN att.status
-              WHEN c.ended_at IS NOT NULL THEN 'absent'
-              ELSE 'upcoming'
+              WHEN att.status = 'present' THEN 'present'
+              WHEN att.edited_at IS NOT NULL THEN att.status          -- trainer's manual mark sticks
+              WHEN att.pre_notified_absent THEN 'absent'              -- student said "can't attend"
+              WHEN c.ended_at IS NOT NULL THEN COALESCE(att.status, 'absent') -- final once ended
+              ELSE 'upcoming'                                         -- not ended yet → never auto-absent
             END AS my_status, att.pre_notified_absent
        FROM batch_students bs
        JOIN classes c ON c.batch_id = bs.batch_id AND c.deleted_at IS NULL
