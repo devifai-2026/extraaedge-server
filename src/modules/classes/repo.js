@@ -9,6 +9,7 @@ export const listClasses = async (tenant, { programId, batchId } = {}) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT c.*, b.name AS batch_name, m.name AS module_name,
+            (SELECT u.name FROM users u WHERE u.id = c.trainer_id) AS trainer_name,
             (SELECT count(*)::int FROM class_recordings r WHERE r.class_id = c.id AND r.deleted_at IS NULL) AS recording_count
        FROM classes c
        JOIN batches b ON b.id = c.batch_id
@@ -35,11 +36,11 @@ export const getClass = async (tenant, id) => {
 export const createClass = async (tenant, input, actorId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO classes (program_id, module_id, batch_id, title, kind, mode, meeting_url, starts_at, ends_at, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    `INSERT INTO classes (program_id, module_id, batch_id, title, kind, mode, meeting_url, starts_at, ends_at, created_by, trainer_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
     [input.program_id, input.module_id ?? null, input.batch_id, input.title,
      input.kind ?? 'lecture', input.mode ?? 'online', input.meeting_url ?? null,
-     input.starts_at, input.ends_at, actorId ?? null],
+     input.starts_at, input.ends_at, actorId ?? null, input.trainer_id ?? null],
   );
   return rows[0];
 };
@@ -47,7 +48,7 @@ export const createClass = async (tenant, input, actorId) => {
 export const updateClass = async (tenant, id, input) => {
   const sets = []; const params = [];
   const add = (c, v) => { params.push(v); sets.push(`${c} = $${params.length}`); };
-  for (const k of ['title', 'kind', 'mode', 'meeting_url', 'starts_at', 'ends_at', 'module_id']) {
+  for (const k of ['title', 'kind', 'mode', 'meeting_url', 'starts_at', 'ends_at', 'module_id', 'trainer_id']) {
     if (input[k] !== undefined) add(k, input[k]);
   }
   if (!sets.length) return getClass(tenant, id);
@@ -162,7 +163,7 @@ export const attendanceTable = async (tenant, classId) => {
               WHEN c.ended_at IS NOT NULL THEN 'absent'
               ELSE 'pending'
             END AS status,
-            att.join_mode, att.pre_notified_absent, att.edited_by, att.edited_at,
+            att.join_mode, att.pre_notified_absent, att.reason, att.edited_by, att.edited_at,
             eu.name AS edited_by_name,
             (SELECT count(*)::int FROM attendance_answers aa
                JOIN attendance_questions q ON q.id = aa.question_id
@@ -194,27 +195,28 @@ export const editAttendance = async (tenant, classId, studentId, status, editorI
 };
 
 // Student pre-notifies absence for a class → auto-absent (flagged).
-export const preNotifyAbsence = async (tenant, classId, studentId) => {
+export const preNotifyAbsence = async (tenant, classId, studentId, reason = null) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO attendance (class_id, student_id, status, pre_notified_absent)
-     VALUES ($1,$2,'absent',true)
+    `INSERT INTO attendance (class_id, student_id, status, pre_notified_absent, reason)
+     VALUES ($1,$2,'absent',true,$3)
      ON CONFLICT (class_id, student_id) DO UPDATE
-       SET pre_notified_absent = true, updated_at = now()
+       SET pre_notified_absent = true, reason = COALESCE($3, attendance.reason), updated_at = now()
      RETURNING *`,
-    [classId, studentId],
+    [classId, studentId, reason],
   );
   return rows[0];
 };
 
 // Student marks how they joined (online/offline) for a class they attend.
-export const setJoinMode = async (tenant, classId, studentId, joinMode) => {
+export const setJoinMode = async (tenant, classId, studentId, joinMode, reason = null) => {
   await tenantQuery(
     tenant,
-    `INSERT INTO attendance (class_id, student_id, join_mode)
-     VALUES ($1,$2,$3)
-     ON CONFLICT (class_id, student_id) DO UPDATE SET join_mode = EXCLUDED.join_mode, updated_at = now()`,
-    [classId, studentId, joinMode],
+    `INSERT INTO attendance (class_id, student_id, join_mode, reason)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (class_id, student_id) DO UPDATE
+       SET join_mode = EXCLUDED.join_mode, reason = COALESCE($4, attendance.reason), updated_at = now()`,
+    [classId, studentId, joinMode, reason],
   );
 };
 

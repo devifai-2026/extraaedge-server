@@ -124,16 +124,16 @@ export const answer = async (tenant, studentId, classId, questionId, optionIndex
   return { ok: true };
 };
 
-export const preNotifyAbsence = async (tenant, studentId, classId) => {
+export const preNotifyAbsence = async (tenant, studentId, classId, reason = null) => {
   const inBatch = await repo.studentInClassBatch(tenant, classId, studentId);
   if (!inBatch) throw forbidden('Not your class');
-  return repo.preNotifyAbsence(tenant, classId, studentId);
+  return repo.preNotifyAbsence(tenant, classId, studentId, reason);
 };
 
-export const setJoinMode = async (tenant, studentId, classId, joinMode) => {
+export const setJoinMode = async (tenant, studentId, classId, joinMode, reason = null) => {
   const inBatch = await repo.studentInClassBatch(tenant, classId, studentId);
   if (!inBatch) throw forbidden('Not your class');
   if (!['online', 'offline'].includes(joinMode)) throw validationError({ join_mode: 'online|offline' });
-  await repo.setJoinMode(tenant, classId, studentId, joinMode);
+  await repo.setJoinMode(tenant, classId, studentId, joinMode, reason);
   return { ok: true };
 };

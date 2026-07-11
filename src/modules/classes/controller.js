@@ -55,8 +55,8 @@ export const answer = async (req, res, next) => {
   try { ok(res, req, await service.answer(req.tenant, req.student.id, req.params.id, req.body.question_id, req.body.option_index), 201); } catch (e) { next(e); }
 };
 export const preNotifyAbsence = async (req, res, next) => {
-  try { ok(res, req, await service.preNotifyAbsence(req.tenant, req.student.id, req.params.id)); } catch (e) { next(e); }
+  try { ok(res, req, await service.preNotifyAbsence(req.tenant, req.student.id, req.params.id, req.body?.reason ?? null)); } catch (e) { next(e); }
 };
 export const setJoinMode = async (req, res, next) => {
-  try { ok(res, req, await service.setJoinMode(req.tenant, req.student.id, req.params.id, req.body.join_mode)); } catch (e) { next(e); }
+  try { ok(res, req, await service.setJoinMode(req.tenant, req.student.id, req.params.id, req.body.join_mode, req.body?.reason ?? null)); } catch (e) { next(e); }
 };

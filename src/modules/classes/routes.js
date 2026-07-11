@@ -24,8 +24,8 @@ s.use(studentAuthRequired, tenantRequired);
 s.get('/my/classes', controller.studentClasses);
 s.get('/:id/open-questions', validate({ params: idParam }), controller.openQuestions);
 s.post('/:id/answer', validate({ params: idParam, body: z.object({ question_id: uuid, option_index: z.number().int().min(0) }) }), controller.answer);
-s.post('/:id/pre-notify-absence', validate({ params: idParam }), controller.preNotifyAbsence);
-s.post('/:id/join-mode', validate({ params: idParam, body: z.object({ join_mode: z.enum(['online', 'offline']) }) }), controller.setJoinMode);
+s.post('/:id/pre-notify-absence', validate({ params: idParam, body: z.object({ reason: z.string().max(500).optional() }).optional() }), controller.preNotifyAbsence);
+s.post('/:id/join-mode', validate({ params: idParam, body: z.object({ join_mode: z.enum(['online', 'offline']), reason: z.string().max(500).optional() }) }), controller.setJoinMode);
 router.use('/student', s);
 
 // ---- Staff (trainers/head/admin) ----
@@ -36,12 +36,16 @@ router.use(authRequired, tenantRequired, requireRole(
 
 router.get('/', controller.listClasses);
 router.post('/', validate({ body: z.object({
-  program_id: uuid, module_id: uuid.nullable().optional(), batch_id: uuid,
+  program_id: uuid, module_id: uuid.nullable().optional(), batch_id: uuid, trainer_id: uuid.nullable().optional(),
   title: z.string().min(1).max(200), kind: z.enum(['lecture', 'mock_test']).optional(),
   mode: z.enum(['online', 'offline']).optional(), meeting_url: z.string().max(1000).optional().nullable(),
   starts_at: z.string(), ends_at: z.string(),
 }) }), controller.createClass);
-router.put('/:id', validate({ params: idParam }), controller.updateClass);
+router.put('/:id', validate({ params: idParam, body: z.object({
+  title: z.string().min(1).max(200).optional(), module_id: uuid.nullable().optional(), trainer_id: uuid.nullable().optional(),
+  mode: z.enum(['online', 'offline']).optional(), meeting_url: z.string().max(1000).optional().nullable(),
+  starts_at: z.string().optional(), ends_at: z.string().optional(),
+}).optional() }), controller.updateClass);
 router.delete('/:id', validate({ params: idParam }), controller.deleteClass);
 router.post('/:id/lifecycle', validate({ params: idParam, body: z.object({ action: z.enum(['class_started', 'class_ended', 'mock_test']) }) }), controller.markLifecycle);
 
