@@ -14,16 +14,16 @@ const idParam = z.object({ id: uuid });
 // ---- Student routes ----
 const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
-s.get('/student/tests', controller.studentTests);
-s.get('/student/tests/:id', validate({ params: idParam }), controller.takeTest);
-s.post('/student/tests/:id/submit', validate({ params: idParam, body: z.object({ answers: z.array(z.number().int().nullable()).max(200) }) }), controller.submitTest);
-s.get('/student/tests/:id/result', validate({ params: idParam }), controller.studentTestResult);
-s.get('/student/projects', controller.studentProjects);
-s.post('/student/projects/:id/submit', validate({ params: idParam, body: z.object({
+s.get('/tests', controller.studentTests);
+s.get('/tests/:id', validate({ params: idParam }), controller.takeTest);
+s.post('/tests/:id/submit', validate({ params: idParam, body: z.object({ answers: z.array(z.number().int().nullable()).max(200) }) }), controller.submitTest);
+s.get('/tests/:id/result', validate({ params: idParam }), controller.studentTestResult);
+s.get('/projects', controller.studentProjects);
+s.post('/projects/:id/submit', validate({ params: idParam, body: z.object({
   live_url: z.string().max(1000).optional().nullable(), github_url: z.string().max(1000).optional().nullable(), notes: z.string().max(2000).optional().nullable(),
 }) }), controller.submitProject);
-s.get('/student/leaderboard', controller.studentLeaderboard);
-router.use(s);
+s.get('/leaderboard', controller.studentLeaderboard);
+router.use('/student', s);
 
 // ---- Trainer/head/admin ----
 router.use(authRequired, tenantRequired, requireRole(

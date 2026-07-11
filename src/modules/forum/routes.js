@@ -15,14 +15,14 @@ const replyBody = z.object({ body: z.string().min(1).max(4000) });
 // ---- Student routes (student principal) ----
 const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
-s.get('/student/trainers', controller.trainers);
-s.get('/student/threads', controller.myThreads);
-s.post('/student/threads', validate({ body: z.object({
+s.get('/trainers', controller.trainers);
+s.get('/threads', controller.myThreads);
+s.post('/threads', validate({ body: z.object({
   title: z.string().min(1).max(200), body: z.string().min(1).max(4000), mentions: z.array(uuid).max(20).optional(),
 }) }), controller.createThread);
-s.get('/student/threads/:id/replies', validate({ params: idParam }), controller.studentReplies);
-s.post('/student/threads/:id/replies', validate({ params: idParam, body: replyBody }), controller.studentReply);
-router.use(s);
+s.get('/threads/:id/replies', validate({ params: idParam }), controller.studentReplies);
+s.post('/threads/:id/replies', validate({ params: idParam, body: replyBody }), controller.studentReply);
+router.use('/student', s);
 
 // ---- Trainer/head/admin ----
 router.use(authRequired, tenantRequired, requireRole(

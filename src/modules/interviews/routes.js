@@ -12,10 +12,14 @@ const uuid = z.string().uuid();
 const idParam = z.object({ id: uuid });
 
 // ---- Student ----
+// Mounted UNDER /student so the student-auth middleware only runs for student
+// paths. (Mounting at '/' made studentAuthRequired run for every request —
+// including staff POST /interviews — and it throws "Not a student token" on a
+// staff token instead of passing through, 401-ing all staff routes.)
 const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
-s.get('/student/slots', controller.studentSlots);
-router.use(s);
+s.get('/slots', controller.studentSlots);
+router.use('/student', s);
 
 // ---- Staff: trainer/head/admin + HR (HR scores its assigned soft-skill categories) ----
 router.use(authRequired, tenantRequired, requireRole(

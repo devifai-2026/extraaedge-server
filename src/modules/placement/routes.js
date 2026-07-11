@@ -14,9 +14,9 @@ const idParam = z.object({ id: uuid });
 // ---- Student ----
 const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
-s.get('/student/feed', controller.studentFeed);
-s.post('/student/openings/:id/apply', validate({ params: idParam }), controller.applyToOpening);
-router.use(s);
+s.get('/feed', controller.studentFeed);
+s.post('/openings/:id/apply', validate({ params: idParam }), controller.applyToOpening);
+router.use('/student', s);
 
 // ---- Placement team / admin / branch_manager ----
 router.use(authRequired, tenantRequired, requireRole(

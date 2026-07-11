@@ -32,12 +32,12 @@ const issueBody = z.object({ program_id: z.string().uuid(), student_id: z.string
 // ---------- Student routes ----------
 const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
-s.get('/student/materials', controller.studentMaterials);
-s.get('/student/materials/:id/download', validate({ params: idParam }), controller.studentMaterialUrl);
-s.get('/student/progress', controller.studentProgress); // read-only — trainers certify completion
-s.get('/student/certificate', controller.studentCertificate); // read-only; issued by the institute (no self-claim)
-s.post('/student/home-extras', controller.studentHomeExtras);
-router.use(s);
+s.get('/materials', controller.studentMaterials);
+s.get('/materials/:id/download', validate({ params: idParam }), controller.studentMaterialUrl);
+s.get('/progress', controller.studentProgress); // read-only — trainers certify completion
+s.get('/certificate', controller.studentCertificate); // read-only; issued by the institute (no self-claim)
+s.post('/home-extras', controller.studentHomeExtras);
+router.use('/student', s);
 
 // ---------- Trainer / head_trainer / admin / HR ----------
 router.use(authRequired, tenantRequired, requireRole(

@@ -14,11 +14,11 @@ const idParam = z.object({ id: uuid });
 // ---- Student ----
 const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
-s.get('/student', controller.studentCapstones);
-s.post('/student/:id/submit', validate({ params: idParam, body: z.object({
+s.get('/', controller.studentCapstones);
+s.post('/:id/submit', validate({ params: idParam, body: z.object({
   live_url: z.string().max(1000).optional().nullable(), github_url: z.string().max(1000).optional().nullable(), file_r2_key: z.string().optional().nullable(),
 }) }), controller.submit);
-router.use(s);
+router.use('/student', s);
 
 // ---- Trainer / head / admin / branch_manager ----
 router.use(authRequired, tenantRequired, requireRole(

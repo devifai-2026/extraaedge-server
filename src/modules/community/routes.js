@@ -15,13 +15,13 @@ const commentBody = z.object({ body: z.string().min(1).max(2000) });
 // ---- Student routes (student principal) — BEFORE the staff chain. ----
 const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
-s.get('/student/recordings', controller.studentRecordings);
-s.get('/student/recordings/:id/url', validate({ params: idParam }), controller.studentRecordingUrl);
-s.get('/student/announcements', controller.studentAnnouncements);
-s.get('/student/announcements/:id/comments', validate({ params: idParam }), controller.studentComments);
-s.post('/student/announcements/:id/comments', validate({ params: idParam, body: commentBody }), controller.studentComment);
-s.post('/student/announcements/:id/like', validate({ params: idParam }), controller.studentLike);
-router.use(s);
+s.get('/recordings', controller.studentRecordings);
+s.get('/recordings/:id/url', validate({ params: idParam }), controller.studentRecordingUrl);
+s.get('/announcements', controller.studentAnnouncements);
+s.get('/announcements/:id/comments', validate({ params: idParam }), controller.studentComments);
+s.post('/announcements/:id/comments', validate({ params: idParam, body: commentBody }), controller.studentComment);
+s.post('/announcements/:id/like', validate({ params: idParam }), controller.studentLike);
+router.use('/student', s);
 
 // ---- Staff (trainers/head/admin) ----
 router.use(authRequired, tenantRequired, requireRole(
