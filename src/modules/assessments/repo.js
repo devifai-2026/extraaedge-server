@@ -142,7 +142,7 @@ export const createProject = async (tenant, input, actorId) => {
 export const listProjects = async (tenant, programId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT p.id, p.title, p.brief, p.max_marks, p.deadline, m.name AS module_name,
+    `SELECT p.id, p.title, p.brief, p.marking_scheme, p.max_marks, p.deadline, m.name AS module_name,
             (SELECT count(*)::int FROM project_submissions ps WHERE ps.project_id = p.id) AS submission_count,
             (SELECT count(*)::int FROM project_submissions ps WHERE ps.project_id = p.id AND ps.marks IS NOT NULL) AS graded_count
        FROM projects p LEFT JOIN course_modules m ON m.id = p.module_id
