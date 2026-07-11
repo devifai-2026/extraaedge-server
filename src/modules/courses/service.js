@@ -118,7 +118,9 @@ export const placeStudent = async (tenant, actor, programId, input) => {
 };
 
 export const mergeBatches = async (tenant, actor, programId, input) => {
-  await assertCanManage(tenant, programId, actor);
+  // Any trainer on the course roster (head OR trainer), or an admin, may merge
+  // batches — not just the head. (assertCanRead = super_admin or roster member.)
+  await assertCanRead(tenant, programId, actor);
   if (input.source_batch_id === input.target_batch_id) throw validationError({ target_batch_id: 'Pick a different target batch' });
   const [src, tgt] = await Promise.all([repo.getBatch(tenant, input.source_batch_id), repo.getBatch(tenant, input.target_batch_id)]);
   if (!src || src.program_id !== programId) throw validationError({ source_batch_id: 'Source batch not in this course' });
