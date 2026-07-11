@@ -116,9 +116,20 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
     ];
     const roleIds = {};
     for (const r of roleBundles) {
+      // Idempotent: several tenant migrations (LMS roles 1700000078000,
+      // branch_manager 1700000063000, HR/placement 1700000093000) already seed
+      // some of these roles during applyMigrations, so a plain INSERT collides
+      // on the UNIQUE(name) constraint. Upsert instead, refreshing the bundle's
+      // description/scope/tabs and always returning the id for the FK map below.
       const { rows } = await client.query(
         `INSERT INTO custom_roles (name, description, scope, is_system, tab_permissions)
-         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (name) DO UPDATE
+           SET description = EXCLUDED.description,
+               scope = EXCLUDED.scope,
+               is_system = EXCLUDED.is_system,
+               tab_permissions = EXCLUDED.tab_permissions
+         RETURNING id`,
         [r.name, r.description, r.scope, r.is_system, r.tab_permissions],
       );
       roleIds[r.name] = rows[0].id;
