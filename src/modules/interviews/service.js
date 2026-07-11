@@ -129,7 +129,7 @@ export const scoreSlot = async (tenant, actor, slotId, scores) => {
       await assertProgramTrainer(tenant, cat.program_id, actor);
     }
     // eslint-disable-next-line no-await-in-loop
-    await repo.upsertSlotScore(tenant, slotId, sc.category_id, marks, actor?.id);
+    await repo.upsertSlotScore(tenant, slotId, sc.category_id, marks, actor?.id, sc.comment);
   }
   const row = await repo.recomputeSlotTotal(tenant, slotId, actor?.id);
   if (row) pushStudentNotification(tenant, row.student_id, { type: 'interview_graded', message: `Your mock interview was scored: ${row.marks} marks.`, link: '/student/interviews', metadata: { slot_id: slotId } });

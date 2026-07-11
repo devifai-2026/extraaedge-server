@@ -132,11 +132,15 @@ export const fire = async (tenant, actor, openingId, branchId) => {
 };
 
 // ---------- Applications ----------
-export const listApplications = async (tenant, actor, openingId) => repo.listApplications(tenant, openingId);
-export const setApplicationStatus = async (tenant, actor, applicationId, status, note) => {
+// Attach a signed CV URL (from the student's stored cv_r2_key) so the placement
+// team can open/forward each candidate's resume.
+const signCv = async (row) => ({ ...row, cv_url: row.cv_r2_key ? await getDownloadSignedUrl({ key: row.cv_r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS }).catch(() => null) : null });
+export const listApplications = async (tenant, actor, openingId) =>
+  Promise.all((await repo.listApplications(tenant, openingId)).map(signCv));
+export const setApplicationStatus = async (tenant, actor, applicationId, status, note, offerCtc) => {
   const a = await repo.applicationById(tenant, applicationId);
   if (!a) throw notFound('Application not found');
-  return repo.setApplicationStatus(tenant, applicationId, status, note);
+  return repo.setApplicationStatus(tenant, applicationId, status, note, offerCtc);
 };
 
 // ---------- Student ----------

@@ -180,6 +180,15 @@ const nextCertNumber = async (tenant, programId) => {
   return `CERT-${new Date().getFullYear()}-${String(seq + 1).padStart(4, '0')}`;
 };
 
+// HR dashboard KPIs (interviews awaiting the HR's score, certificates issued,
+// students in the completion pipeline). The interview queue is scoped to the
+// acting HR; an admin sees all assigned-but-unfinalized slots.
+export const hrCounts = async (tenant, actor) => {
+  if (!isHrOrAdmin(actor)) throw forbidden('HR or admin only.');
+  const hrUserId = isAdmin(actor) ? null : actor?.id;
+  return repo.hrCounts(tenant, hrUserId);
+};
+
 // Certificates are issued by the institute (auto on completion or by HR) — no
 // student self-claim. HR/admin manage issuance below.
 export const hrListCertificates = async (tenant, actor, programId) => {

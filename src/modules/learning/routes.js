@@ -45,6 +45,7 @@ router.use(authRequired, tenantRequired, requireRole(
   LMS_TENANT_ROLES.HEAD_TRAINER, LMS_TENANT_ROLES.TRAINER, LMS_TENANT_ROLES.HR,
 ));
 // HR certificate management (HR/admin; not course-roster gated).
+router.get('/hr/counts', controller.hrCounts);
 router.get('/hr/certificates', controller.hrListCertificates); // ?programId=
 router.post('/hr/certificates/auto-issue', validate({ body: z.object({ program_id: z.string().uuid() }) }), controller.hrAutoIssue);
 

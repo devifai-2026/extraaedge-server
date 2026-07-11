@@ -77,14 +77,19 @@ export const setHrEvaluator = async (tenant, interviewId, hrUserId) => {
   return rows[0] || null;
 };
 
-// Upsert one category score for a slot; then recompute the slot roll-up total.
-export const upsertSlotScore = async (tenant, slotId, categoryId, marks, userId) => {
+// Upsert one category score (+ optional qualitative comment) for a slot; then
+// recompute the slot roll-up total.
+export const upsertSlotScore = async (tenant, slotId, categoryId, marks, userId, comment = undefined) => {
   await tenantQuery(
     tenant,
-    `INSERT INTO interview_slot_scores (slot_id, category_id, marks, scored_by_user)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (slot_id, category_id) DO UPDATE SET marks = EXCLUDED.marks, scored_by_user = EXCLUDED.scored_by_user, updated_at = now()`,
-    [slotId, categoryId, marks, userId ?? null],
+    `INSERT INTO interview_slot_scores (slot_id, category_id, marks, scored_by_user, comment)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (slot_id, category_id) DO UPDATE SET
+        marks = EXCLUDED.marks,
+        scored_by_user = EXCLUDED.scored_by_user,
+        comment = COALESCE(EXCLUDED.comment, interview_slot_scores.comment),
+        updated_at = now()`,
+    [slotId, categoryId, marks, userId ?? null, comment ?? null],
   );
 };
 
@@ -118,7 +123,7 @@ export const recomputeSlotTotal = async (tenant, slotId, graderId) => {
 export const slotScores = async (tenant, slotId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT sc.category_id, sc.marks, c.name, c.max_marks, c.scored_by
+    `SELECT sc.category_id, sc.marks, sc.comment, c.name, c.max_marks, c.scored_by
        FROM interview_slot_scores sc JOIN interview_categories c ON c.id = sc.category_id
       WHERE sc.slot_id = $1 ORDER BY c.order_index`,
     [slotId],

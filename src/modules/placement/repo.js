@@ -192,7 +192,7 @@ export const fireToStudents = async (tenant, openingId, studentIds, actorId) => 
 export const listApplications = async (tenant, openingId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT a.id, a.student_id, st.name, st.email, a.status, a.note, a.applied_at, a.created_at
+    `SELECT a.id, a.student_id, st.name, st.email, st.cv_r2_key, a.status, a.note, a.offer_ctc, a.applied_at, a.created_at
        FROM job_applications a JOIN students st ON st.id = a.student_id
       WHERE a.opening_id = $1 ORDER BY st.name`,
     [openingId],
@@ -200,11 +200,16 @@ export const listApplications = async (tenant, openingId) => {
   return rows;
 };
 
-export const setApplicationStatus = async (tenant, applicationId, status, note) => {
+export const setApplicationStatus = async (tenant, applicationId, status, note, offerCtc = undefined) => {
   const { rows } = await tenantQuery(
     tenant,
-    `UPDATE job_applications SET status=$2, note=COALESCE($3,note), updated_at=now() WHERE id=$1 RETURNING *`,
-    [applicationId, status, note ?? null],
+    `UPDATE job_applications SET
+        status=$2,
+        note=COALESCE($3,note),
+        offer_ctc = COALESCE($4, offer_ctc),
+        updated_at=now()
+      WHERE id=$1 RETURNING *`,
+    [applicationId, status, note ?? null, offerCtc ?? null],
   );
   return rows[0] || null;
 };
@@ -229,6 +234,7 @@ export const counts = async (tenant, branchScope = null) => {
   const oB4 = branchClause('o', branchScope, params);
   const oB5 = branchClause('o', branchScope, params);
   const oB6 = branchClause('o', branchScope, params);
+  const oB7 = branchClause('o', branchScope, params);
   const { rows } = await tenantQuery(
     tenant,
     `SELECT
@@ -237,8 +243,9 @@ export const counts = async (tenant, branchScope = null) => {
        (SELECT count(*)::int FROM job_openings o WHERE o.deleted_at IS NULL AND o.status='closed'${oB2}) AS closed_positions,
        (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE o.deleted_at IS NULL${oB3}) AS applications,
        (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status='fired'${oB4}) AS fired,
-       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status IN ('applied','shortlisted','selected')${oB5}) AS applied,
-       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status='selected'${oB6}) AS selected`,
+       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status IN ('applied','shortlisted','offer','selected')${oB5}) AS applied,
+       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status='offer'${oB6}) AS offers,
+       (SELECT count(*)::int FROM job_applications a JOIN job_openings o ON o.id=a.opening_id WHERE a.status='selected'${oB7}) AS selected`,
     params,
   );
   return rows[0] || {};

@@ -31,6 +31,7 @@ export const markModuleCompletion = async (req, res, next) => { try { ok(res, re
 
 // ---- Certificate (student) ----
 export const studentCertificate = async (req, res, next) => { try { ok(res, req, await service.getCertificateView(req.tenant, req.student.id)); } catch (e) { next(e); } };
+export const hrCounts = async (req, res, next) => { try { ok(res, req, await service.hrCounts(req.tenant, req.user)); } catch (e) { next(e); } };
 export const hrListCertificates = async (req, res, next) => { try { ok(res, req, await service.hrListCertificates(req.tenant, req.user, req.query.programId)); } catch (e) { next(e); } };
 export const hrAutoIssue = async (req, res, next) => { try { ok(res, req, await service.hrAutoIssueForProgram(req.tenant, req.user, req.body.program_id), 201); } catch (e) { next(e); } };
 

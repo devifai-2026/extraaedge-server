@@ -21,7 +21,7 @@ export const programModules = async (req, res, next) => { try { ok(res, req, awa
 
 // Applications
 export const listApplications = async (req, res, next) => { try { ok(res, req, await service.listApplications(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
-export const setApplicationStatus = async (req, res, next) => { try { ok(res, req, await service.setApplicationStatus(req.tenant, req.user, req.params.id, req.body.status, req.body.note)); } catch (e) { next(e); } };
+export const setApplicationStatus = async (req, res, next) => { try { ok(res, req, await service.setApplicationStatus(req.tenant, req.user, req.params.id, req.body.status, req.body.note, req.body.offer_ctc)); } catch (e) { next(e); } };
 
 // Student
 export const studentFeed = async (req, res, next) => { try { ok(res, req, await service.studentFeed(req.tenant, req.student.id)); } catch (e) { next(e); } };

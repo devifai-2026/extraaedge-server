@@ -61,6 +61,6 @@ router.delete('/openings/:id', validate({ params: idParam }), controller.deleteO
 
 // Applications
 router.get('/openings/:id/applications', validate({ params: idParam }), controller.listApplications);
-router.post('/applications/:id/status', validate({ params: idParam, body: z.object({ status: z.enum(['fired', 'applied', 'shortlisted', 'selected', 'rejected']), note: z.string().max(2000).optional() }) }), controller.setApplicationStatus);
+router.post('/applications/:id/status', validate({ params: idParam, body: z.object({ status: z.enum(['fired', 'applied', 'shortlisted', 'offer', 'selected', 'rejected']), note: z.string().max(2000).optional(), offer_ctc: z.string().max(120).optional().nullable() }) }), controller.setApplicationStatus);
 
 export default router;

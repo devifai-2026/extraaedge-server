@@ -191,3 +191,65 @@ export const studentsInProgram = async (tenant, programId) => {
   );
   return rows;
 };
+
+// HR dashboard KPIs. Guarded with to_regclass so it works before the interview/
+// certificate migrations. `hrUserId` scopes the interview queue to that HR; when
+// null (admin) it counts every not-yet-finalized assigned slot. Certificates +
+// completion pipeline are tenant-wide (branch scoping for HR is a later pass).
+export const hrCounts = async (tenant, hrUserId = null) => {
+  const has = await tenantQuery(
+    tenant,
+    `SELECT to_regclass('interview_slots') IS NOT NULL AS iv,
+            to_regclass('certificates') IS NOT NULL AS certs,
+            to_regclass('student_module_progress') IS NOT NULL AS smp`,
+    [],
+  );
+  const { iv, certs, smp } = has.rows[0] || {};
+
+  let interviews_to_score = 0;
+  if (iv) {
+    // Slots on interviews this HR evaluates that aren't finalized yet
+    // (graded_at NULL = a rubric category still pending, incl. the HR's own).
+    const params = [];
+    let hrCond = '';
+    if (hrUserId) { params.push(hrUserId); hrCond = `AND i.hr_user_id = $${params.length}`; }
+    else hrCond = 'AND i.hr_user_id IS NOT NULL';
+    const r = await tenantQuery(
+      tenant,
+      `SELECT count(*)::int AS n
+         FROM interview_slots s
+         JOIN mock_interviews i ON i.id = s.interview_id AND i.deleted_at IS NULL
+        WHERE s.deleted_at IS NULL AND s.graded_at IS NULL ${hrCond}`,
+      params,
+    );
+    interviews_to_score = r.rows[0]?.n || 0;
+  }
+
+  let certificates_issued = 0;
+  if (certs) {
+    const r = await tenantQuery(tenant, `SELECT count(*)::int AS n FROM certificates`, []);
+    certificates_issued = r.rows[0]?.n || 0;
+  }
+
+  // Completion pipeline: active students who have completed EVERY module of
+  // their program but don't have a certificate yet (i.e. awaiting issuance /
+  // attendance). Only meaningful once module progress + certs exist.
+  let completion_pipeline = 0;
+  if (smp && certs) {
+    const r = await tenantQuery(
+      tenant,
+      `SELECT count(*)::int AS n FROM students s
+        WHERE s.deleted_at IS NULL AND s.status = 'active' AND s.program_id IS NOT NULL
+          AND (SELECT count(*) FROM course_modules m WHERE m.program_id = s.program_id AND m.deleted_at IS NULL) > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM course_modules m
+             WHERE m.program_id = s.program_id AND m.deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM student_module_progress smp2 WHERE smp2.student_id = s.id AND smp2.module_id = m.id))
+          AND NOT EXISTS (SELECT 1 FROM certificates c WHERE c.student_id = s.id AND c.program_id = s.program_id)`,
+      [],
+    );
+    completion_pipeline = r.rows[0]?.n || 0;
+  }
+
+  return { interviews_to_score, certificates_issued, completion_pipeline };
+};
