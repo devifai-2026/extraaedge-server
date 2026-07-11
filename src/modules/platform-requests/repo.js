@@ -58,6 +58,60 @@ export const getByRequestId = (requestId) =>
   selectMany(sysQuery, `SELECT r.* FROM platform_request_log r WHERE r.request_id = $1 ORDER BY r.created_at`, [requestId]);
 
 // Distinct values to populate filter dropdowns in the UI.
+// Cross-tenant API metrics for the live graphs. All aggregates span EVERY
+// tenant (no tenant filter) — this is the product-wide monitoring view.
+// `sinceExpr` is a safe interval literal chosen by the controller; `bucket` is
+// 'minute' or 'hour'. Returns { summary, series, statusSeries, topEndpoints }.
+export const metrics = async ({ sinceExpr, bucket }) => {
+  const since = `now() - interval '${sinceExpr}'`;
+  const [summary, series, statusSeries, topEndpoints] = await Promise.all([
+    selectOne(
+      sysQuery,
+      `SELECT
+         count(*)::int AS requests,
+         count(*) FILTER (WHERE is_error)::int AS errors,
+         round(100.0 * count(*) FILTER (WHERE is_error) / NULLIF(count(*),0), 2)::float AS error_rate,
+         round(avg(duration_ms))::int AS avg_ms,
+         percentile_disc(0.50) WITHIN GROUP (ORDER BY duration_ms)::int AS p50_ms,
+         percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95_ms,
+         percentile_disc(0.99) WITHIN GROUP (ORDER BY duration_ms)::int AS p99_ms,
+         count(DISTINCT tenant_slug)::int AS active_tenants
+       FROM platform_request_log WHERE created_at >= ${since}`,
+    ),
+    selectMany(
+      sysQuery,
+      `SELECT date_trunc('${bucket}', created_at) AS ts,
+              count(*)::int AS requests,
+              count(*) FILTER (WHERE is_error)::int AS errors,
+              round(avg(duration_ms))::int AS avg_ms,
+              percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95_ms,
+              percentile_disc(0.99) WITHIN GROUP (ORDER BY duration_ms)::int AS p99_ms
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1 ORDER BY 1`,
+    ),
+    selectMany(
+      sysQuery,
+      `SELECT date_trunc('${bucket}', created_at) AS ts,
+              count(*) FILTER (WHERE status_code >= 200 AND status_code < 300)::int AS s2xx,
+              count(*) FILTER (WHERE status_code >= 300 AND status_code < 400)::int AS s3xx,
+              count(*) FILTER (WHERE status_code >= 400 AND status_code < 500)::int AS s4xx,
+              count(*) FILTER (WHERE status_code >= 500)::int AS s5xx
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1 ORDER BY 1`,
+    ),
+    selectMany(
+      sysQuery,
+      `SELECT COALESCE(route, path) AS endpoint, method,
+              count(*)::int AS requests,
+              count(*) FILTER (WHERE is_error)::int AS errors,
+              percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95_ms
+         FROM platform_request_log WHERE created_at >= ${since}
+        GROUP BY 1, 2 ORDER BY requests DESC LIMIT 15`,
+    ),
+  ]);
+  return { summary, series, statusSeries, topEndpoints };
+};
+
 export const facets = async () => {
   const [methods, categories, tenants] = await Promise.all([
     selectMany(sysQuery, `SELECT DISTINCT method FROM platform_request_log ORDER BY method`),

@@ -14,6 +14,7 @@ const router = express.Router();
 router.use(authRequired, requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER));
 
 router.get('/facets', controller.facets);
+router.get('/metrics', controller.metrics);
 router.get('/', validate({ query: listQuery }), controller.list);
 router.get('/:id', validate({ params: idParam }), controller.detail);
 

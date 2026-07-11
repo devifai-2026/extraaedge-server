@@ -25,3 +25,20 @@ export const facets = async (req, res, next) => {
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
+
+// Whitelisted time windows → (safe interval literal, time bucket). User input is
+// mapped to these constants only — never interpolated into SQL directly.
+const WINDOWS = {
+  '1h': { sinceExpr: '1 hour', bucket: 'minute' },
+  '6h': { sinceExpr: '6 hours', bucket: 'minute' },
+  '24h': { sinceExpr: '24 hours', bucket: 'hour' },
+  '7d': { sinceExpr: '7 days', bucket: 'hour' },
+};
+
+export const metrics = async (req, res, next) => {
+  try {
+    const win = WINDOWS[req.query.window] || WINDOWS['6h'];
+    const data = await repo.metrics(win);
+    res.json({ data: { window: req.query.window || '6h', ...data }, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
