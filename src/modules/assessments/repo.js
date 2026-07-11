@@ -29,6 +29,43 @@ export const getTest = async (tenant, id) => {
   return rows[0] || null;
 };
 
+export const attemptCountForTest = async (tenant, testId) => {
+  const { rows } = await tenantQuery(tenant, `SELECT count(*)::int AS n FROM mock_test_attempts WHERE test_id = $1`, [testId]);
+  return rows[0]?.n || 0;
+};
+
+// Update a test's title/module and (optionally) its questions. total_marks is
+// recomputed from the new questions when they're supplied.
+export const updateTest = async (tenant, id, patch) => {
+  const setQuestions = Array.isArray(patch.questions);
+  const total = setQuestions ? patch.questions.reduce((s, q) => s + (Number(q.marks) || 0), 0) : null;
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE mock_tests SET
+        title = COALESCE($2, title),
+        module_id = $3,
+        questions = COALESCE($4, questions),
+        total_marks = COALESCE($5, total_marks),
+        updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+    [id, patch.title ?? null, patch.module_id ?? null, setQuestions ? JSON.stringify(patch.questions) : null, total],
+  );
+  return rows[0] || null;
+};
+
+export const setPublished = async (tenant, id, published) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE mock_tests SET is_published = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+    [id, !!published],
+  );
+  return rows[0] || null;
+};
+
+export const softDeleteTest = async (tenant, id) => {
+  await tenantQuery(tenant, `UPDATE mock_tests SET deleted_at = now(), updated_at = now() WHERE id = $1`, [id]);
+};
+
 export const testResults = async (tenant, testId) => {
   const { rows } = await tenantQuery(
     tenant,

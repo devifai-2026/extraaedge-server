@@ -41,6 +41,14 @@ router.post('/tests', validate({ body: z.object({
   program_id: uuid, module_id: uuid.nullable().optional(), title: z.string().min(1).max(200), questions: questionsSchema,
 }) }), controller.createTest);
 router.get('/tests/:id/results', validate({ params: idParam }), controller.testResults);
+// Edit (title/module always; questions only before any attempt — enforced in
+// the service), publish/unpublish, and delete — so a trainer can fix a bad
+// correct_index or retract a test instead of it being permanently live.
+router.patch('/tests/:id', validate({ params: idParam, body: z.object({
+  title: z.string().min(1).max(200).optional(), module_id: uuid.nullable().optional(), questions: questionsSchema.optional(),
+}) }), controller.updateTest);
+router.post('/tests/:id/publish', validate({ params: idParam, body: z.object({ published: z.boolean() }) }), controller.setTestPublished);
+router.delete('/tests/:id', validate({ params: idParam }), controller.deleteTest);
 
 // Projects
 router.get('/projects', controller.listProjects);

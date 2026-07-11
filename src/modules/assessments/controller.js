@@ -6,6 +6,9 @@ const ok = (res, req, data, status = 200) => res.status(status).json({ data, met
 export const createTest = async (req, res, next) => { try { ok(res, req, await service.createTest(req.tenant, req.user, req.body), 201); } catch (e) { next(e); } };
 export const listTests = async (req, res, next) => { try { ok(res, req, await service.listTests(req.tenant, req.user, req.query.programId)); } catch (e) { next(e); } };
 export const testResults = async (req, res, next) => { try { ok(res, req, await service.testResults(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
+export const updateTest = async (req, res, next) => { try { ok(res, req, await service.updateTest(req.tenant, req.user, req.params.id, req.body)); } catch (e) { next(e); } };
+export const setTestPublished = async (req, res, next) => { try { ok(res, req, await service.setTestPublished(req.tenant, req.user, req.params.id, req.body.published)); } catch (e) { next(e); } };
+export const deleteTest = async (req, res, next) => { try { ok(res, req, await service.deleteTest(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
 
 // ---- Trainer: projects ----
 export const createProject = async (req, res, next) => { try { ok(res, req, await service.createProject(req.tenant, req.user, req.body), 201); } catch (e) { next(e); } };
