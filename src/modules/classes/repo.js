@@ -224,7 +224,7 @@ export const setJoinMode = async (tenant, classId, studentId, joinMode, reason =
 export const studentClasses = async (tenant, studentId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT c.id, c.title, c.kind, c.mode, c.meeting_url, c.starts_at, c.ends_at, c.started_at, c.ended_at,
+    `SELECT c.id, c.batch_id, c.title, c.kind, c.mode, c.meeting_url, c.starts_at, c.ends_at, c.started_at, c.ended_at,
             m.name AS module_name,
             CASE
               WHEN att.status = 'present' THEN 'present'
