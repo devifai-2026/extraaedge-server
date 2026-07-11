@@ -30,6 +30,7 @@ export const updateStage = async (req, res, next) => { try { ok(res, req, await 
 export const deleteStage = async (req, res, next) => { try { ok(res, req, await service.deleteStage(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
 export const moveStage = async (req, res, next) => { try { ok(res, req, await service.moveStage(req.tenant, req.user, req.params.id, req.body.stage_id, req.body.reason)); } catch (e) { next(e); } };
 export const applicationHistory = async (req, res, next) => { try { ok(res, req, await service.applicationHistory(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
+export const studentReport = async (req, res, next) => { try { ok(res, req, await service.studentReport(req.tenant, req.user, req.params.id)); } catch (e) { next(e); } };
 
 // Student
 export const studentFeed = async (req, res, next) => { try { ok(res, req, await service.studentFeed(req.tenant, req.student.id)); } catch (e) { next(e); } };

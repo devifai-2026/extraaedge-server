@@ -5,6 +5,10 @@
 // against the placement user's branch memberships.
 import * as repo from './repo.js';
 import * as coursesRepo from '../courses/repo.js';
+import * as assessmentsRepo from '../assessments/repo.js';
+import * as capstoneRepo from '../capstone/repo.js';
+import * as interviewsRepo from '../interviews/repo.js';
+import * as learningRepo from '../learning/repo.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
@@ -180,6 +184,38 @@ export const applicationHistory = async (tenant, actor, applicationId) => {
   const a = await repo.applicationById(tenant, applicationId);
   if (!a) throw notFound('Application not found');
   return repo.applicationHistory(tenant, applicationId);
+};
+
+// ---------- Student 360 (placement drill-down) ----------
+// The candidate's full LMS record: profile + CV, weighted leaderboard subscores,
+// per-test marks, project marks, capstone, and interview per-category scores.
+export const studentReport = async (tenant, actor, studentId) => {
+  const ctx = await learningRepo.getStudentContext(tenant, studentId);
+  if (!ctx) throw notFound('Student not found');
+  const programId = ctx.program_id;
+  const [tests, projects, capstones, interviews, board] = await Promise.all([
+    assessmentsRepo.studentTests(tenant, studentId),
+    assessmentsRepo.studentProjects(tenant, studentId),
+    programId ? capstoneRepo.studentCapstones(tenant, studentId, programId) : Promise.resolve([]),
+    interviewsRepo.studentSlots(tenant, studentId),
+    programId ? assessmentsRepo.leaderboard(tenant, programId) : Promise.resolve([]),
+  ]);
+  // Per-category interview scores per slot.
+  const interviewsWithScores = await Promise.all(interviews.map(async (s) => ({
+    ...s, scores: await interviewsRepo.slotScores(tenant, s.id),
+  })));
+  const myRow = board.find((r) => String(r.student_id) === String(studentId)) || null;
+  const cvUrl = ctx.cv_r2_key ? await getDownloadSignedUrl({ key: ctx.cv_r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS }).catch(() => null) : null;
+  return {
+    student: { id: ctx.id, name: ctx.name, email: ctx.email, program_name: ctx.program_name, bio: ctx.bio, cv_url: cvUrl },
+    scorecard: myRow ? {
+      total: Number(myRow.total), attendance_pct: Number(myRow.attendance_pct),
+      test_score: Number(myRow.test_score), project_score: Number(myRow.project_score),
+      capstone_score: myRow.capstone_score != null ? Number(myRow.capstone_score) : null,
+      interview_score: Number(myRow.interview_score),
+    } : null,
+    tests, projects, capstones, interviews: interviewsWithScores,
+  };
 };
 
 // ---------- Student ----------

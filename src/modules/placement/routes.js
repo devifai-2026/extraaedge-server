@@ -71,4 +71,7 @@ router.delete('/stages/:id', validate({ params: idParam }), controller.deleteSta
 router.post('/applications/:id/move', validate({ params: idParam, body: z.object({ stage_id: uuid, reason: z.string().max(2000).optional().nullable() }) }), controller.moveStage);
 router.get('/applications/:id/history', validate({ params: idParam }), controller.applicationHistory);
 
+// Student 360 drill-down (full LMS record for a candidate).
+router.get('/students/:id/report', validate({ params: idParam }), controller.studentReport);
+
 export default router;
