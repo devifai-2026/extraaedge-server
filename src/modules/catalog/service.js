@@ -3,6 +3,7 @@
 // with the sales auto-assignment + dedup already in place).
 import { tenantQuery } from '../../db/tenant.js';
 import * as leadsService from '../leads/service.js';
+import * as leadsRepo from '../leads/repo.js';
 import { notFound } from '../../lib/errors.js';
 
 const studentRow = async (tenant, studentId) => {
@@ -42,11 +43,22 @@ export const enquire = async (tenant, studentId, programId) => {
   const parts = (s.name || '').trim().split(/\s+/);
   const first_name = parts[0] || s.email;
   const last_name = parts.length > 1 ? parts.slice(1).join(' ') : null;
+  const noteBody = `Student portal enquiry for course "${prog[0].name}".`;
 
-  // on_duplicate:'warn' → still create the enquiry even if the student already
-  // exists as a lead (they're enquiring about a DIFFERENT course); the sales
-  // team dedups/merges as usual. force:true bypasses the hard unique backstop
-  // by letting createLead surface a friendly result rather than 500.
+  // A current student almost always ALREADY exists as a lead (same email/phone
+  // from their original enrolment). Enquiring about another course must NOT
+  // create a duplicate lead — attach the enquiry as a note on the existing
+  // lead instead. Only create a fresh lead when there's genuinely no match.
+  const dups = await leadsRepo.findDuplicates(tenant, { email: s.email, phone: s.phone, whatsapp_number: s.phone });
+  if (dups.length) {
+    const existing = dups[0];
+    try {
+      await tenantQuery(tenant, `INSERT INTO lead_notes (lead_id, body, visibility) VALUES ($1, $2, 'internal')`, [existing.id, noteBody]);
+      await tenantQuery(tenant, `UPDATE leads SET last_activity_at = now() WHERE id = $1`, [existing.id]);
+    } catch { /* note is best-effort */ }
+    return { ok: true, lead_id: existing.id, existing: true, course: prog[0].name };
+  }
+
   const lead = await leadsService.createLead(tenant, null, {
     first_name,
     last_name,
@@ -57,7 +69,7 @@ export const enquire = async (tenant, studentId, programId) => {
     first_touch_source: 'student_panel',
     last_touch_source: 'student_panel',
     referral_source: `Student enquiry: ${prog[0].name}`,
-  }, { on_duplicate: 'warn', force: true });
+  }, { on_duplicate: 'warn' });
 
-  return { ok: true, lead_id: lead?.id ?? null, course: prog[0].name };
+  return { ok: true, lead_id: lead?.id ?? null, existing: false, course: prog[0].name };
 };
