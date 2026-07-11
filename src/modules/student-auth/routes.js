@@ -11,6 +11,10 @@ const router = express.Router();
 
 // Unauthenticated routes: the tenant is resolved from the x-tenant-slug header
 // (dev) or subdomain (prod). The student FE always sends x-tenant-slug.
+
+// Public branding for the login screen (logo/name/colors by tenant slug).
+router.get('/branding', tenantRequired, controller.branding);
+
 router.post('/login', tenantRequired, validate({ body: z.object({
   email: z.string().email(),
   password: z.string().min(1),

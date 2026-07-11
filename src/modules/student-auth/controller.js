@@ -1,5 +1,23 @@
 import * as service from './service.js';
 
+// Public tenant branding (logo + name + colors) for the student login screen,
+// resolved from the x-tenant-slug header via tenantRequired. No auth needed.
+export const branding = async (req, res, next) => {
+  try {
+    const t = req.tenant || {};
+    res.json({
+      data: {
+        slug: t.slug,
+        name: t.brand_name || t.company_name || t.name || null,
+        logo_url: t.logo_url || null,
+        brand_primary_color: t.brand_primary_color || null,
+        brand_secondary_color: t.brand_secondary_color || null,
+      },
+      meta: { requestId: req.id },
+    });
+  } catch (err) { next(err); }
+};
+
 export const login = async (req, res, next) => {
   try {
     const data = await service.login(req.tenant, req.body);
