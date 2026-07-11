@@ -155,7 +155,16 @@ export const sudoLoginAsStudent = async (tenant, targetStudentId) => {
 export const me = async (tenant, studentId) => {
   const student = await repo.findById(tenant, studentId);
   if (!student) throw notFound('Student not found');
-  return { id: student.id, name: student.name, email: student.email, program_id: student.program_id, status: student.status };
+  return {
+    id: student.id, name: student.name, email: student.email, program_id: student.program_id, status: student.status,
+    // Tenant branding so the student shell can render the logo on first paint
+    // (not only after the dashboard fetch resolves).
+    tenant: {
+      name: tenant.company_name || tenant.brand_name || tenant.name,
+      logo_url: tenant.logo_url || null,
+      brand_primary_color: tenant.brand_primary_color || '#E53935',
+    },
+  };
 };
 
 // ---------- Profile ----------
