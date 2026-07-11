@@ -79,6 +79,7 @@ import assessmentsRouter from './modules/assessments/routes.js';
 import interviewsRouter from './modules/interviews/routes.js';
 import catalogRouter from './modules/catalog/routes.js';
 import lmsAnalyticsRouter from './modules/lms-analytics/routes.js';
+import studentNotificationsRouter from './modules/student-notifications/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
@@ -212,6 +213,8 @@ export const mountRoutes = (app) => {
   api.use('/catalog', catalogRouter);
   // LMS admin analytics dashboards + student sudo-login (super_admin/branch_mgr).
   api.use('/lms-analytics', lmsAnalyticsRouter);
+  // Student notifications feed (student principal; router self-gates).
+  api.use('/student-notifications', studentNotificationsRouter);
   // Per-lead customised fee offer — accounts team's tweak of the
   // program-level defaults for a specific converted lead.
   api.use('/lead-fee-offers', leadFeeOffersRouter);

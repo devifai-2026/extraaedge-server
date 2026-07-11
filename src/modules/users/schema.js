@@ -11,7 +11,13 @@ import { z } from 'zod';
 // but one tier higher (their branch). account_manager is a tenant-level role
 // that reports to its branch_manager (or the tenant super_admin). Creating /
 // promoting users into elevated roles is constrained in the service layer.
-const roleBucket = z.enum(['super_admin', 'branch_manager', 'sales_manager', 'counsellor', 'account_manager']);
+// Includes the LMS teaching roles (head_trainer / trainer) so trainer users can
+// be created from Add-User. `student` is intentionally EXCLUDED — students are a
+// separate principal created via Accounts course-confirm, never as a staff user.
+const roleBucket = z.enum([
+  'super_admin', 'branch_manager', 'sales_manager', 'counsellor', 'account_manager',
+  'head_trainer', 'trainer',
+]);
 
 export const createUserSchema = z.object({
   name: z.string().min(1),

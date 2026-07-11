@@ -10,7 +10,7 @@ import * as coursesRepo from '../courses/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { pushNotification } from '../notifications/service.js';
-import { notifyStudent } from '../../lib/socket.js';
+import { pushStudentNotification } from '../student-notifications/service.js';
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
 
@@ -78,8 +78,9 @@ export const replyAsTrainer = async (tenant, actor, threadId, body) => {
   await assertProgramTrainer(tenant, thread.program_id, actor);
   const reply = await repo.addReply(tenant, threadId, { kind: 'user', id: actor?.id }, body);
   // Notify the student their doubt was answered.
-  notifyStudent(tenant.id, thread.student_id, 'lms.forum_answered', {
-    thread_id: threadId, message: 'A trainer answered your question.',
+  pushStudentNotification(tenant, thread.student_id, {
+    type: 'forum_answered', message: `A trainer answered: "${thread.title}".`,
+    link: '/student/forum', metadata: { thread_id: threadId },
   });
   return reply;
 };

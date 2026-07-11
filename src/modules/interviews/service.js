@@ -5,7 +5,7 @@ import * as repo from './repo.js';
 import * as coursesRepo from '../courses/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
-import { notifyStudent } from '../../lib/socket.js';
+import { pushStudentNotification } from '../student-notifications/service.js';
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
 const assertProgramTrainer = async (tenant, programId, actor) => {
@@ -37,7 +37,7 @@ export const assignSlot = async (tenant, actor, interviewId, studentId, slotAt) 
   if (!iv) throw notFound('Interview not found');
   await assertProgramTrainer(tenant, iv.program_id, actor);
   const slot = await repo.assignSlot(tenant, interviewId, studentId, slotAt);
-  notifyStudent(tenant.id, studentId, 'lms.interview_assigned', { interview_id: interviewId, slot_at: slotAt });
+  pushStudentNotification(tenant, studentId, { type: 'interview_assigned', message: `You've been assigned a mock interview: "${iv.title}".`, link: '/student/interviews', metadata: { interview_id: interviewId, slot_at: slotAt } });
   return slot;
 };
 export const gradeSlot = async (tenant, actor, slotId, marks, feedback) => {
@@ -46,7 +46,7 @@ export const gradeSlot = async (tenant, actor, slotId, marks, feedback) => {
   await assertProgramTrainer(tenant, slot.program_id, actor);
   if (marks == null || Number(marks) < 0) throw validationError({ marks: 'Enter valid marks' });
   const row = await repo.gradeSlot(tenant, slotId, marks, feedback, actor?.id);
-  if (row) notifyStudent(tenant.id, row.student_id, 'lms.interview_graded', { slot_id: slotId, marks });
+  if (row) pushStudentNotification(tenant, row.student_id, { type: 'interview_graded', message: `Your mock interview was graded: ${marks} marks.`, link: '/student/interviews', metadata: { slot_id: slotId, marks } });
   return row;
 };
 

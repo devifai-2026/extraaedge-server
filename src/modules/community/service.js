@@ -13,6 +13,7 @@ import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { emitToBatch } from '../../lib/socket.js';
+import { notifyBatch } from '../student-notifications/service.js';
 import { env } from '../../config/env.js';
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
@@ -46,6 +47,9 @@ export const addRecording = async (tenant, actor, classId, input) => {
     auto_source: 'recording',
   }, actor?.id);
   emitToBatch(tenant.id, c.batch_id, 'lms:announcement', { program_id: c.program_id, class_id: classId, kind: 'recording' });
+  notifyBatch(tenant, { programId: c.program_id, batchId: c.batch_id }, {
+    type: 'announcement', message: `New recording: "${cls?.title || 'class'}".`, link: '/student/recordings',
+  });
   return rec;
 };
 
@@ -70,6 +74,9 @@ export const postAnnouncement = async (tenant, actor, input) => {
   await assertProgramTrainer(tenant, input.program_id, actor);
   const a = await repo.createAnnouncement(tenant, input, actor?.id);
   emitToBatch(tenant.id, input.batch_id, 'lms:announcement', { program_id: input.program_id });
+  notifyBatch(tenant, { programId: input.program_id, batchId: input.batch_id }, {
+    type: 'announcement', message: input.title ? `Announcement: ${input.title}` : 'New announcement from your trainer.', link: '/student/announcements',
+  });
   return a;
 };
 

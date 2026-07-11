@@ -4,7 +4,7 @@ import * as repo from './repo.js';
 import * as coursesRepo from '../courses/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
-import { notifyStudent } from '../../lib/socket.js';
+import { pushStudentNotification } from '../student-notifications/service.js';
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
 const assertProgramTrainer = async (tenant, programId, actor) => {
@@ -75,7 +75,7 @@ export const gradeSubmission = async (tenant, actor, projectId, submissionId, ma
   await assertProgramTrainer(tenant, p.program_id, actor);
   if (marks == null || Number(marks) < 0 || Number(marks) > Number(p.max_marks)) throw validationError({ marks: `0..${p.max_marks}` });
   const row = await repo.gradeSubmission(tenant, submissionId, marks, feedback, actor?.id);
-  if (row) notifyStudent(tenant.id, row.student_id, 'lms.project_graded', { project_id: projectId, marks });
+  if (row) pushStudentNotification(tenant, row.student_id, { type: 'project_graded', message: `Your project "${p.title}" was graded: ${marks}/${p.max_marks}.`, link: '/student/projects', metadata: { project_id: projectId, marks } });
   return row;
 };
 
