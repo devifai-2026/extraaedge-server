@@ -49,6 +49,15 @@ export const createTrainer = async (req, res, next) => {
 export const completeBatch = async (req, res, next) => {
   try { ok(res, req, await service.completeBatch(req.tenant, req.user, req.params.programId, req.params.batchId)); } catch (e) { next(e); }
 };
+export const listCourseStudents = async (req, res, next) => {
+  try { ok(res, req, await service.listCourseStudents(req.tenant, req.user)); } catch (e) { next(e); }
+};
+export const resetStudentPassword = async (req, res, next) => {
+  try { ok(res, req, await service.resetStudentPassword(req.tenant, req.user, req.params.studentId)); } catch (e) { next(e); }
+};
+export const sudoStudent = async (req, res, next) => {
+  try { ok(res, req, await service.sudoStudent(req.tenant, req.user, req.params.studentId)); } catch (e) { next(e); }
+};
 
 // ---- Batches ----
 export const listBatches = async (req, res, next) => {

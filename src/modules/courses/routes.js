@@ -34,6 +34,10 @@ router.get('/', controller.listCourses);
 router.get('/assignable-staff', controller.assignableStaff);
 // Trainer dashboard insights (totals + student roster across the actor's courses).
 router.get('/insights', controller.trainerInsights);
+// Students management (admin + head trainer, course-scoped): list, reset pw, sudo.
+router.get('/students', controller.listCourseStudents);
+router.post('/students/:studentId/reset-password', validate({ params: z.object({ studentId: uuid }) }), controller.resetStudentPassword);
+router.post('/students/:studentId/sudo-login', validate({ params: z.object({ studentId: uuid }) }), controller.sudoStudent);
 router.get('/:programId', validate({ params: programParam }), controller.getCourse);
 
 // Modules

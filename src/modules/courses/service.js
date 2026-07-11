@@ -9,6 +9,8 @@
 import * as repo from './repo.js';
 import * as usersService from '../users/service.js';
 import * as usersRepo from '../users/repo.js';
+import * as studentAuthService from '../student-auth/service.js';
+import * as studentAuthRepo from '../student-auth/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
@@ -189,6 +191,40 @@ export const completeBatch = async (tenant, actor, programId, batchId) => {
   const batch = await repo.getBatch(tenant, batchId);
   if (!batch || batch.program_id !== programId) throw notFound('Batch not in this course');
   return repo.setBatchCompleted(tenant, batchId);
+};
+
+// ---------- Students management (admin + head trainer, course-scoped) ----------
+const actorProgramIds = async (tenant, actor) => {
+  const courses = await repo.listCourses(tenant, { trainerId: isSuperAdmin(actor) ? undefined : actor?.id });
+  return courses.map((c) => c.id);
+};
+
+export const listCourseStudents = async (tenant, actor) => {
+  const ids = await actorProgramIds(tenant, actor);
+  return repo.courseStudents(tenant, ids);
+};
+
+// A student is in the actor's scope if the actor is a super_admin, or heads/is
+// on the roster of the student's course.
+const assertStudentInScope = async (tenant, actor, studentId) => {
+  const student = await studentAuthRepo.findById(tenant, studentId);
+  if (!student) throw notFound('Student not found');
+  if (isSuperAdmin(actor)) return student;
+  const membership = student.program_id ? await repo.isCourseTrainer(tenant, student.program_id, actor?.id) : null;
+  if (!membership) throw forbidden('This student is not in one of your courses.');
+  return student;
+};
+
+export const resetStudentPassword = async (tenant, actor, studentId) => {
+  await assertStudentInScope(tenant, actor, studentId);
+  const password = studentAuthService.generateTempPassword();
+  await studentAuthService.setInitialPassword(tenant, studentId, password);
+  return { password };
+};
+
+export const sudoStudent = async (tenant, actor, studentId) => {
+  await assertStudentInScope(tenant, actor, studentId);
+  return studentAuthService.sudoLoginAsStudent(tenant, studentId);
 };
 
 export const mergeBatches = async (tenant, actor, programId, input) => {

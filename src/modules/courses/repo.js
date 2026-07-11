@@ -236,6 +236,24 @@ export const studentsForPrograms = async (tenant, programIds, limit = 24) => {
   return rows;
 };
 
+// Full student list (with batch + contact) across a set of programs — for the
+// admin/head "Students" management table.
+export const courseStudents = async (tenant, programIds) => {
+  if (!programIds.length) return [];
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT s.id, s.name, s.email, s.phone, s.status, s.program_id, p.name AS program_name,
+            (SELECT b.name FROM batch_students bs JOIN batches b ON b.id = bs.batch_id
+              WHERE bs.student_id = s.id AND bs.deleted_at IS NULL ORDER BY bs.joined_at DESC LIMIT 1) AS batch_name
+       FROM students s
+       LEFT JOIN programs p ON p.id = s.program_id
+      WHERE s.program_id = ANY($1::uuid[]) AND s.deleted_at IS NULL
+      ORDER BY s.created_at DESC`,
+    [programIds],
+  );
+  return rows;
+};
+
 // Teaching staff who can be added to a course roster (head_trainer / trainer),
 // so a head trainer (who can't list all users) can populate the picker.
 export const assignableStaff = async (tenant) => {
