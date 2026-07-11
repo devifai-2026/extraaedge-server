@@ -70,6 +70,23 @@ export const unmarkModule = async (tenant, studentId, moduleId) => {
   await tenantQuery(tenant, `DELETE FROM student_module_progress WHERE student_id = $1 AND module_id = $2`, [studentId, moduleId]);
 };
 
+// Students in a course with whether they've completed a given module.
+export const studentsWithModuleCompletion = async (tenant, programId, moduleId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT s.id AS student_id, s.name, s.email,
+            (smp.id IS NOT NULL) AS completed,
+            (SELECT b.name FROM batch_students bs JOIN batches b ON b.id = bs.batch_id
+              WHERE bs.student_id = s.id AND bs.deleted_at IS NULL ORDER BY bs.joined_at DESC LIMIT 1) AS batch_name
+       FROM students s
+       LEFT JOIN student_module_progress smp ON smp.student_id = s.id AND smp.module_id = $2
+      WHERE s.program_id = $1 AND s.deleted_at IS NULL
+      ORDER BY s.name`,
+    [programId, moduleId],
+  );
+  return rows;
+};
+
 // Trainer insight: per-module completion counts across the course's students.
 export const progressByModule = async (tenant, programId) => {
   const { rows } = await tenantQuery(

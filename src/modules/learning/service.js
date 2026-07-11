@@ -86,19 +86,29 @@ export const studentProgress = async (tenant, studentId) => {
   return { modules: list, completed, total: list.length, pct: list.length ? Math.round((completed / list.length) * 100) : 0 };
 };
 
-export const setStudentProgress = async (tenant, studentId, moduleId, completed) => {
-  const programId = await assessmentsRepo.studentProgram(tenant, studentId);
-  if (!programId) throw notFound('You are not enrolled in a course.');
-  const modules = await coursesRepo.listModules(tenant, programId);
-  if (!modules.some((m) => String(m.id) === String(moduleId))) throw notFound('Module is not in your course.');
-  if (completed) await repo.markModule(tenant, studentId, programId, moduleId);
-  else await repo.unmarkModule(tenant, studentId, moduleId);
-  return studentProgress(tenant, studentId);
-};
-
 export const trainerProgress = async (tenant, actor, programId) => {
   await assertProgramTrainer(tenant, programId, actor);
   return repo.progressByModule(tenant, programId);
+};
+
+// Trainer/head certifies module completion for students (per-student list; the
+// FE can pass all students in a batch for a "mark whole batch" action).
+export const moduleCompletion = async (tenant, actor, programId, moduleId) => {
+  await assertProgramTrainer(tenant, programId, actor);
+  return repo.studentsWithModuleCompletion(tenant, programId, moduleId);
+};
+
+export const markModuleCompletion = async (tenant, actor, { program_id, module_id, student_ids, completed }) => {
+  await assertProgramTrainer(tenant, program_id, actor);
+  const modules = await coursesRepo.listModules(tenant, program_id);
+  if (!modules.some((m) => String(m.id) === String(module_id))) throw notFound('Module is not in this course.');
+  for (const sid of student_ids) {
+    // eslint-disable-next-line no-await-in-loop
+    if (completed) await repo.markModule(tenant, sid, program_id, module_id);
+    // eslint-disable-next-line no-await-in-loop
+    else await repo.unmarkModule(tenant, sid, module_id);
+  }
+  return repo.studentsWithModuleCompletion(tenant, program_id, module_id);
 };
 
 // ---------- Certificate eligibility ----------

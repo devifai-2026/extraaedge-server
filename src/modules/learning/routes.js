@@ -34,8 +34,7 @@ const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
 s.get('/student/materials', controller.studentMaterials);
 s.get('/student/materials/:id/download', validate({ params: idParam }), controller.studentMaterialUrl);
-s.get('/student/progress', controller.studentProgress);
-s.put('/student/progress/:moduleId', validate({ params: moduleParam, body: progressBody }), controller.setStudentProgress);
+s.get('/student/progress', controller.studentProgress); // read-only — trainers certify completion
 s.get('/student/certificate', controller.studentCertificate);
 s.post('/student/certificate/claim', controller.claimCertificate);
 s.post('/student/home-extras', controller.studentHomeExtras);
@@ -52,6 +51,12 @@ router.post('/materials', validate({ body: materialBody }), controller.createMat
 router.delete('/materials/:id', validate({ params: idParam }), controller.deleteMaterial);
 router.get('/materials/:id/download', validate({ params: idParam }), controller.trainerMaterialUrl);
 router.get('/progress', controller.trainerProgress); // ?programId=
+// Trainer certifies module completion per student (+ bulk).
+router.get('/module/:moduleId/completion', validate({ params: moduleParam }), controller.moduleCompletion); // ?programId=
+router.post('/module-completion', validate({ body: z.object({
+  program_id: z.string().uuid(), module_id: z.string().uuid(),
+  student_ids: z.array(z.string().uuid()).min(1), completed: z.boolean(),
+}) }), controller.markModuleCompletion);
 router.get('/certificates', controller.listCertificates); // ?programId=
 router.post('/certificates/issue', validate({ body: issueBody }), controller.issueCertificate);
 

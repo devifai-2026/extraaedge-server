@@ -22,9 +22,12 @@ export const issueCertificate = async (req, res, next) => { try { ok(res, req, a
 export const studentMaterials = async (req, res, next) => { try { ok(res, req, await service.studentMaterials(req.tenant, req.student.id)); } catch (e) { next(e); } };
 export const studentMaterialUrl = async (req, res, next) => { try { ok(res, req, await service.studentMaterialUrl(req.tenant, req.student.id, req.params.id)); } catch (e) { next(e); } };
 
-// ---- Progress (student) ----
+// ---- Progress (student, read-only) ----
 export const studentProgress = async (req, res, next) => { try { ok(res, req, await service.studentProgress(req.tenant, req.student.id)); } catch (e) { next(e); } };
-export const setStudentProgress = async (req, res, next) => { try { ok(res, req, await service.setStudentProgress(req.tenant, req.student.id, req.params.moduleId, req.body.completed)); } catch (e) { next(e); } };
+
+// ---- Module completion (trainer/head certifies) ----
+export const moduleCompletion = async (req, res, next) => { try { ok(res, req, await service.moduleCompletion(req.tenant, req.user, req.query.programId, req.params.moduleId)); } catch (e) { next(e); } };
+export const markModuleCompletion = async (req, res, next) => { try { ok(res, req, await service.markModuleCompletion(req.tenant, req.user, req.body)); } catch (e) { next(e); } };
 
 // ---- Certificate (student) ----
 export const studentCertificate = async (req, res, next) => { try { ok(res, req, await service.getCertificateView(req.tenant, req.student.id)); } catch (e) { next(e); } };
