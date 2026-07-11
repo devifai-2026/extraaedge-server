@@ -248,6 +248,11 @@ export const confirmCourse = async (tenant, actor, id) => {
   const name = [adm.first_name, adm.middle_name, adm.last_name].filter(Boolean).join(' ').trim() || email;
 
   // Create (or reuse) the student, then set a fresh temporary password + activate.
+  // students.email is UNIQUE (citext, partial on deleted_at) — repo.create does
+  // ON CONFLICT DO NOTHING and returns the existing row. If that row belongs to
+  // a DIFFERENT admission, the email is already another student's login → fail
+  // loudly instead of silently re-pointing/reusing it. Re-confirming the SAME
+  // admission stays idempotent.
   const student = await studentsRepo.create(tenant, {
     admission_id: adm.id,
     program_id: adm.program_id,
@@ -256,6 +261,10 @@ export const confirmCourse = async (tenant, actor, id) => {
     phone: adm.whatsapp_number || adm.alternate_contact || null,
     created_by: actor?.id ?? null,
   });
+  if (!student) throw validationError({ email: 'Could not create the student record for this email.' });
+  if (student.admission_id && String(student.admission_id) !== String(adm.id)) {
+    throw validationError({ email: `This email (${email}) already belongs to another student. Use a unique email for this admission.` });
+  }
   const tempPassword = studentAuth.generateTempPassword();
   await studentAuth.setInitialPassword(tenant, student.id, tempPassword);
 

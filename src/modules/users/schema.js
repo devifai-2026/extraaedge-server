@@ -19,10 +19,18 @@ const roleBucket = z.enum([
   'head_trainer', 'trainer', 'hr', 'placement',
 ]);
 
+// A phone/whatsapp must be digits only (7–15). Optional/blank is allowed; a
+// non-empty value with letters or wrong length is rejected. FE sanitizes to
+// digits, but the API is the source of truth.
+const phoneField = z.string()
+  .optional()
+  .nullable()
+  .refine((v) => v == null || v === '' || /^\d{7,15}$/.test(v), { message: 'Phone must be 7–15 digits' });
+
 export const createUserSchema = z.object({
   name: z.string().min(1),
   email: z.string().email(),
-  phone: z.string().optional(),
+  phone: phoneField,
   password: z.string().min(10),
   role: roleBucket,
   role_id: z.string().uuid().optional(),
