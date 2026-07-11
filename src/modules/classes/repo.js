@@ -157,7 +157,11 @@ export const attendanceTable = async (tenant, classId) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT s.id AS student_id, s.name, s.email,
-            COALESCE(att.status, 'absent') AS status,
+            CASE
+              WHEN att.status IS NOT NULL THEN att.status
+              WHEN c.ended_at IS NOT NULL THEN 'absent'
+              ELSE 'pending'
+            END AS status,
             att.join_mode, att.pre_notified_absent, att.edited_by, att.edited_at,
             eu.name AS edited_by_name,
             (SELECT count(*)::int FROM attendance_answers aa
@@ -220,7 +224,11 @@ export const studentClasses = async (tenant, studentId) => {
     tenant,
     `SELECT c.id, c.title, c.kind, c.mode, c.meeting_url, c.starts_at, c.ends_at, c.started_at, c.ended_at,
             m.name AS module_name,
-            COALESCE(att.status,'absent') AS my_status, att.pre_notified_absent
+            CASE
+              WHEN att.status IS NOT NULL THEN att.status
+              WHEN c.ended_at IS NOT NULL THEN 'absent'
+              ELSE 'upcoming'
+            END AS my_status, att.pre_notified_absent
        FROM batch_students bs
        JOIN classes c ON c.batch_id = bs.batch_id AND c.deleted_at IS NULL
        LEFT JOIN course_modules m ON m.id = c.module_id
