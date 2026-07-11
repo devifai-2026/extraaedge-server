@@ -132,7 +132,17 @@ const assertBranchManagerScope = async (tenant, actor, { targetRole, targetUserI
   }
 };
 
-export const listUsers = (tenant, query) => repo.list(tenant, query);
+// A branch_manager's user list is scoped to their branch subtree (their
+// teamHierarchy: themselves + everyone reporting up to them), so the Users
+// table + the dashboard counsellor picker no longer leak the whole tenant.
+// super_admin / account_manager are unscoped.
+export const listUsers = async (tenant, query, actor) => {
+  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    const ids = await repo.teamHierarchy(tenant, actor.id); // actor + subtree
+    return repo.list(tenant, { ...query, scope_user_ids: ids.length ? ids : ['00000000-0000-0000-0000-000000000000'] });
+  }
+  return repo.list(tenant, query);
+};
 
 export const getUser = async (tenant, id) => {
   const row = await repo.findById(tenant, id);

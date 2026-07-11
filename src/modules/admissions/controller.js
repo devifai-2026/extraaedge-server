@@ -74,7 +74,7 @@ export const timelineByLead = async (req, res, next) => {
 // Pipeline sidebar page + the dashboard cards.
 export const leadStatusSnapshot = async (req, res, next) => {
   try {
-    const data = await service.leadStatusSnapshot(req.tenant);
+    const data = await service.leadStatusSnapshot(req.tenant, req.user, req.query.branch_id || null);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -146,7 +146,7 @@ export const listReceipts = async (req, res, next) => {
 // Admin Payment Details ledger — paginated/filterable/sortable/searchable.
 export const listPaymentDetails = async (req, res, next) => {
   try {
-    const { rows, total, total_amount, pending_count, page, limit } = await service.listPaymentDetails(req.tenant, req.query);
+    const { rows, total, total_amount, pending_count, page, limit } = await service.listPaymentDetails(req.tenant, req.query, req.user);
     res.json({ data: rows, meta: { requestId: req.id, total, total_amount, pending_count, page, limit } });
   } catch (err) { next(err); }
 };
@@ -154,7 +154,7 @@ export const listPaymentDetails = async (req, res, next) => {
 // Payment analytics for the admin dashboard charts.
 export const paymentAnalytics = async (req, res, next) => {
   try {
-    const data = await service.paymentAnalytics(req.tenant, { days: req.query.days ? Number(req.query.days) : undefined });
+    const data = await service.paymentAnalytics(req.tenant, { days: req.query.days ? Number(req.query.days) : undefined, branch_id: req.query.branch_id || null }, req.user);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -189,7 +189,7 @@ export const collectionReceiptWise = async (req, res, next) => {
 export const dashboard = async (req, res, next) => {
   try {
     const days = Math.max(7, Math.min(365, Number(req.query.trend_days) || 30));
-    const data = await service.dashboardWithCharts(req.tenant, { trend_days: days });
+    const data = await service.dashboardWithCharts(req.tenant, { trend_days: days, branch_id: req.query.branch_id || null }, req.user);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -216,7 +216,7 @@ export const pendingAdmissionsCount = async (req, res, next) => {
 export const emiDigest = async (req, res, next) => {
   try {
     const upcomingDays = Math.max(1, Math.min(30, Number(req.query?.days) || 7));
-    const rows = await service.emiDigest(req.tenant, upcomingDays);
+    const rows = await service.emiDigest(req.tenant, upcomingDays, req.user);
     res.json({ data: rows, meta: { requestId: req.id, upcomingDays, total: rows.length } });
   } catch (err) { next(err); }
 };

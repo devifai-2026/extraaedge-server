@@ -3,8 +3,26 @@ import * as tenantsRepo from '../tenants/repo.js';
 import * as studentsRepo from '../student-auth/repo.js';
 import * as studentAuth from '../student-auth/service.js';
 import * as coursesRepo from '../courses/repo.js';
+import * as usersRepo from '../users/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+
+// The branch an actor's admissions/revenue views should be scoped to (via
+// admissions→leads.branch_id). super_admin → their picked branch (?branch_id)
+// or null (all). branch_manager → their own branch (null branch = sees nothing,
+// avoiding a tenant-wide leak). account_manager → null (tenant-wide, unchanged).
+// Returns: a branch uuid to scope to, null for tenant-wide (no filter), or the
+// all-zero uuid as a "match nothing" sentinel for a branch_manager with no
+// branch assigned yet (so they see an empty—not tenant-wide—dashboard).
+const NO_BRANCH = '00000000-0000-0000-0000-000000000000';
+const resolveAdmissionBranch = async (tenant, actor, branchId) => {
+  if (actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return branchId || null;
+  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    const me = await usersRepo.findById(tenant, actor.id);
+    return me?.branch_id ?? NO_BRANCH;
+  }
+  return null;
+};
 import { tenantQuery } from '../../db/tenant.js';
 import { notifyUser } from '../../lib/socket.js';
 import { pushNotification } from '../notifications/service.js';
@@ -364,10 +382,16 @@ export const setStatus = async (tenant, id, status, extra, actor) => {
 export const listReceipts = (tenant, q) => repo.listReceipts(tenant, q);
 
 // Admin Payment Details ledger (paginated/filterable/sortable/searchable).
-export const listPaymentDetails = (tenant, q) => repo.listPaymentDetails(tenant, q);
+export const listPaymentDetails = async (tenant, q, actor) => {
+  const branchId = await resolveAdmissionBranch(tenant, actor, q?.branch_id);
+  return repo.listPaymentDetails(tenant, { ...q, branchId });
+};
 
 // Payment analytics for the admin dashboard charts.
-export const paymentAnalytics = (tenant, q) => repo.paymentAnalytics(tenant, q);
+export const paymentAnalytics = async (tenant, q, actor) => {
+  const branchId = await resolveAdmissionBranch(tenant, actor, q?.branch_id);
+  return repo.paymentAnalytics(tenant, { ...q, branchId });
+};
 
 export const createReceipt = async (tenant, actor, admission_id, input) => {
   const adm = await repo.findById(tenant, admission_id);
@@ -562,17 +586,26 @@ export const timelineByLead = async (tenant, lead_id, actor) => {
 
 // Tenant-wide snapshot of every converted lead's admission state.
 // Powers the new "Admission Pipeline" sidebar page + the dashboard cards.
-export const leadStatusSnapshot = async (tenant) => {
+export const leadStatusSnapshot = async (tenant, actor, branchId) => {
+  const branch = await resolveAdmissionBranch(tenant, actor, branchId);
+  // When a branch is in force, scope every part to admissions/leads in that
+  // branch (via the lead's branch_id). branch=null → tenant-wide (unchanged).
+  const cP = []; let cJoin = ''; let cFilter = '';
+  if (branch) { cP.push(branch); cJoin = 'JOIN leads l ON l.id = a.lead_id'; cFilter = `AND l.branch_id = $${cP.length}`; }
   const { rows: counts } = await tenantQuery(
     tenant,
-    `SELECT status, COUNT(*)::int AS count
-       FROM admissions WHERE deleted_at IS NULL
-       GROUP BY status`,
+    `SELECT a.status, COUNT(*)::int AS count
+       FROM admissions a ${cJoin}
+      WHERE a.deleted_at IS NULL ${cFilter}
+      GROUP BY a.status`,
+    cP,
   );
   // Converted leads without any admission row yet — surfaced as rows
   // (status='unrouted', no admission_id) so the Pipeline table can
   // render them under the "Unrouted" filter chip alongside the real
   // admissions.
+  const uP = []; let uFilter = '';
+  if (branch) { uP.push(branch); uFilter = `AND l.branch_id = $${uP.length}`; }
   const { rows: unroutedRows } = await tenantQuery(
     tenant,
     `SELECT NULL::uuid          AS admission_id,
@@ -591,14 +624,17 @@ export const leadStatusSnapshot = async (tenant) => {
        LEFT JOIN programs p ON p.id = l.program_id
        LEFT JOIN users    u ON u.id = l.assigned_to
       WHERE l.deleted_at IS NULL
-        AND l.converted_at IS NOT NULL
+        AND l.converted_at IS NOT NULL ${uFilter}
         AND NOT EXISTS (
           SELECT 1 FROM admissions a
            WHERE a.lead_id = l.id AND a.deleted_at IS NULL
         )
       ORDER BY l.converted_at DESC NULLS LAST
       LIMIT 500`,
+    uP,
   );
+  const lP = []; let lFilter = '';
+  if (branch) { lP.push(branch); lFilter = `AND l.branch_id = $${lP.length}`; }
   const { rows: list } = await tenantQuery(
     tenant,
     `SELECT a.id AS admission_id, a.status, a.admission_date, a.total_fees,
@@ -613,9 +649,10 @@ export const leadStatusSnapshot = async (tenant) => {
        LEFT JOIN programs          p ON p.id = a.program_id
        LEFT JOIN admission_centers c ON c.id = a.center_id
        LEFT JOIN users             u ON u.id = a.guided_by_counsellor_id
-      WHERE a.deleted_at IS NULL
+      WHERE a.deleted_at IS NULL ${lFilter}
       ORDER BY a.updated_at DESC
       LIMIT 500`,
+    lP,
   );
   return {
     counts: counts.reduce((acc, r) => { acc[r.status] = r.count; return acc; }, {}),
@@ -626,7 +663,10 @@ export const leadStatusSnapshot = async (tenant) => {
 
 export const paySchedule = (tenant, q) => repo.paySchedule(tenant, q);
 export const collectionReceiptWise = (tenant, q) => repo.collectionReceiptWise(tenant, q);
-export const dashboard = (tenant) => repo.dashboard(tenant);
+export const dashboard = async (tenant, actor, branchId) => {
+  const b = await resolveAdmissionBranch(tenant, actor, branchId);
+  return repo.dashboard(tenant, b);
+};
 
 // Counsellor "My Students": their converted leads + submitted admissions,
 // scoped to the acting counsellor. (For super_admin/account_manager, who might
@@ -636,17 +676,21 @@ export const myStudents = (tenant, actor) => repo.myStudents(tenant, actor?.id);
 
 export const pendingAdmissions = (tenant) => repo.pendingAdmissions(tenant);
 export const pendingAdmissionsCount = (tenant) => repo.pendingAdmissionsCount(tenant);
-export const emiDigest = (tenant, upcomingDays) => repo.emiDigest(tenant, upcomingDays);
+export const emiDigest = async (tenant, upcomingDays, actor) => {
+  const branchId = await resolveAdmissionBranch(tenant, actor, undefined);
+  return repo.emiDigest(tenant, upcomingDays, branchId);
+};
 
 // Compound dashboard fetch: KPI cards (existing) + 4 chart datasets.
 // One round-trip from the FE; ~5 queries server-side run in parallel.
-export const dashboardWithCharts = async (tenant, { trend_days = 30 } = {}) => {
+export const dashboardWithCharts = async (tenant, { trend_days = 30, branch_id } = {}, actor) => {
+  const b = await resolveAdmissionBranch(tenant, actor, branch_id);
   const [kpis, admTrend, colTrend, breakdown, courses] = await Promise.all([
-    repo.dashboard(tenant),
-    repo.admissionsTrend(tenant, trend_days),
-    repo.collectionTrend(tenant, trend_days),
-    repo.statusBreakdown(tenant),
-    repo.courseBreakdown(tenant),
+    repo.dashboard(tenant, b),
+    repo.admissionsTrend(tenant, trend_days, b),
+    repo.collectionTrend(tenant, trend_days, b),
+    repo.statusBreakdown(tenant, b),
+    repo.courseBreakdown(tenant, b),
   ]);
   return {
     ...kpis,

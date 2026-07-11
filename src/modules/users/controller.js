@@ -18,7 +18,7 @@ export const sudoLogin = async (req, res, next) => {
 
 export const list = async (req, res, next) => {
   try {
-    const { rows, total } = await service.listUsers(req.tenant, req.query);
+    const { rows, total } = await service.listUsers(req.tenant, req.query, req.user);
     res.json({ data: rows, meta: { requestId: req.id, page: req.query.page, limit: req.query.limit, total } });
   } catch (err) { next(err); }
 };

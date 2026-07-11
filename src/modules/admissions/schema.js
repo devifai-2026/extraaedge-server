@@ -106,6 +106,7 @@ export const paymentDetailsQuery = z.object({
   center_id: z.string().uuid().optional(),
   admission_id: z.string().uuid().optional(),
   lead_id: z.string().uuid().optional(),
+  branch_id: z.string().uuid().optional(), // super_admin branch-switcher scope
   collected_by: z.string().uuid().optional(),
   mode_of_payment: z.string().optional(),
   receipt_kind: z.enum(['installment', 'registration', 'misc']).optional(),

@@ -12,12 +12,14 @@ const COLS = `
   ) AS manager_ids
 `;
 
-export const list = async (tenant, { q, role, team_id, manager_id, is_active, page, limit }) => {
+export const list = async (tenant, { q, role, team_id, manager_id, is_active, page, limit, scope_user_ids }) => {
   const conds = ['u.deleted_at IS NULL'];
   const params = [];
   if (role) { params.push(role); conds.push(`u.role = $${params.length}`); }
   if (team_id) { params.push(team_id); conds.push(`u.team_id = $${params.length}`); }
   if (manager_id) { params.push(manager_id); conds.push(`u.manager_id = $${params.length}`); }
+  // Branch subtree restriction (branch_manager) — only these user ids.
+  if (Array.isArray(scope_user_ids)) { params.push(scope_user_ids); conds.push(`u.id = ANY($${params.length})`); }
   if (is_active === 'true') conds.push('u.is_active = true');
   if (is_active === 'false') conds.push('u.is_active = false');
   if (q) {

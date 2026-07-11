@@ -20,6 +20,13 @@ const acctRole = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
 );
+// Read-only dashboard/analytics that a branch_manager may also view (scoped to
+// their branch server-side). NOT the accounts workflow (approve/receipts/etc.).
+const acctOrBranch = requireRole(
+  SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+);
 // Counsellor-facing subset (their own converted students): counsellors may
 // VIEW their admissions and configure+send the admission link, but not run the
 // accounts workflow. The rows are scoped to the actor server-side (see
@@ -33,17 +40,17 @@ const acctOrCounsellor = requireRole(
 // NOTE: gating is now PER-ROUTE (no blanket router.use) so counsellors can
 // reach only the scoped subset below.
 
-// Dashboard summary + charts
-router.get('/dashboard', acctRole, controller.dashboard);
+// Dashboard summary + charts (branch_manager sees their branch, scoped in svc)
+router.get('/dashboard', acctOrBranch, controller.dashboard);
 
 // Pending admissions queue (converted leads w/o admission + pending_approval admissions)
 router.get('/pending-admissions', acctRole, controller.pendingAdmissions);
 router.get('/pending-admissions/count', acctRole, controller.pendingAdmissionsCount);
-router.get('/emi-digest', acctRole, controller.emiDigest);
+router.get('/emi-digest', acctOrBranch, controller.emiDigest);
 
 // Tenant-wide admission pipeline snapshot (for the new admin sidebar page
 // + a section on the main analytics dashboard). Must come BEFORE /:id.
-router.get('/lead-status-snapshot', acctRole, controller.leadStatusSnapshot);
+router.get('/lead-status-snapshot', acctOrBranch, controller.leadStatusSnapshot);
 
 // Counsellor "My Students" — their converted leads + submitted admissions.
 // Scoped to the acting user server-side. Must come BEFORE /:id.
@@ -81,9 +88,9 @@ router.get('/reports/collection-receipt-wise', acctRole, validate({ query: repor
 // Receipts (flat list across admissions)
 router.get('/receipts', acctRole, validate({ query: reportQuery }), controller.listReceipts);
 // Admin Payment Details ledger — paginated/filterable/sortable/searchable.
-router.get('/payment-details', acctRole, validate({ query: paymentDetailsQuery }), controller.listPaymentDetails);
+router.get('/payment-details', acctOrBranch, validate({ query: paymentDetailsQuery }), controller.listPaymentDetails);
 // Payment analytics for the admin dashboard charts.
-router.get('/payment-analytics', acctRole, controller.paymentAnalytics);
+router.get('/payment-analytics', acctOrBranch, controller.paymentAnalytics);
 router.delete('/receipts/:id', acctRole, validate({ params: idParam }), controller.deleteReceipt);
 
 // Centers — super_admin manages, account_manager reads.

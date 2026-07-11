@@ -558,6 +558,9 @@ export const listPaymentDetails = async (tenant, q = {}) => {
   if (q.amount_min != null) add('r.amount >= $$', q.amount_min);
   if (q.amount_max != null) add('r.amount <= $$', q.amount_max);
   if (q.admission_status) add('a.status = $$', q.admission_status);
+  // Branch scope (branch_manager / super_admin-picked-branch): the receipt's
+  // admission's lead must be in this branch. NO_BRANCH sentinel → matches none.
+  if (q.branchId) add('l.branch_id = $$', q.branchId);
 
   // Free-text search across receipt no / admission code / payer name /
   // phone / email / UTR-ish transaction details.
@@ -679,6 +682,7 @@ const fetchPendingVerificationPayments = async (tenant, q = {}, { page, limit })
   if (q.center_id) add('a.center_id = $$', q.center_id);
   if (q.admission_id) add('a.id = $$', q.admission_id);
   if (q.lead_id) add('a.lead_id = $$', q.lead_id);
+  if (q.branchId) add('l.branch_id = $$', q.branchId);
   if (q.amount_min != null) add('a.payment_amount >= $$', q.amount_min);
   if (q.amount_max != null) add('a.payment_amount <= $$', q.amount_max);
   // Date range applies to when the student submitted (admission created).
@@ -776,37 +780,42 @@ const fetchPendingVerificationPayments = async (tenant, q = {}, { page, limit })
 //                   installment/misc)
 //   • totals      — overall collected amount + count in the window
 const PAYMENT_ANALYTICS_DAYS = 30;
-export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS } = {}) => {
+export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS, branchId = null } = {}) => {
   const tz = tenant.timezone || 'Asia/Kolkata';
   const since = `now() - ($1 || ' days')::interval`;
+  // Branch scope: link each receipt to its admission's lead's branch. When set,
+  // the branch id is $2 and a join is added; totals-style queries that use the
+  // `admission_receipts` table alias unqualified get the alias `r`.
+  const p = branchId ? [days, branchId] : [days];
+  const bJoin = branchId ? 'JOIN admissions a2 ON a2.id = r.admission_id JOIN leads l ON l.id = a2.lead_id AND l.branch_id = $2' : '';
   const [trend, byMode, byKind, byAccount, totals] = await Promise.all([
     tenantQuery(
       tenant,
-      `SELECT to_char((receipt_date)::date, 'YYYY-MM-DD') AS day,
-              sum(amount)::numeric AS amount,
+      `SELECT to_char((r.receipt_date)::date, 'YYYY-MM-DD') AS day,
+              sum(r.amount)::numeric AS amount,
               count(*)::int AS count
-         FROM admission_receipts
-        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date
+         FROM admission_receipts r ${bJoin}
+        WHERE r.deleted_at IS NULL AND r.receipt_date >= (${since})::date
         GROUP BY 1 ORDER BY 1`,
-      [days],
+      p,
     ),
     tenantQuery(
       tenant,
-      `SELECT COALESCE(mode_of_payment, 'unknown') AS mode,
-              sum(amount)::numeric AS amount, count(*)::int AS count
-         FROM admission_receipts
-        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date
+      `SELECT COALESCE(r.mode_of_payment, 'unknown') AS mode,
+              sum(r.amount)::numeric AS amount, count(*)::int AS count
+         FROM admission_receipts r ${bJoin}
+        WHERE r.deleted_at IS NULL AND r.receipt_date >= (${since})::date
         GROUP BY 1 ORDER BY amount DESC`,
-      [days],
+      p,
     ),
     tenantQuery(
       tenant,
-      `SELECT COALESCE(receipt_kind, 'misc') AS kind,
-              sum(amount)::numeric AS amount, count(*)::int AS count
-         FROM admission_receipts
-        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date
+      `SELECT COALESCE(r.receipt_kind, 'misc') AS kind,
+              sum(r.amount)::numeric AS amount, count(*)::int AS count
+         FROM admission_receipts r ${bJoin}
+        WHERE r.deleted_at IS NULL AND r.receipt_date >= (${since})::date
         GROUP BY 1 ORDER BY amount DESC`,
-      [days],
+      p,
     ),
     // Collected ₹ grouped by the payment account the receipt's admission was
     // paid into (admissions.payment_account_id). Unlinked → 'Unspecified'.
@@ -822,16 +831,17 @@ export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS }
          FROM admission_receipts r
          JOIN admissions a ON a.id = r.admission_id
          LEFT JOIN payment_accounts pa ON pa.id = a.payment_account_id
+         ${branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : ''}
         WHERE r.deleted_at IS NULL AND r.receipt_date >= (${since})::date
         GROUP BY 1 ORDER BY amount DESC`,
-      [days],
+      p,
     ),
     tenantQuery(
       tenant,
-      `SELECT COALESCE(sum(amount), 0)::numeric AS amount, count(*)::int AS count
-         FROM admission_receipts
-        WHERE deleted_at IS NULL AND receipt_date >= (${since})::date`,
-      [days],
+      `SELECT COALESCE(sum(r.amount), 0)::numeric AS amount, count(*)::int AS count
+         FROM admission_receipts r ${bJoin}
+        WHERE r.deleted_at IS NULL AND r.receipt_date >= (${since})::date`,
+      p,
     ),
   ]);
   void tz; // receipt_date is a DATE already; tz reserved for future ts fields.
@@ -1180,7 +1190,8 @@ export const pendingAdmissions = async (tenant) => {
 //
 // We join receipts with a LATERAL filter so "paid for this slot" is a
 // boolean per fee_schedule row (not just any receipt on the admission).
-export const emiDigest = async (tenant, upcomingDays = 7) => {
+export const emiDigest = async (tenant, upcomingDays = 7, branchId = null) => {
+  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : '';
   const { rows } = await tenantQuery(
     tenant,
     `
@@ -1206,6 +1217,7 @@ export const emiDigest = async (tenant, upcomingDays = 7) => {
       ) AS is_paid
     FROM admission_fee_schedule fs
     JOIN admissions a ON a.id = fs.admission_id AND a.deleted_at IS NULL
+    ${bJoin}
     LEFT JOIN programs p ON p.id = a.program_id
     LEFT JOIN users u    ON u.id = a.guided_by_counsellor_id
     WHERE a.status IN ('attending', 'on_break', 'pending_approval')
@@ -1218,7 +1230,7 @@ export const emiDigest = async (tenant, upcomingDays = 7) => {
       )
     ORDER BY fs.due_date ASC
     `,
-    [upcomingDays],
+    branchId ? [upcomingDays, branchId] : [upcomingDays],
   );
   // Drop already-paid rows in the result set so the FE doesn't have to.
   return rows.filter((r) => !r.is_paid);
@@ -1245,7 +1257,9 @@ export const pendingAdmissionsCount = async (tenant) => {
 // ---------- Charts ----------
 // Daily admissions count over the last `days` days. Returns
 // [{ day: 'YYYY-MM-DD', count: int }] padded so missing days show 0.
-export const admissionsTrend = async (tenant, days = 30) => {
+export const admissionsTrend = async (tenant, days = 30, branchId = null) => {
+  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : '';
+  const params = branchId ? [days, branchId] : [days];
   const { rows } = await tenantQuery(
     tenant,
     `WITH range AS (
@@ -1255,22 +1269,24 @@ export const admissionsTrend = async (tenant, days = 30) => {
          INTERVAL '1 day'
        )::date AS day
      ), counts AS (
-       SELECT admission_date::date AS day, count(*)::int AS n
-         FROM admissions
-        WHERE deleted_at IS NULL
-          AND admission_date >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
-        GROUP BY admission_date::date
+       SELECT a.admission_date::date AS day, count(*)::int AS n
+         FROM admissions a ${bJoin}
+        WHERE a.deleted_at IS NULL
+          AND a.admission_date >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+        GROUP BY a.admission_date::date
      )
      SELECT to_char(r.day, 'YYYY-MM-DD') AS day, COALESCE(c.n, 0) AS count
        FROM range r LEFT JOIN counts c ON c.day = r.day
       ORDER BY r.day`,
-    [days],
+    params,
   );
   return rows;
 };
 
 // Daily collection (sum of admission_receipts.amount) over the last N days.
-export const collectionTrend = async (tenant, days = 30) => {
+export const collectionTrend = async (tenant, days = 30, branchId = null) => {
+  const bJoin = branchId ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : '';
+  const params = branchId ? [days, branchId] : [days];
   const { rows } = await tenantQuery(
     tenant,
     `WITH range AS (
@@ -1280,73 +1296,88 @@ export const collectionTrend = async (tenant, days = 30) => {
          INTERVAL '1 day'
        )::date AS day
      ), sums AS (
-       SELECT receipt_date::date AS day, COALESCE(SUM(amount), 0)::float AS amt
-         FROM admission_receipts
-        WHERE deleted_at IS NULL
-          AND receipt_date >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
-        GROUP BY receipt_date::date
+       SELECT ar.receipt_date::date AS day, COALESCE(SUM(ar.amount), 0)::float AS amt
+         FROM admission_receipts ar ${bJoin}
+        WHERE ar.deleted_at IS NULL
+          AND ar.receipt_date >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+        GROUP BY ar.receipt_date::date
      )
      SELECT to_char(r.day, 'YYYY-MM-DD') AS day, COALESCE(s.amt, 0)::float AS amount
        FROM range r LEFT JOIN sums s ON s.day = r.day
       ORDER BY r.day`,
-    [days],
+    params,
   );
   return rows;
 };
 
 // Pie / donut: count by status (excludes soft-deleted).
-export const statusBreakdown = async (tenant) => {
+export const statusBreakdown = async (tenant, branchId = null) => {
+  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT status, count(*)::int AS n
-       FROM admissions WHERE deleted_at IS NULL
-      GROUP BY status
-      ORDER BY status`,
+    `SELECT a.status, count(*)::int AS n
+       FROM admissions a ${bJoin}
+      WHERE a.deleted_at IS NULL
+      GROUP BY a.status
+      ORDER BY a.status`,
+    branchId ? [branchId] : [],
   );
   return rows;
 };
 
 // Bar: this month's admissions per program. Top 10 to keep the chart legible.
-export const courseBreakdown = async (tenant) => {
+export const courseBreakdown = async (tenant, branchId = null) => {
+  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
   const { rows } = await tenantQuery(
     tenant,
     `SELECT COALESCE(p.name, 'Unassigned') AS course, count(*)::int AS n
        FROM admissions a
        LEFT JOIN programs p ON p.id = a.program_id
+       ${bJoin}
       WHERE a.deleted_at IS NULL
         AND a.admission_date >= date_trunc('month', CURRENT_DATE)
         AND a.admission_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
       GROUP BY p.name
       ORDER BY n DESC
       LIMIT 10`,
+    branchId ? [branchId] : [],
   );
   return rows;
 };
 
-export const dashboard = async (tenant) => {
-  // Single fan-out query so the FE renders the dashboard with one round-trip.
+export const dashboard = async (tenant, branchId = null) => {
+  // Optional branch scope (branch_manager / super_admin-picked-branch): filter
+  // admissions by their lead's branch, and receipts by their admission's lead's
+  // branch. branchId null → tenant-wide (unchanged).
+  const aBranchJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
+  const rBranchJoin = branchId ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
+  const p = branchId ? [branchId] : [];
   const [counts, monthCounts, monthMoney] = await Promise.all([
     tenantQuery(
       tenant,
-      `SELECT status, count(*)::int AS n
-         FROM admissions WHERE deleted_at IS NULL
-        GROUP BY status`,
+      `SELECT a.status, count(*)::int AS n
+         FROM admissions a ${aBranchJoin}
+        WHERE a.deleted_at IS NULL
+        GROUP BY a.status`,
+      p,
     ),
     tenantQuery(
       tenant,
       `SELECT count(*)::int AS n
-         FROM admissions
-        WHERE deleted_at IS NULL
-          AND admission_date >= date_trunc('month', CURRENT_DATE)
-          AND admission_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
+         FROM admissions a ${aBranchJoin}
+        WHERE a.deleted_at IS NULL
+          AND a.admission_date >= date_trunc('month', CURRENT_DATE)
+          AND a.admission_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
+      p,
     ),
     tenantQuery(
       tenant,
-      `SELECT COALESCE(SUM(amount), 0)::float AS month_collection
-         FROM admission_receipts
-        WHERE deleted_at IS NULL
-          AND receipt_date >= date_trunc('month', CURRENT_DATE)
-          AND receipt_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
+      `SELECT COALESCE(SUM(ar.amount), 0)::float AS month_collection
+         FROM admission_receipts ar ${rBranchJoin}
+        WHERE ar.deleted_at IS NULL
+          AND ar.receipt_date >= date_trunc('month', CURRENT_DATE)
+          AND ar.receipt_date <  date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
+      p,
     ),
   ]);
   const byStatus = Object.fromEntries(counts.rows.map((r) => [r.status, r.n]));
