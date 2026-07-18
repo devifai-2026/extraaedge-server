@@ -14,7 +14,19 @@ const intFrom = (defaultValue) =>
 
 const stringNonEmpty = z.string().min(1);
 
+// The gateway process is a stripped-down service: it only holds WhatsApp
+// sessions and needs the DB, JWT, encryption key, GCS, and WA_* config. It
+// never sends email/SMS/payments/calls, so the provider keys (Brevo,
+// MessageCentral, Razorpay, Exotel) that the API requires are OPTIONAL here.
+// Set SERVICE_ROLE=gateway on the gateway service so it boots without them.
+// The API leaves SERVICE_ROLE unset → full strict validation as before.
+const IS_GATEWAY = process.env.SERVICE_ROLE === 'gateway';
+// A field the API requires but the gateway doesn't: strict for the API,
+// optional (empty-string default) for the gateway.
+const apiOnly = (validator) => (IS_GATEWAY ? z.string().optional().default('') : validator);
+
 const schema = z.object({
+  SERVICE_ROLE: z.enum(['api', 'gateway']).optional().default('api'),
   NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
   PORT: intFrom(4000),
   BASE_URL: stringNonEmpty.default('http://localhost:4000'),
@@ -75,14 +87,14 @@ const schema = z.object({
   GCS_PUBLIC_BASE_URL: z.string().optional().default(''),
   GCS_SIGNED_URL_TTL_SECONDS: intFrom(300),
 
-  BREVO_API_KEY: stringNonEmpty,
-  BREVO_SENDER_EMAIL: z.string().email(),
-  BREVO_SENDER_NAME: stringNonEmpty,
-  BREVO_WEBHOOK_SECRET: stringNonEmpty,
+  BREVO_API_KEY: apiOnly(stringNonEmpty),
+  BREVO_SENDER_EMAIL: apiOnly(z.string().email()),
+  BREVO_SENDER_NAME: apiOnly(stringNonEmpty),
+  BREVO_WEBHOOK_SECRET: apiOnly(stringNonEmpty),
 
-  MESSAGECENTRAL_CUSTOMER_ID: stringNonEmpty,
-  MESSAGECENTRAL_AUTH_TOKEN: stringNonEmpty,
-  MESSAGECENTRAL_SENDER_ID: stringNonEmpty,
+  MESSAGECENTRAL_CUSTOMER_ID: apiOnly(stringNonEmpty),
+  MESSAGECENTRAL_AUTH_TOKEN: apiOnly(stringNonEmpty),
+  MESSAGECENTRAL_SENDER_ID: apiOnly(stringNonEmpty),
   MESSAGECENTRAL_COUNTRY_CODE: stringNonEmpty.default('91'),
   OTP_TTL_MINUTES: intFrom(5),
   OTP_MAX_ATTEMPTS: intFrom(3),
@@ -104,16 +116,16 @@ const schema = z.object({
   WA_SESSION_RESTORE_CONCURRENCY: intFrom(3),
   WA_SEND_RATE_PER_MINUTE: intFrom(20),
 
-  RAZORPAY_KEY_ID: stringNonEmpty,
-  RAZORPAY_KEY_SECRET: stringNonEmpty,
-  RAZORPAY_WEBHOOK_SECRET: stringNonEmpty,
+  RAZORPAY_KEY_ID: apiOnly(stringNonEmpty),
+  RAZORPAY_KEY_SECRET: apiOnly(stringNonEmpty),
+  RAZORPAY_WEBHOOK_SECRET: apiOnly(stringNonEmpty),
 
-  EXOTEL_ACCOUNT_SID: stringNonEmpty,
-  EXOTEL_API_KEY: stringNonEmpty,
-  EXOTEL_API_TOKEN: stringNonEmpty,
+  EXOTEL_ACCOUNT_SID: apiOnly(stringNonEmpty),
+  EXOTEL_API_KEY: apiOnly(stringNonEmpty),
+  EXOTEL_API_TOKEN: apiOnly(stringNonEmpty),
   EXOTEL_SUBDOMAIN: stringNonEmpty.default('api.exotel.com'),
-  EXOTEL_CALLER_ID: stringNonEmpty,
-  EXOTEL_WEBHOOK_SECRET: stringNonEmpty,
+  EXOTEL_CALLER_ID: apiOnly(stringNonEmpty),
+  EXOTEL_WEBHOOK_SECRET: apiOnly(stringNonEmpty),
 
   // Shared secret for the Android call-recorder app's device-upload endpoint
   // (POST /device-recordings). Sent by the device as the `X-Api-Key` header.
