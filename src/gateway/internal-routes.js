@@ -44,6 +44,9 @@ router.post('/sessions/:tenantId/:userId/send', async (req, res) => {
     if (err.code === 'NOT_CONNECTED') {
       return res.status(409).json({ error: { code: 'NOT_CONNECTED', message: 'WhatsApp not connected for this user' } });
     }
+    if (err.code === 'NOT_ON_WHATSAPP') {
+      return res.status(422).json({ error: { code: 'NOT_ON_WHATSAPP', message: 'This number is not on WhatsApp' } });
+    }
     logger.error({ err: err.message }, 'wa send failed');
     res.status(500).json({ error: { code: 'WA_SEND_FAILED', message: err.message } });
   }

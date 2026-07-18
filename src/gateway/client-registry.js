@@ -382,7 +382,26 @@ export const send = async ({ tenantId, userId, to, body, media }) => {
     err.code = 'NOT_CONNECTED';
     throw err;
   }
-  const jid = jidOf(to);
+  // Resolve the recipient to its CANONICAL WhatsApp JID. A phone-derived jid
+  // ("<digits>@s.whatsapp.net") is not always the address WhatsApp routes to —
+  // if it's wrong, sendMessage still returns an id but the message never
+  // delivers. onWhatsApp() both confirms the number is a WhatsApp user and
+  // returns the real jid to send to.
+  let jid = jidOf(to);
+  try {
+    const results = await entry.sock.onWhatsApp(jid);
+    const hit = Array.isArray(results) ? results.find((r) => r?.exists) : null;
+    if (!hit) {
+      const err = new Error('NOT_ON_WHATSAPP');
+      err.code = 'NOT_ON_WHATSAPP';
+      throw err;
+    }
+    jid = hit.jid || jid; // canonical jid (may be @lid or a normalized number)
+  } catch (e) {
+    if (e.code === 'NOT_ON_WHATSAPP') throw e;
+    // onWhatsApp failed (transient) — fall back to the phone-derived jid.
+    logger.warn({ tenantId, userId, err: e.message }, 'wa onWhatsApp lookup failed; using derived jid');
+  }
 
   let content;
   if (media?.signedUrl) {

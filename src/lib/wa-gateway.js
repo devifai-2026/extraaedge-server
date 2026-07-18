@@ -33,6 +33,10 @@ const call = async (method, pathSuffix, body) => {
     if (res.status === 409 && json?.error?.code === 'NOT_CONNECTED') {
       throw appError({ status: 409, code: 'NOT_CONNECTED', message: 'WhatsApp not connected' });
     }
+    // Number not on WhatsApp → 422 so the FE can tell the user clearly.
+    if (res.status === 422 && json?.error?.code === 'NOT_ON_WHATSAPP') {
+      throw appError({ status: 422, code: 'NOT_ON_WHATSAPP', message: 'This number is not on WhatsApp' });
+    }
     throw appError({ status: 502, code: RESPONSE_CODES.INTERNAL, message: json?.error?.message || 'WhatsApp gateway error' });
   }
   return json;
