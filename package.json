@@ -10,8 +10,6 @@
   "scripts": {
     "dev": "nodemon --watch src src/index.js",
     "start": "node src/index.js",
-    "gateway": "node src/gateway/index.js",
-    "gateway:dev": "nodemon --watch src/gateway src/gateway/index.js",
     "setup": "node scripts/setup-local.js",
     "migrate:system": "node scripts/run-migrations.js --target system",
     "migrate:tenant": "node scripts/run-migrations.js --target tenant",
@@ -48,7 +46,6 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.19.0",
-    "@whiskeysockets/baileys": "^6.7.23",
     "argon2": "^0.41.1",
     "bullmq": "^5.20.1",
     "cookie-parser": "^1.4.7",

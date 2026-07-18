@@ -1,0 +1,213 @@
+// WhatsApp inbox persistence + tenant routing.
+//
+// The business WhatsApp number (WABridge/Meta) is SHARED per tenant — not linked
+// per user like the old Baileys flow. So all chats for a tenant live under one
+// "inbox owner" (the tenant's super_admin), and every staff member with the
+// `whatsapp` tab sees the same inbox. Chats/messages reuse the wa_chats /
+// wa_messages tables; a chat is flagged with lead_id when its phone matches a
+// CRM lead.
+import { nanoid } from 'nanoid';
+import { logger } from '../../../lib/logger.js';
+import { sysQuery } from '../../../db/system.js';
+import { resolveTenantBySlug, resolveTenantById, tenantQuery } from '../../../db/tenant.js';
+import { putObject, buildKey } from '../../../lib/r2.js';
+import { notifyAdmins } from '../../../lib/socket.js';
+import { env } from '../../../config/env.js';
+import { downloadMedia, markRead } from './meta.js';
+
+const digits = (raw) => String(raw ?? '').replace(/\D/g, '');
+const normalizePhone = (raw) => {
+  const d = digits(raw);
+  return d.length === 10 ? `91${d}` : d; // India default, matches WABridge
+};
+const last10 = (phone) => (phone && phone.length > 10 ? phone.slice(-10) : phone);
+
+// ── tenant routing ──────────────────────────────────────────────
+// Resolve which tenant an inbound sender belongs to: consult the phone→tenant
+// directory first, else fall back to the configured default tenant.
+export const resolveTenantForPhone = async (phone) => {
+  const l10 = last10(normalizePhone(phone));
+  if (l10) {
+    const { rows } = await sysQuery(
+      `SELECT tenant_id FROM wa_phone_directory WHERE phone_last10 = $1 ORDER BY updated_at DESC LIMIT 1`,
+      [l10],
+    ).catch(() => ({ rows: [] }));
+    if (rows[0]?.tenant_id) {
+      const t = await resolveTenantById(rows[0].tenant_id).catch(() => null);
+      if (t) return t;
+    }
+  }
+  return resolveTenantBySlug(env.WA_DEFAULT_TENANT_SLUG).catch(() => null);
+};
+
+// The shared inbox owner for a tenant = its (first) super_admin.
+const ownerCache = new Map(); // tenantId -> userId
+export const resolveInboxOwner = async (tenant) => {
+  if (ownerCache.has(tenant.id)) return ownerCache.get(tenant.id);
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id FROM users WHERE role = 'super_admin' AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1`,
+  );
+  const uid = rows[0]?.id ?? null;
+  if (uid) ownerCache.set(tenant.id, uid);
+  return uid;
+};
+
+const matchLeadId = async (tenant, phone) => {
+  const l10 = last10(normalizePhone(phone));
+  if (!l10) return null;
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id FROM leads
+      WHERE deleted_at IS NULL
+        AND (right(regexp_replace(coalesce(whatsapp_number,''), '\\D', '', 'g'), 10) = $1
+          OR right(regexp_replace(coalesce(phone,''),           '\\D', '', 'g'), 10) = $1)
+      LIMIT 1`,
+    [l10],
+  );
+  return rows[0]?.id ?? null;
+};
+
+// Upsert the chat row for (owner, phone) and roll last message forward.
+const upsertChat = async (tenant, ownerId, { phone, name, lastBody, lastAt, incUnread = 0 }) => {
+  const leadId = await matchLeadId(tenant, phone);
+  const jid = `${phone}@s.whatsapp.net`;
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO wa_chats (owner_user_id, wa_jid, phone, name, is_group, lead_id, last_body, last_at, unread)
+     VALUES ($1,$2,$3,$4,false,$5,$6,$7,$8)
+     ON CONFLICT (owner_user_id, wa_jid) DO UPDATE SET
+       name      = COALESCE(EXCLUDED.name, wa_chats.name),
+       lead_id   = COALESCE(EXCLUDED.lead_id, wa_chats.lead_id),
+       last_body = CASE WHEN EXCLUDED.last_at IS NOT NULL
+                         AND (wa_chats.last_at IS NULL OR EXCLUDED.last_at >= wa_chats.last_at)
+                        THEN EXCLUDED.last_body ELSE wa_chats.last_body END,
+       last_at   = GREATEST(wa_chats.last_at, EXCLUDED.last_at),
+       unread    = wa_chats.unread + $8,
+       updated_at = now()
+     RETURNING id`,
+    [ownerId, jid, phone, name ?? null, leadId, lastBody ?? null, lastAt ?? null, incUnread],
+  );
+  return { chatId: rows[0]?.id ?? null, leadId };
+};
+
+// ── inbound (from the Meta webhook) ─────────────────────────────
+export const recordInbound = async ({ tenant, phone, waMessageId, type, text, mediaId, mimeType, timestamp, senderName }) => {
+  const ownerId = await resolveInboxOwner(tenant);
+  if (!ownerId) { logger.warn({ tenantId: tenant.id }, 'wa inbox: no super_admin owner'); return; }
+
+  let mediaKey = null;
+  let mediaType = null;
+  let body = text || '';
+  if (mediaId) {
+    const media = await downloadMedia(mediaId);
+    if (media?.buffer?.length) {
+      const ext = (media.mimeType.split('/')[1] || 'bin').split(';')[0];
+      const key = buildKey({ tenantSlug: tenant.slug, purpose: 'whatsapp_inbound', id: nanoid(24), ext });
+      await putObject({ key, body: media.buffer, contentType: media.mimeType });
+      mediaKey = key;
+      mediaType = media.mimeType;
+      if (!body) body = '📎 Attachment';
+    }
+  }
+  if (!body && !mediaKey) return; // nothing to store
+
+  const at = timestamp ? new Date(timestamp) : new Date();
+  const { chatId } = await upsertChat(tenant, ownerId, {
+    phone, name: senderName, lastBody: body, lastAt: at, incUnread: 1,
+  });
+  if (!chatId) return;
+
+  await tenantQuery(
+    tenant,
+    `INSERT INTO wa_messages
+        (chat_id, owner_user_id, provider_message_id, wa_message_id, direction, body, media_r2_key, media_type, at, status)
+     VALUES ($1,$2,$3,$3,'in',$4,$5,$6,$7,NULL)
+     ON CONFLICT (owner_user_id, provider_message_id) DO NOTHING`,
+    [chatId, ownerId, waMessageId ?? null, body, mediaKey, mediaType ?? (mimeType || null), at],
+  );
+
+  // Read receipt back to the customer + live push to the tenant's admins.
+  if (waMessageId) markRead(waMessageId).catch(() => {});
+  notifyAdmins(tenant.id, 'whatsapp_message', { phone, body, received_at: at.toISOString() });
+};
+
+// ── outbound (from the composer, sent via WABridge) ─────────────
+export const recordOutbound = async ({ tenant, ownerId, phone, waMessageId, type = 'text', body }) => {
+  const owner = ownerId || (await resolveInboxOwner(tenant));
+  if (!owner) return null;
+  const at = new Date();
+  const { chatId } = await upsertChat(tenant, owner, { phone, lastBody: body || `[${type}]`, lastAt: at, incUnread: 0 });
+  if (!chatId) return null;
+  await tenantQuery(
+    tenant,
+    `INSERT INTO wa_messages
+        (chat_id, owner_user_id, provider_message_id, wa_message_id, direction, body, at, status)
+     VALUES ($1,$2,$3,$3,'out',$4, now(), 'sent')
+     ON CONFLICT (owner_user_id, provider_message_id) DO NOTHING`,
+    [chatId, owner, waMessageId ?? `local-${nanoid(16)}`, body],
+  );
+  notifyAdmins(tenant.id, 'whatsapp_message', { phone, body, direction: 'out' });
+  return chatId;
+};
+
+// ── delivery/read status (from the Meta status webhook) ─────────
+export const applyStatus = async (tenant, waMessageId, status) => {
+  const map = { sent: 'sent', delivered: 'delivered', read: 'seen', failed: 'failed' };
+  const s = map[status];
+  if (!s) return;
+  await tenantQuery(
+    tenant,
+    `UPDATE wa_messages SET status = $2 WHERE wa_message_id = $1`,
+    [waMessageId, s],
+  ).catch(() => {});
+  notifyAdmins(tenant.id, 'whatsapp_status', { wa_message_id: waMessageId, status: s });
+};
+
+// ── read model (for the authed inbox API) ───────────────────────
+export const listChats = async (tenant, ownerId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT c.id, c.phone, c.is_group, c.last_body, c.last_at, c.unread,
+            COALESCE(l.name, c.name, c.phone) AS name,
+            c.lead_id, l.name AS lead_name
+       FROM wa_chats c
+       LEFT JOIN leads l ON l.id = c.lead_id AND l.deleted_at IS NULL
+      WHERE c.owner_user_id = $1 AND c.is_group = false
+      ORDER BY c.last_at DESC NULLS LAST
+      LIMIT 500`,
+    [ownerId],
+  );
+  return rows;
+};
+
+export const listMessages = async (tenant, ownerId, phone) => {
+  const norm = normalizePhone(phone);
+  const { rows: [chat] } = await tenantQuery(
+    tenant,
+    `SELECT id FROM wa_chats WHERE owner_user_id = $1 AND phone = $2`,
+    [ownerId, norm],
+  );
+  if (!chat) return [];
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, direction, body, media_r2_key,
+            CASE WHEN media_r2_key IS NULL THEN NULL ELSE ARRAY[media_r2_key] END AS media_keys,
+            media_type, at, status, wa_message_id AS provider_message_id
+       FROM wa_messages WHERE owner_user_id = $1 AND chat_id = $2
+      ORDER BY at ASC LIMIT 500`,
+    [ownerId, chat.id],
+  );
+  await tenantQuery(tenant, `UPDATE wa_chats SET unread = 0 WHERE id = $1`, [chat.id]).catch(() => {});
+  return rows;
+};
+
+export const markChatRead = async (tenant, ownerId, phone) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE wa_chats SET unread = 0 WHERE owner_user_id = $1 AND phone = $2`,
+    [ownerId, normalizePhone(phone)],
+  ).catch(() => {});
+};
+
+export { normalizePhone, last10, digits };

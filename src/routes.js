@@ -44,8 +44,8 @@ import failedLeadsRouter from './modules/failed-leads/routes.js';
 import emailRouter from './modules/communications/email-routes.js';
 import smsRouter from './modules/communications/sms-routes.js';
 import whatsappRouter from './modules/communications/whatsapp-routes.js';
-import whatsappConnectionRouter from './modules/communications/whatsapp-connection-routes.js';
-import waInternalRouter from './modules/internal/wa-routes.js';
+import whatsappInboxRouter from './modules/communications/whatsapp-inbox/routes.js';
+import whatsappWebhookRouter from './modules/communications/whatsapp-inbox/webhook-routes.js';
 import scheduledSendsRouter from './modules/scheduled-sends/routes.js';
 import callsRouter from './modules/calls/routes.js';
 import deviceRecordingsRouter from './modules/device-recordings/routes.js';
@@ -166,9 +166,13 @@ export const mountRoutes = (app) => {
   // Communications
   api.use('/email', emailRouter);
   api.use('/sms', smsRouter);
-  // Per-user personal-number WhatsApp (whatsapp-web.js gateway). Mounted BEFORE
-  // the legacy /whatsapp router so /whatsapp/connection/* resolves here.
-  api.use('/whatsapp/connection', whatsappConnectionRouter);
+  // Meta WhatsApp webhook — UNauthenticated (Meta calls it). MUST be mounted
+  // before the authed /whatsapp router so its /whatsapp/webhook path isn't
+  // caught by that router's auth chain.
+  api.use('/whatsapp/webhook', whatsappWebhookRouter);
+  // WhatsApp inbox (WABridge send + Meta webhook receive). Mounted BEFORE the
+  // legacy /whatsapp router so /whatsapp/inbox/* resolves here.
+  api.use('/whatsapp/inbox', whatsappInboxRouter);
   api.use('/whatsapp', whatsappRouter);
   api.use('/scheduled-sends', scheduledSendsRouter);
 
@@ -234,10 +238,6 @@ export const mountRoutes = (app) => {
   // collect the registration/admission amount. Exactly one is primary.
   api.use('/payment-accounts', paymentAccountsRouter);
 
-  // Internal callback from the WhatsApp gateway (gateway → API). NOT behind
-  // authRequired/tenantRequired — the shared secret in the header is the
-  // credential (validated inside the router).
-  api.use('/internal/wa', waInternalRouter);
 
   // Unauthenticated public surface for student-facing admission share-links.
   // Token in the URL is the credential; this router lives OUTSIDE the

@@ -154,6 +154,21 @@ const schema = z.object({
   // Numeric template id for the OTP WhatsApp template (speedup_template).
   WABRIDGE_TEMPLATE_OTP: z.string().optional().default(''),
 
+  // ── WhatsApp inbox (WABridge send + Meta Cloud API webhook receive) ──
+  // Outbound goes through WABridge (above). Inbound + delivery status + media
+  // download come from Meta's Cloud API webhook. All optional — the inbox
+  // degrades gracefully when unset.
+  //   WA_PHONE_NUMBER_ID       Meta WhatsApp phone-number id (for media download)
+  //   WA_ACCESS_TOKEN          Meta long-lived access token
+  //   WA_WEBHOOK_VERIFY_TOKEN  shared secret echoed on Meta's GET /webhook verify
+  //   WA_API_VERSION           Graph API version
+  //   WA_DEFAULT_TENANT_SLUG   tenant that owns inbound from unknown senders
+  WA_PHONE_NUMBER_ID: z.string().optional().default(''),
+  WA_ACCESS_TOKEN: z.string().optional().default(''),
+  WA_WEBHOOK_VERIFY_TOKEN: z.string().optional().default('extraaedge-wa-webhook'),
+  WA_API_VERSION: z.string().optional().default('v19.0'),
+  WA_DEFAULT_TENANT_SLUG: z.string().optional().default('demo'),
+
   // Base URL of the admin/student web app — used to build absolute links (e.g.
   // the student set-password link) inside emails. (Brevo email keys are already
   // declared above: BREVO_API_KEY / BREVO_SENDER_EMAIL / BREVO_SENDER_NAME.)
