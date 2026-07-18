@@ -8,11 +8,9 @@
 // CRM lead.
 import { nanoid } from 'nanoid';
 import { logger } from '../../../lib/logger.js';
-import { sysQuery } from '../../../db/system.js';
-import { resolveTenantBySlug, resolveTenantById, tenantQuery } from '../../../db/tenant.js';
+import { tenantQuery } from '../../../db/tenant.js';
 import { putObject, buildKey } from '../../../lib/r2.js';
 import { notifyAdmins } from '../../../lib/socket.js';
-import { env } from '../../../config/env.js';
 import { downloadMedia, markRead } from './meta.js';
 
 const digits = (raw) => String(raw ?? '').replace(/\D/g, '');
@@ -22,23 +20,50 @@ const normalizePhone = (raw) => {
 };
 const last10 = (phone) => (phone && phone.length > 10 ? phone.slice(-10) : phone);
 
-// ── tenant routing ──────────────────────────────────────────────
-// Resolve which tenant an inbound sender belongs to: consult the phone→tenant
-// directory first, else fall back to the configured default tenant.
-export const resolveTenantForPhone = async (phone) => {
-  const l10 = last10(normalizePhone(phone));
-  if (l10) {
-    const { rows } = await sysQuery(
-      `SELECT tenant_id FROM wa_phone_directory WHERE phone_last10 = $1 ORDER BY updated_at DESC LIMIT 1`,
-      [l10],
-    ).catch(() => ({ rows: [] }));
-    if (rows[0]?.tenant_id) {
-      const t = await resolveTenantById(rows[0].tenant_id).catch(() => null);
-      if (t) return t;
-    }
-  }
-  return resolveTenantBySlug(env.WA_DEFAULT_TENANT_SLUG).catch(() => null);
+// ── per-tenant WhatsApp settings (wa_settings singleton row) ─────
+export const getSettings = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT enabled, wabridge_app_key, wabridge_auth_key, wabridge_device_id,
+            business_phone, webhook_token, updated_at
+       FROM wa_settings WHERE id = true`,
+  );
+  const r = rows[0] || {};
+  return {
+    enabled: !!r.enabled,
+    appKey: r.wabridge_app_key || '',
+    authKey: r.wabridge_auth_key || '',
+    deviceId: r.wabridge_device_id || '',
+    businessPhone: r.business_phone || '',
+    webhookToken: r.webhook_token || '',
+    updatedAt: r.updated_at || null,
+  };
 };
+
+export const saveSettings = async (tenant, input) => {
+  // Generate a webhook token on first save if none set.
+  const cur = await getSettings(tenant);
+  const webhookToken = cur.webhookToken || nanoid(24);
+  await tenantQuery(
+    tenant,
+    `UPDATE wa_settings SET
+       enabled = $1, wabridge_app_key = $2, wabridge_auth_key = $3,
+       wabridge_device_id = $4, business_phone = $5, webhook_token = $6, updated_at = now()
+     WHERE id = true`,
+    [
+      input.enabled ?? cur.enabled,
+      input.appKey ?? cur.appKey,
+      input.authKey ?? cur.authKey,
+      input.deviceId ?? cur.deviceId,
+      input.businessPhone ?? cur.businessPhone,
+      webhookToken,
+    ],
+  );
+  return getSettings(tenant);
+};
+
+// WABridge credentials object for the send client.
+export const credsFor = (settings) => ({ appKey: settings.appKey, authKey: settings.authKey, deviceId: settings.deviceId });
 
 // The shared inbox owner for a tenant = its (first) super_admin.
 const ownerCache = new Map(); // tenantId -> userId
