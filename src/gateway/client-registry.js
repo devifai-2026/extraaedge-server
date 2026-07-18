@@ -375,32 +375,39 @@ export const getStatus = (tenantId, userId) => {
 // `media`, when present, is { signedUrl, filename, mimetype } — a short-lived
 // GCS download URL. With media, the text `body` becomes the caption; without
 // media it's a plain text message.
-export const send = async ({ tenantId, userId, to, body, media }) => {
+export const send = async ({ tenantId, userId, to, jid: explicitJid, body, media }) => {
   const entry = clients.get(keyOf(tenantId, userId));
   if (!entry || entry.status !== 'connected') {
     const err = new Error('NOT_CONNECTED');
     err.code = 'NOT_CONNECTED';
     throw err;
   }
-  // Resolve the recipient to its CANONICAL WhatsApp JID. A phone-derived jid
-  // ("<digits>@s.whatsapp.net") is not always the address WhatsApp routes to —
-  // if it's wrong, sendMessage still returns an id but the message never
-  // delivers. onWhatsApp() both confirms the number is a WhatsApp user and
-  // returns the real jid to send to.
-  let jid = jidOf(to);
-  try {
-    const results = await entry.sock.onWhatsApp(jid);
-    const hit = Array.isArray(results) ? results.find((r) => r?.exists) : null;
-    if (!hit) {
-      const err = new Error('NOT_ON_WHATSAPP');
-      err.code = 'NOT_ON_WHATSAPP';
-      throw err;
+
+  let jid;
+  if (explicitJid) {
+    // Caller passed a full WhatsApp address (from wa_chats.wa_jid). Send to it
+    // as-is — this correctly handles @lid addresses which have no phone form and
+    // can't be looked up via onWhatsApp.
+    jid = explicitJid;
+  } else {
+    // Given a phone: resolve to the CANONICAL JID. A phone-derived jid isn't
+    // always the address WhatsApp routes to — if wrong, sendMessage returns an
+    // id but never delivers. onWhatsApp() confirms the number exists and returns
+    // the real jid.
+    jid = jidOf(to);
+    try {
+      const results = await entry.sock.onWhatsApp(jid);
+      const hit = Array.isArray(results) ? results.find((r) => r?.exists) : null;
+      if (!hit) {
+        const err = new Error('NOT_ON_WHATSAPP');
+        err.code = 'NOT_ON_WHATSAPP';
+        throw err;
+      }
+      jid = hit.jid || jid;
+    } catch (e) {
+      if (e.code === 'NOT_ON_WHATSAPP') throw e;
+      logger.warn({ tenantId, userId, err: e.message }, 'wa onWhatsApp lookup failed; using derived jid');
     }
-    jid = hit.jid || jid; // canonical jid (may be @lid or a normalized number)
-  } catch (e) {
-    if (e.code === 'NOT_ON_WHATSAPP') throw e;
-    // onWhatsApp failed (transient) — fall back to the phone-derived jid.
-    logger.warn({ tenantId, userId, err: e.message }, 'wa onWhatsApp lookup failed; using derived jid');
   }
 
   let content;

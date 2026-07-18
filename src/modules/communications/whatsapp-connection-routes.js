@@ -302,8 +302,8 @@ router.post('/all-send', validate({ body: allSendSchema }), async (req, res, nex
     );
     if (!chat) throw notFound('Chat not found');
     if (chat.is_group) throw forbidden('Sending to groups is not supported');
-    const recipient = chat.phone;
-    if (!recipient) throw forbidden('Chat has no phone number');
+    if (chat.wa_jid.endsWith('@newsletter')) throw forbidden('Cannot send to a channel/newsletter');
+    if (!chat.wa_jid) throw forbidden('Chat has no address');
 
     const { rows: [sess] } = await tenantQuery(
       req.tenant,
@@ -312,7 +312,9 @@ router.post('/all-send', validate({ body: allSendSchema }), async (req, res, nex
     );
     if (!sess || sess.status !== 'connected') throw conflict('Your WhatsApp is not connected. Connect it first.');
 
-    const sent = await waGateway.sendMessage(req.tenant.id, req.user.id, { to: recipient, body: req.body.body });
+    // Send to the FULL stored JID (handles @s.whatsapp.net and @lid alike),
+    // not a re-derived phone — @lid chats have no usable phone number.
+    const sent = await waGateway.sendMessage(req.tenant.id, req.user.id, { jid: chat.wa_jid, body: req.body.body });
 
     // Record the outbound in the inbox thread (the gateway also mirrors it via
     // messages.upsert, but recording here makes it appear instantly).

@@ -48,10 +48,11 @@ export const startSession = (tenantId, userId, tenantSlug) =>
 export const getStatus = (tenantId, userId) =>
   call('GET', `/sessions/${tenantId}/${userId}/status`);
 
-// `media`, when present, is { signedUrl, filename, mimetype } — the gateway
-// fetches the signed URL into a MessageMedia and sends `body` as the caption.
-export const sendMessage = (tenantId, userId, { to, body, media }) =>
-  call('POST', `/sessions/${tenantId}/${userId}/send`, { to, body, media });
+// Send by `jid` (full WhatsApp address — preferred, handles @lid) or `to` (a
+// phone number the gateway resolves via onWhatsApp). `media`, when present, is
+// { signedUrl, filename, mimetype }; `body` is the text/caption.
+export const sendMessage = (tenantId, userId, { to, jid, body, media }) =>
+  call('POST', `/sessions/${tenantId}/${userId}/send`, { to, jid, body, media });
 
 export const logoutSession = (tenantId, userId) =>
   call('POST', `/sessions/${tenantId}/${userId}/logout`);

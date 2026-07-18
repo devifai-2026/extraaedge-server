@@ -10,7 +10,15 @@ import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 
 const digitsOf = (jid) => String(jid || '').split('@')[0].split(':')[0].replace(/\D+/g, '');
 const isGroupJid = (jid) => String(jid || '').endsWith('@g.us');
-const is1to1 = (jid) => String(jid || '').endsWith('@s.whatsapp.net');
+// A real, phone-addressable 1:1 chat. @lid (privacy IDs) and @newsletter are NOT
+// phone numbers — we keep the chat but store no phone (so the UI shows the name,
+// never a fake "+18328...") and sends address the full jid.
+const isPhoneJid = (jid) => String(jid || '').endsWith('@s.whatsapp.net');
+const is1to1 = (jid) => {
+  const s = String(jid || '');
+  return s.endsWith('@s.whatsapp.net') || s.endsWith('@lid');
+};
+const phoneFromJid = (jid) => (isPhoneJid(jid) ? digitsOf(jid) : null);
 
 const matchLeadId = async (tenant, phone) => {
   if (!phone) return null;
@@ -33,8 +41,8 @@ export const upsertChat = async (tenantId, ownerUserId, { jid, name, lastBody, l
   const tenant = await resolveTenantById(tenantId);
   if (!tenant) return null;
   const group = isGroupJid(jid);
-  const phone = group ? null : digitsOf(jid);
-  const leadId = group ? null : await matchLeadId(tenant, phone);
+  const phone = group ? null : phoneFromJid(jid); // null for @lid / @newsletter
+  const leadId = phone ? await matchLeadId(tenant, phone) : null;
 
   const { rows } = await tenantQuery(
     tenant,
