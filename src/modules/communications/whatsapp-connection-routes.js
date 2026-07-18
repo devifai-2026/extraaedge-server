@@ -71,7 +71,12 @@ router.get('/status', async (req, res, next) => {
     const row = rows[0] ?? { status: 'disconnected', phone: null };
     let live = null;
     try { live = await waGateway.getStatus(req.tenant.id, req.user.id); } catch { /* gateway down → fall back to DB */ }
-    res.json({ data: { ...row, live_status: live?.status ?? null }, meta: { requestId: req.id } });
+    // Surface the live QR (if any) so the FE can PULL it by polling /status —
+    // a reliable fallback when the socket push doesn't land.
+    res.json({
+      data: { ...row, live_status: live?.status ?? null, qr: live?.qr ?? null },
+      meta: { requestId: req.id },
+    });
   } catch (err) { next(err); }
 });
 

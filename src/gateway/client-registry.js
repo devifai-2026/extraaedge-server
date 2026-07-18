@@ -285,8 +285,14 @@ export const startSession = async ({ tenantId, userId, tenantSlug }) => {
 
 export const getStatus = (tenantId, userId) => {
   const entry = clients.get(keyOf(tenantId, userId));
-  if (!entry) return { status: 'not_loaded', phone: null };
-  return { status: entry.status, phone: entry.phone ?? null };
+  if (!entry) return { status: 'not_loaded', phone: null, qr: null };
+  // Include the current QR so the API/FE can PULL it via polling — this makes
+  // QR delivery work even if the push callback (gateway→API socket) is flaky.
+  return {
+    status: entry.status,
+    phone: entry.phone ?? null,
+    qr: entry.status === 'pending_qr' ? entry.lastQr ?? null : null,
+  };
 };
 
 // `media`, when present, is { signedUrl, filename, mimetype } — a short-lived
