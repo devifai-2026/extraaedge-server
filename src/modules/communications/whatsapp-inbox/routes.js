@@ -25,9 +25,9 @@ const allowSend = (userId) => {
   arr.push(now); sendTimestamps.set(userId, arr); return true;
 };
 
-// The public webhook URL a tenant registers in WABridge (slug + token).
-const webhookUrl = (req, token) =>
-  `${env.BASE_URL}/api/v1/whatsapp/webhook/${req.tenant.slug}${token ? `?token=${token}` : ''}`;
+// The public webhook URL a tenant registers in WABridge (routed by slug).
+const webhookUrl = (req) =>
+  `${env.BASE_URL}/api/v1/whatsapp/webhook/${req.tenant.slug}`;
 
 // ── Settings (super_admin only) ──────────────────────────────────
 router.get('/settings', requireRole('super_admin'), async (req, res, next) => {
@@ -40,7 +40,7 @@ router.get('/settings', requireRole('super_admin'), async (req, res, next) => {
         auth_key: s.authKey ? '••••••••' : '',      // never echo the secret back in full
         device_id: s.deviceId,
         business_phone: s.businessPhone,
-        webhook_url: s.webhookToken ? webhookUrl(req, s.webhookToken) : null,
+        webhook_url: webhookUrl(req),
         configured: !!(s.appKey && s.authKey && s.deviceId),
       },
       meta: { requestId: req.id },
@@ -66,7 +66,7 @@ router.put('/settings', requireRole('super_admin'), validate({ body: settingsSch
       deviceId: b.device_id,
       businessPhone: b.business_phone,
     });
-    res.json({ data: { webhook_url: webhookUrl(req, saved.webhookToken), configured: !!(saved.appKey && saved.authKey && saved.deviceId) }, meta: { requestId: req.id } });
+    res.json({ data: { webhook_url: webhookUrl(req), configured: !!(saved.appKey && saved.authKey && saved.deviceId) }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

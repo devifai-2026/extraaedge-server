@@ -11,18 +11,17 @@ import express from 'express';
 import { logger } from '../../../lib/logger.js';
 import { resolveTenantBySlug } from '../../../db/tenant.js';
 import { env } from '../../../config/env.js';
-import { getSettings, recordInbound, applyStatus } from './service.js';
+import { recordInbound, applyStatus } from './service.js';
 
 const router = express.Router({ mergeParams: true });
 
-// Meta verification handshake (only relevant if a tenant points Meta here).
-router.get('/:slug', async (req, res) => {
+// Meta verification handshake (only relevant if a tenant points Meta here;
+// WABridge doesn't use it). Uses the global verify token.
+router.get('/:slug', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  const tenant = await resolveTenantBySlug(req.params.slug).catch(() => null);
-  const expected = tenant ? (await getSettings(tenant)).webhookToken : null;
-  if (mode === 'subscribe' && token && (token === expected || token === env.WA_WEBHOOK_VERIFY_TOKEN)) {
+  if (mode === 'subscribe' && token && token === env.WA_WEBHOOK_VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
   return res.status(403).json({ error: 'verification failed' });
@@ -63,13 +62,6 @@ router.post('/:slug', express.json({ limit: '2mb' }), (req, res) => {
     try {
       const tenant = await resolveTenantBySlug(req.params.slug).catch(() => null);
       if (!tenant) { logger.warn({ slug: req.params.slug }, 'wa webhook: unknown tenant slug'); return; }
-      const settings = await getSettings(tenant);
-      // Token guard: if the tenant set a token, require it (query or header).
-      const got = req.query.token || req.headers['x-webhook-token'];
-      if (settings.webhookToken && got !== settings.webhookToken) {
-        logger.warn({ slug: req.params.slug }, 'wa webhook: bad token');
-        return;
-      }
 
       const body = req.body || {};
 
