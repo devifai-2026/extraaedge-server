@@ -259,23 +259,40 @@ const wireEvents = (entry) => {
   });
 };
 
-// Mirror any message (in OR out, incl. our own sends and history) into the
+// Mirror a message (in OR out, incl. our own sends and history) into the
 // full-inbox tables. Best-effort; never throws into the event loop.
+//
+// Skips anything that has no displayable content — reactions, receipts,
+// protocol/system messages, poll updates, etc. Those were showing up as empty
+// bubbles. Only text and real media (image/video/audio/document/sticker) are
+// stored.
 const mirrorToInbox = async (entry, msg) => {
   try {
     const { tenantId, userId } = entry;
     const jid = msg.key?.remoteJid;
-    if (!jid) return;
-    const m = msg.message || {};
-    const body =
+    const pmid = msg.key?.id;
+    if (!jid || !pmid) return; // need a stable id for dedup
+
+    // Unwrap ephemeral/view-once containers.
+    const m = msg.message?.ephemeralMessage?.message
+      || msg.message?.viewOnceMessage?.message
+      || msg.message?.viewOnceMessageV2?.message
+      || msg.message || {};
+
+    const text =
       m.conversation || m.extendedTextMessage?.text ||
       m.imageMessage?.caption || m.videoMessage?.caption || m.documentMessage?.caption || '';
+    const hasMedia = !!(m.imageMessage || m.videoMessage || m.audioMessage || m.documentMessage || m.stickerMessage);
+
+    // Nothing to show (reaction, receipt, protocol msg, etc.) → don't store.
+    if (!text && !hasMedia) return;
+
     const at = msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date();
     await insertMessage(tenantId, userId, {
       jid,
-      providerMessageId: msg.key?.id ?? null,
+      providerMessageId: pmid,
       direction: msg.key?.fromMe ? 'out' : 'in',
-      body,
+      body: text || (hasMedia ? '📎 Attachment' : ''),
       at,
       name: msg.pushName || null,
     });
