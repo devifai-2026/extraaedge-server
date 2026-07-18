@@ -238,6 +238,14 @@ export const startSession = async ({ tenantId, userId, tenantSlug }) => {
   const key = keyOf(tenantId, userId);
   const existing = clients.get(key);
   if (existing && (existing.status === 'pending_qr' || existing.status === 'connected')) {
+    // Already live. Re-emit the current QR so a browser that reconnected or
+    // re-mounted AFTER the QR first fired (a common socket-join race) gets it
+    // immediately, instead of waiting up to ~20s for the next rotation.
+    if (existing.status === 'pending_qr' && existing.lastQr) {
+      notifyApi(tenantId, userId, 'whatsapp_qr', { qr: existing.lastQr });
+    } else if (existing.status === 'connected') {
+      notifyApi(tenantId, userId, 'whatsapp_ready', { phone: existing.phone ?? null });
+    }
     return { status: existing.status, phone: existing.phone ?? null };
   }
 
