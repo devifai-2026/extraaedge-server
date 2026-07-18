@@ -91,24 +91,35 @@ const upsertChat = async (tenant, ownerId, { phone, name, lastBody, lastAt, incU
   return { chatId: rows[0]?.id ?? null, leadId };
 };
 
-// ── inbound (from the Meta webhook) ─────────────────────────────
-export const recordInbound = async ({ tenant, phone, waMessageId, type, text, mediaId, mimeType, timestamp, senderName }) => {
+// ── inbound (from the Meta OR WABridge webhook) ─────────────────
+// `mediaId` (Meta) → downloaded via the Graph API. `mediaUrl` (WABridge) → the
+// media is already hosted at a public URL, fetched directly. Either way the
+// bytes land in R2 and the message stores the object key.
+export const recordInbound = async ({ tenant, phone, waMessageId, type, text, mediaId, mediaUrl, mimeType, timestamp, senderName }) => {
   const ownerId = await resolveInboxOwner(tenant);
   if (!ownerId) { logger.warn({ tenantId: tenant.id }, 'wa inbox: no super_admin owner'); return; }
 
   let mediaKey = null;
   let mediaType = null;
   let body = text || '';
+  let mediaBytes = null;
+  let mediaMime = mimeType || null;
   if (mediaId) {
     const media = await downloadMedia(mediaId);
-    if (media?.buffer?.length) {
-      const ext = (media.mimeType.split('/')[1] || 'bin').split(';')[0];
-      const key = buildKey({ tenantSlug: tenant.slug, purpose: 'whatsapp_inbound', id: nanoid(24), ext });
-      await putObject({ key, body: media.buffer, contentType: media.mimeType });
-      mediaKey = key;
-      mediaType = media.mimeType;
-      if (!body) body = '📎 Attachment';
-    }
+    if (media?.buffer?.length) { mediaBytes = media.buffer; mediaMime = media.mimeType; }
+  } else if (mediaUrl) {
+    try {
+      const r = await fetch(mediaUrl);
+      if (r.ok) { mediaBytes = Buffer.from(await r.arrayBuffer()); mediaMime = r.headers.get('content-type') || mediaMime || 'application/octet-stream'; }
+    } catch (e) { logger.warn({ err: e.message }, 'wa inbound media fetch failed'); }
+  }
+  if (mediaBytes?.length) {
+    const ext = ((mediaMime || 'application/octet-stream').split('/')[1] || 'bin').split(';')[0];
+    const key = buildKey({ tenantSlug: tenant.slug, purpose: 'whatsapp_inbound', id: nanoid(24), ext });
+    await putObject({ key, body: mediaBytes, contentType: mediaMime });
+    mediaKey = key;
+    mediaType = mediaMime;
+    if (!body) body = '📎 Attachment';
   }
   if (!body && !mediaKey) return; // nothing to store
 
