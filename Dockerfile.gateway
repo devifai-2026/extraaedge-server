@@ -1,40 +1,25 @@
-# WhatsApp gateway image.
+# WhatsApp gateway image (Baileys).
 #
-# whatsapp-web.js drives a real Chromium via puppeteer. Render's native Node
-# runtime ships no browser, so we install Chromium from apt and point puppeteer
-# at it (WA_PUPPETEER_EXECUTABLE_PATH). We also tell puppeteer NOT to download
-# its own ~170MB Chromium at install time, since we use the system one.
+# Baileys speaks the WhatsApp multi-device protocol directly over a WebSocket —
+# there is NO headless browser and NO Chromium — so this is a plain, lightweight
+# Node image (~60MB runtime memory instead of ~500MB for a browser). It can
+# equally run on a host's NATIVE Node runtime with `npm run gateway` and no
+# Dockerfile at all — that's the recommended free deploy on Render (a normal
+# Node web service). This file is kept for hosts that prefer a container.
 #
-# Used by the `wa-gateway` service in render.yaml. The API service keeps using
-# Render's default Node runtime (it needs no browser).
+# Session auth is persisted in Postgres (src/gateway/baileys-auth-pg.js), so
+# restarts/redeploys re-link without a fresh QR.
 FROM node:20-bookworm-slim
 
-# Chromium + the shared libraries headless Chrome needs. Without these the
-# browser launches and immediately crashes ("error while loading shared libs").
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      chromium \
-      ca-certificates fonts-liberation \
-      libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-      libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
-      libpango-1.0-0 libcairo2 libatspi2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV NODE_ENV=production \
-    PUPPETEER_SKIP_DOWNLOAD=true \
-    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    WA_PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV NODE_ENV=production
 
 WORKDIR /app
 
-# Install deps first for layer caching. The puppeteer postinstall is skipped by
-# the env vars above, so no Chromium download happens here.
+# Install deps first for layer caching.
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
 COPY . .
 
-# Chromium under Docker needs --no-sandbox (the gateway already passes that arg,
-# but keep the user as a non-root for safety where possible). Render runs as a
-# non-root user by default; --no-sandbox in client-registry handles the rest.
 EXPOSE 4100
 CMD ["node", "src/gateway/index.js"]

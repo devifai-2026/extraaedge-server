@@ -1,7 +1,7 @@
 // WhatsApp gateway — a singleton, long-lived process that owns every user's
-// whatsapp-web.js Client (headless Chromium) in memory. Started separately from
-// the API: `npm run gateway`. The API reaches it over internal HTTP
-// (src/lib/wa-gateway.js); it pushes events back to browsers via the API's
+// Baileys WhatsApp socket (native WebSocket, NO browser) in memory. Started
+// separately from the API: `npm run gateway`. The API reaches it over internal
+// HTTP (src/lib/wa-gateway.js); it pushes events back to browsers via the API's
 // socket.io (src/gateway/notify-api.js → POST /internal/wa/notify).
 import express from 'express';
 import { env } from '../config/env.js';
@@ -25,7 +25,7 @@ const server = app.listen(env.WA_GATEWAY_PORT, () => {
 const shutdown = async (signal) => {
   logger.info({ signal }, 'whatsapp-gateway shutting down');
   server.close();
-  // Destroy every Client cleanly so RemoteAuth flushes the session to GCS.
+  // Close every socket cleanly (auth state is already persisted in Postgres).
   await destroyAll().catch(() => {});
   await Promise.allSettled([closeAllTenantPools(), closeSystemPool()]);
   process.exit(0);
