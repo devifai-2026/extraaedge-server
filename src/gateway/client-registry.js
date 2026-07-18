@@ -158,6 +158,14 @@ const handleReceipt = async (entry, update) => {
         WHERE provider_message_id = $1`,
       [providerMessageId, status],
     );
+    // Also update the full-inbox mirror so its ticks reflect real delivery
+    // (previously wa_messages stayed on the optimistic 'sent', making the
+    // double-tick meaningless for inbox chats).
+    await tenantQuery(
+      tenant,
+      `UPDATE wa_messages SET status = $2 WHERE owner_user_id = $3 AND provider_message_id = $1`,
+      [providerMessageId, status, userId],
+    ).catch(() => {});
     notifyApi(tenantId, userId, 'whatsapp_status', { provider_message_id: providerMessageId, status });
   } catch (err) {
     logger.warn({ tenantId, userId, err: err.message }, 'wa receipt handling failed');
