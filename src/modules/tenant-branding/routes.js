@@ -39,8 +39,9 @@ const brandingSchema = z.object({
   receipt_no_prefix: z.string().max(40).nullable().optional(),
   receipt_no_start: z.number().int().min(1).max(9_999_999_999).optional(),
   receipt_no_pad: z.number().int().min(1).max(12).optional(),
-  // Counsellor recorder app: folder scanned for call .mp3 files and the
-  // device-local hour the daily upload sync runs (see tenant_recorder_config).
+  // Counsellor recorder app: folder scanned for call recordings (.mp3/.m4a)
+  // and the device-local hour the daily upload sync runs (see
+  // tenant_recorder_config).
   recorder_folder_path: optText(300),
   recorder_sync_hour: z.number().int().min(0).max(23).optional(),
 });
