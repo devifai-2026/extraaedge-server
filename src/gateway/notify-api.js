@@ -10,8 +10,9 @@ import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 
 export const notifyApi = async (tenantId, userId, type, payload = {}) => {
+  const target = `${env.WA_API_BASE_URL}/internal/wa/notify`;
   try {
-    const res = await fetch(`${env.WA_API_BASE_URL}/internal/wa/notify`, {
+    const res = await fetch(target, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -20,9 +21,15 @@ export const notifyApi = async (tenantId, userId, type, payload = {}) => {
       body: JSON.stringify({ tenantId, userId, type, payload }),
     });
     if (!res.ok) {
-      logger.warn({ tenantId, userId, type, status: res.status }, 'wa notify-api non-2xx');
+      // A 401 here almost always means the secret differs between gateway and
+      // API; a network error (caught below) usually means WA_API_BASE_URL is
+      // unreachable (e.g. a private hostname that doesn't resolve). Log the
+      // target so misconfig is obvious in the gateway logs.
+      logger.warn({ tenantId, userId, type, status: res.status, target }, 'wa notify-api non-2xx');
+    } else {
+      logger.debug({ tenantId, userId, type, target }, 'wa notify-api ok');
     }
   } catch (err) {
-    logger.warn({ tenantId, userId, type, err: err.message }, 'wa notify-api failed');
+    logger.error({ tenantId, userId, type, target, err: err.message }, 'wa notify-api failed — check WA_API_BASE_URL reachability');
   }
 };
