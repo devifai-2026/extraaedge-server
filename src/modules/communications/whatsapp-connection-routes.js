@@ -137,6 +137,50 @@ router.get('/conversations', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /all-chats — the FULL WhatsApp inbox mirrored from the linked account
+// (wa_chats), not just CRM leads. Each row carries lead_id + lead_name when the
+// chat matches a known lead, so the UI can flag it and offer "convert to lead".
+router.get('/all-chats', async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT c.id, c.wa_jid, c.phone, c.is_group, c.last_body, c.last_at, c.unread,
+              COALESCE(l.name, c.name) AS name,
+              c.lead_id, l.name AS lead_name
+         FROM wa_chats c
+         LEFT JOIN leads l ON l.id = c.lead_id AND l.deleted_at IS NULL
+        WHERE c.owner_user_id = $1
+        ORDER BY c.last_at DESC NULLS LAST
+        LIMIT 500`,
+      [req.user.id],
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// GET /all-messages?chat_id= — timeline for one inbox chat. Marks it read.
+router.get('/all-messages', validate({ query: z.object({ chat_id: z.string().uuid() }) }), async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT id, direction, body, media_r2_key,
+              CASE WHEN media_r2_key IS NULL THEN NULL ELSE ARRAY[media_r2_key] END AS media_keys,
+              media_type, at, status, provider_message_id
+         FROM wa_messages
+        WHERE owner_user_id = $1 AND chat_id = $2
+        ORDER BY at ASC
+        LIMIT 500`,
+      [req.user.id, req.query.chat_id],
+    );
+    await tenantQuery(
+      req.tenant,
+      `UPDATE wa_chats SET unread = 0 WHERE id = $1 AND owner_user_id = $2`,
+      [req.query.chat_id, req.user.id],
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 // GET /messages?lead_id= — merged outbound + inbound timeline for one lead,
 // scoped to this user's number. Marks inbound as read as a side effect.
 router.get('/messages', validate({ query: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
@@ -240,6 +284,52 @@ router.post('/send', validate({ body: sendSchema }), async (req, res, next) => {
       );
       throw sendErr;
     }
+  } catch (err) { next(err); }
+});
+
+// POST /all-send { chat_id, body } — send a free-text message to ANY inbox chat
+// (lead or not), addressed by the chat's stored phone. Records the outbound in
+// wa_messages so it shows in the thread immediately.
+const allSendSchema = z.object({ chat_id: z.string().uuid(), body: z.string().min(1).max(4096) });
+router.post('/all-send', validate({ body: allSendSchema }), async (req, res, next) => {
+  try {
+    if (!allowSend(req.user.id)) throw rateLimited(60);
+
+    const { rows: [chat] } = await tenantQuery(
+      req.tenant,
+      `SELECT id, wa_jid, phone, is_group FROM wa_chats WHERE id = $1 AND owner_user_id = $2`,
+      [req.body.chat_id, req.user.id],
+    );
+    if (!chat) throw notFound('Chat not found');
+    if (chat.is_group) throw forbidden('Sending to groups is not supported');
+    const recipient = chat.phone;
+    if (!recipient) throw forbidden('Chat has no phone number');
+
+    const { rows: [sess] } = await tenantQuery(
+      req.tenant,
+      `SELECT status FROM user_whatsapp_sessions WHERE user_id = $1`,
+      [req.user.id],
+    );
+    if (!sess || sess.status !== 'connected') throw conflict('Your WhatsApp is not connected. Connect it first.');
+
+    const sent = await waGateway.sendMessage(req.tenant.id, req.user.id, { to: recipient, body: req.body.body });
+
+    // Record the outbound in the inbox thread (the gateway also mirrors it via
+    // messages.upsert, but recording here makes it appear instantly).
+    await tenantQuery(
+      req.tenant,
+      `INSERT INTO wa_messages (chat_id, owner_user_id, provider_message_id, direction, body, at, status)
+       VALUES ($1,$2,$3,'out',$4, now(), 'sent')
+       ON CONFLICT (owner_user_id, provider_message_id) DO NOTHING`,
+      [chat.id, req.user.id, sent.provider_message_id ?? null, req.body.body],
+    );
+    await tenantQuery(
+      req.tenant,
+      `UPDATE wa_chats SET last_body = $2, last_at = now() WHERE id = $1`,
+      [chat.id, req.body.body],
+    );
+
+    res.status(202).json({ data: { status: 'sent' }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

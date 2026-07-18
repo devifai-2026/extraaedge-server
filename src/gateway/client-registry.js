@@ -19,6 +19,7 @@ import { logger } from '../lib/logger.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { putObject, buildKey } from '../lib/r2.js';
 import { usePostgresAuthState, clearPostgresAuthState, listConnectedUserIds } from './baileys-auth-pg.js';
+import { ingestChats, ingestContacts, insertMessage } from './wa-inbox.js';
 import { notifyApi } from './notify-api.js';
 
 // key -> { sock, status, phone, tenantId, userId, tenantSlug, lastQr, saveCreds, wantLogout }
@@ -223,13 +224,62 @@ const wireEvents = (entry) => {
   // Inbound messages.
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
-    for (const msg of messages) await handleInbound(entry, msg);
+    for (const msg of messages) {
+      // Mirror EVERY message (in/out, incl. our own) into the full inbox so all
+      // chats show up; then run the lead-centric handling for genuine inbound.
+      await mirrorToInbox(entry, msg);
+      await handleInbound(entry, msg);
+    }
   });
 
   // Delivery/read receipts.
   sock.ev.on('messages.update', async (updates) => {
     for (const u of updates) await handleReceipt(entry, u);
   });
+
+  // ---- full-inbox sync (all chats, not just CRM leads) ----
+
+  // Bulk history dump on link/reconnect: chats + contacts + recent messages.
+  sock.ev.on('messaging-history.set', async ({ chats, contacts, messages }) => {
+    try {
+      await ingestChats(tenantId, userId, chats || []);
+      await ingestContacts(tenantId, userId, contacts || []);
+      for (const msg of messages || []) await mirrorToInbox(entry, msg).catch?.(() => {});
+      notifyApi(tenantId, userId, 'whatsapp_message', { sync: true });
+    } catch (err) {
+      logger.warn({ tenantId, userId, err: err.message }, 'wa history.set ingest failed');
+    }
+  });
+
+  sock.ev.on('chats.upsert', async (chats) => {
+    await ingestChats(tenantId, userId, chats || []).catch(() => {});
+  });
+  sock.ev.on('contacts.upsert', async (contacts) => {
+    await ingestContacts(tenantId, userId, contacts || []).catch(() => {});
+  });
+};
+
+// Mirror any message (in OR out, incl. our own sends and history) into the
+// full-inbox tables. Best-effort; never throws into the event loop.
+const mirrorToInbox = async (entry, msg) => {
+  try {
+    const { tenantId, userId } = entry;
+    const jid = msg.key?.remoteJid;
+    if (!jid) return;
+    const m = msg.message || {};
+    const body =
+      m.conversation || m.extendedTextMessage?.text ||
+      m.imageMessage?.caption || m.videoMessage?.caption || m.documentMessage?.caption || '';
+    const at = msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date();
+    await insertMessage(tenantId, userId, {
+      jid,
+      providerMessageId: msg.key?.id ?? null,
+      direction: msg.key?.fromMe ? 'out' : 'in',
+      body,
+      at,
+      name: msg.pushName || null,
+    });
+  } catch { /* best-effort */ }
 };
 
 // ---- public API (same surface the internal routes call) ----
@@ -263,7 +313,9 @@ export const startSession = async ({ tenantId, userId, tenantSlug }) => {
     version,
     browser: Browsers.appropriate('Chrome'),
     printQRInTerminal: false,
-    syncFullHistory: false,
+    // Pull whatever recent history WhatsApp syncs to a newly-linked device so the
+    // inbox shows existing chats (not just CRM-lead conversations).
+    syncFullHistory: true,
     markOnlineOnConnect: false,
     // A WhatsApp QR expires in ~20s. Baileys' default qrTimeout is much longer,
     // so the QR on screen can go stale before the user scans → "Invalid QR
