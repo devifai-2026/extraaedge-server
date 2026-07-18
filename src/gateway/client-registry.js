@@ -257,6 +257,11 @@ export const startSession = async ({ tenantId, userId, tenantSlug }) => {
     printQRInTerminal: false,
     syncFullHistory: false,
     markOnlineOnConnect: false,
+    // A WhatsApp QR expires in ~20s. Baileys' default qrTimeout is much longer,
+    // so the QR on screen can go stale before the user scans → "Invalid QR
+    // Code". Rotate it every ~20s so a fresh, scannable QR is always shown
+    // (the FE updates on each whatsapp_qr event).
+    qrTimeout: 20_000,
     logger,
   });
 
