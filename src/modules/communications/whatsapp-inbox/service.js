@@ -246,4 +246,33 @@ export const markChatRead = async (tenant, ownerId, phone) => {
   ).catch(() => {});
 };
 
+// ── local templates (wa_templates) ──────────────────────────────
+export const listTemplates = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, template_id, label, body, variable_count, category, created_at
+       FROM wa_templates ORDER BY created_at DESC`,
+  );
+  return rows;
+};
+
+export const addTemplate = async (tenant, { template_id, label, body, category }, userId) => {
+  const variableCount = (String(body || '').match(/\{\{\d+\}\}/g) || []).length;
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO wa_templates (template_id, label, body, variable_count, category, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (template_id) DO UPDATE SET
+       label = EXCLUDED.label, body = EXCLUDED.body,
+       variable_count = EXCLUDED.variable_count, category = EXCLUDED.category
+     RETURNING id, template_id, label, body, variable_count, category, created_at`,
+    [String(template_id).trim(), label.trim(), body, variableCount, category || null, userId || null],
+  );
+  return rows[0];
+};
+
+export const deleteTemplate = async (tenant, id) => {
+  await tenantQuery(tenant, `DELETE FROM wa_templates WHERE id = $1`, [id]);
+};
+
 export { normalizePhone, last10, digits };

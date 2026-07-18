@@ -12,6 +12,7 @@ import * as wabridge from './wabridge.js';
 import {
   getSettings, saveSettings, credsFor, resolveInboxOwner, recordOutbound,
   listChats, listMessages, markChatRead, normalizePhone,
+  listTemplates, addTemplate, deleteTemplate,
 } from './service.js';
 
 const router = express.Router();
@@ -94,11 +95,32 @@ router.get('/chats/:phone/messages', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Locally-registered templates (portal-approved id + body + variables). Used by
+// the composer's template picker. Any authed user can read; only super_admin
+// can add/delete.
 router.get('/templates', async (req, res, next) => {
   try {
-    const s = await getSettings(req.tenant);
-    const all = await wabridge.listTemplates(credsFor(s)).catch(() => []);
-    res.json({ data: all.filter((t) => t.status === 'APPROVED'), meta: { requestId: req.id } });
+    res.json({ data: await listTemplates(req.tenant), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+const templateSchema = z.object({
+  template_id: z.string().min(1).max(200),
+  label: z.string().min(1).max(120),
+  body: z.string().min(1).max(4096),
+  category: z.string().max(40).optional(),
+});
+router.post('/templates', requireRole('super_admin'), validate({ body: templateSchema }), async (req, res, next) => {
+  try {
+    const row = await addTemplate(req.tenant, req.body, req.user.id);
+    res.status(201).json({ data: row, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.delete('/templates/:id', requireRole('super_admin'), async (req, res, next) => {
+  try {
+    await deleteTemplate(req.tenant, req.params.id);
+    res.status(204).end();
   } catch (err) { next(err); }
 });
 

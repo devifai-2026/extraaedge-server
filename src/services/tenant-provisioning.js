@@ -1,4 +1,5 @@
 import pg from 'pg';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import migrationRunner from 'node-pg-migrate';
@@ -11,6 +12,8 @@ import {
 } from '../config/constants.js';
 
 const { Client } = pg;
+
+const randomToken = () => crypto.randomBytes(18).toString('base64url');
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 const tenantMigrationsDir = path.resolve(thisDir, '../db/migrations/tenant');
@@ -165,6 +168,14 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       `INSERT INTO users (email, phone, name, password_hash, role_id, role, is_active, track_work_time, session_timeout_minutes)
        VALUES ($1,$2,$3,$4,$5,'super_admin',true,false,15)`,
       [first_admin.email, first_admin.phone ?? null, first_admin.name, first_admin.password_hash, roleIds.super_admin],
+    );
+
+    // WhatsApp: the wa_settings singleton row already exists (from the migration).
+    // Generate its webhook_token so the tenant's inbound webhook URL
+    // (…/whatsapp/webhook/<slug>) is ready the moment the tenant goes active.
+    await client.query(
+      `UPDATE wa_settings SET webhook_token = $1 WHERE id = true AND (webhook_token IS NULL OR webhook_token = '')`,
+      [randomToken()],
     );
 
     // Seed every tenant with one rule per strategy. Only `round_robin` is
