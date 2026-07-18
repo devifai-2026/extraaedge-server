@@ -41,18 +41,17 @@ export const saveSettings = async (tenantId, input) => {
   return { webhook_url: webhookUrl(tenant), configured: !!(saved.appKey && saved.authKey && saved.deviceId) };
 };
 
+// The PO is cross-tenant all-access → view every chat (super_admin-equivalent).
+const ALL_ACCESS = { role: 'super_admin', id: null };
+
 export const listChats = async (tenantId) => {
   const tenant = await requireTenant(tenantId);
-  const ownerId = await inbox.resolveInboxOwner(tenant);
-  if (!ownerId) return [];
-  return inbox.listChats(tenant, ownerId);
+  return inbox.listChats(tenant, ALL_ACCESS);
 };
 
 export const listMessages = async (tenantId, phone) => {
   const tenant = await requireTenant(tenantId);
-  const ownerId = await inbox.resolveInboxOwner(tenant);
-  if (!ownerId) return [];
-  return inbox.listMessages(tenant, ownerId, phone);
+  return inbox.listMessages(tenant, ALL_ACCESS, phone);
 };
 
 export const listTemplates = async (tenantId) => {

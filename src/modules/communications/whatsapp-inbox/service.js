@@ -93,6 +93,35 @@ const matchLeadId = async (tenant, phone) => {
   return rows[0]?.id ?? null;
 };
 
+// For an inbound message: if a lead already matches this number, return it.
+// Otherwise create a new lead (marked source=whatsapp) and round-robin it to a
+// counsellor (createLead runs applyAssignment for a null actor). Returns the
+// lead id, or null if creation failed (message still stored, just unlinked).
+const ensureLeadForInbound = async (tenant, phone, senderName) => {
+  const existing = await matchLeadId(tenant, phone);
+  if (existing) return existing;
+  try {
+    // Lazy import to avoid a circular dependency (leads/service imports things
+    // that could pull this module in).
+    const { createLead } = await import('../../leads/service.js');
+    const lead = await createLead(
+      tenant,
+      null, // no actor → tenant-wide round-robin via applyAssignment
+      {
+        name: senderName || `WhatsApp ${normalizePhone(phone)}`,
+        whatsapp_number: normalizePhone(phone),
+        phone: normalizePhone(phone),
+        first_touch_source: 'whatsapp',
+      },
+      { on_duplicate: 'warn' }, // we already checked; warn just means don't throw
+    );
+    return lead?.id ?? null;
+  } catch (err) {
+    logger.warn({ tenantId: tenant.id, phone, err: err.message }, 'wa: auto lead-create failed');
+    return null;
+  }
+};
+
 // Upsert the chat row for (owner, phone) and roll last message forward.
 const upsertChat = async (tenant, ownerId, { phone, name, lastBody, lastAt, incUnread = 0 }) => {
   const leadId = await matchLeadId(tenant, phone);
@@ -148,6 +177,12 @@ export const recordInbound = async ({ tenant, phone, waMessageId, type, text, me
   }
   if (!body && !mediaKey) return; // nothing to store
 
+  // Unknown number → create a lead (source=whatsapp) + round-robin it to a
+  // counsellor, so the conversation belongs to someone. Existing numbers reuse
+  // their lead. Done before upsertChat so the chat links to the lead. Best-
+  // effort: a failure here must not drop the inbound message.
+  await ensureLeadForInbound(tenant, phone, senderName).catch(() => {});
+
   const at = timestamp ? new Date(timestamp) : new Date();
   const { chatId } = await upsertChat(tenant, ownerId, {
     phone, name: senderName, lastBody: body, lastAt: at, incUnread: 1,
@@ -200,50 +235,128 @@ export const applyStatus = async (tenant, waMessageId, status) => {
   notifyAdmins(tenant.id, 'whatsapp_status', { wa_message_id: waMessageId, status: s });
 };
 
-// ── read model (for the authed inbox API) ───────────────────────
-export const listChats = async (tenant, ownerId) => {
+// ── role-based visibility ───────────────────────────────────────
+// WhatsApp visibility follows the LINKED LEAD's owner + the same role scoping as
+// the leads list (reusing computeScope). Returns { where, params } fragments to
+// splice into a query aliasing wa_chats as `c` and leads as `l`.
+//   super_admin / account_manager → all chats (incl. unlinked)
+//   branch_manager                → chats whose lead is in their branch
+//   sales_manager                 → chats whose lead is assigned to their team
+//   counsellor                    → chats whose lead is assigned to them
+// Chats with no linked lead are visible ONLY to all-access roles.
+const ALL_ACCESS_ROLES = new Set(['super_admin', 'account_manager']);
+// Mirrors leads/service.computeScope (which is module-private) so WhatsApp
+// visibility exactly matches lead visibility. Returns a WHERE fragment over
+// leads `l` + its params, starting bind indexes at startIdx.
+const waScope = async (tenant, actor, startIdx = 1) => {
+  if (!actor?.role) return { where: 'false', params: [] };
+  if (ALL_ACCESS_ROLES.has(actor.role)) return { where: 'true', params: [] };
+
+  const p = [];
+  let i = startIdx;
+
+  if (actor.role === 'branch_manager') {
+    const { findById } = await import('../../users/repo.js');
+    const me = await findById(tenant, actor.id);
+    p.push(me?.branch_id ?? '00000000-0000-0000-0000-000000000000');
+    return { where: `l.branch_id = $${i}`, params: p };
+  }
+
+  if (actor.role === 'sales_manager') {
+    const [{ teamHierarchy, findById }] = await Promise.all([import('../../users/repo.js')]);
+    const ids = await teamHierarchy(tenant, actor.id);
+    const me = await findById(tenant, actor.id);
+    p.push(ids && ids.length ? ids : [actor.id]);
+    const uidClause = `l.assigned_to = ANY($${i}::uuid[])`;
+    i += 1;
+    if (me?.team_id) {
+      p.push(me.team_id);
+      return { where: `(${uidClause} OR (l.assigned_to IS NULL AND l.team_id = $${i}))`, params: p };
+    }
+    return { where: uidClause, params: p };
+  }
+
+  // counsellor (and any other tenant role): only leads assigned to me.
+  p.push(actor.id);
+  return { where: `l.assigned_to = $${i}`, params: p };
+};
+
+// ── read model (actor/role-scoped) ──────────────────────────────
+export const listChats = async (tenant, actor) => {
+  const sc = await waScope(tenant, actor, 1);
+  // Non-all-access roles only see chats that HAVE a linked lead in scope.
+  const linkedOnly = !ALL_ACCESS_ROLES.has(actor?.role);
   const { rows } = await tenantQuery(
     tenant,
     `SELECT c.id, c.phone, c.is_group, c.last_body, c.last_at, c.unread,
             COALESCE(l.name, c.name, c.phone) AS name,
-            c.lead_id, l.name AS lead_name
+            c.lead_id, l.name AS lead_name, l.assigned_to AS lead_owner_id,
+            ao.name AS lead_owner_name
        FROM wa_chats c
        LEFT JOIN leads l ON l.id = c.lead_id AND l.deleted_at IS NULL
-      WHERE c.owner_user_id = $1 AND c.is_group = false
+       LEFT JOIN users ao ON ao.id = l.assigned_to
+      WHERE c.is_group = false
+        AND ${linkedOnly ? 'c.lead_id IS NOT NULL AND' : ''} (${sc.where})
       ORDER BY c.last_at DESC NULLS LAST
       LIMIT 500`,
-    [ownerId],
+    sc.params,
   );
   return rows;
 };
 
-export const listMessages = async (tenant, ownerId, phone) => {
+export const listMessages = async (tenant, actor, phone) => {
   const norm = normalizePhone(phone);
+  const sc = await waScope(tenant, actor, 2);
+  const linkedOnly = !ALL_ACCESS_ROLES.has(actor?.role);
+  // Resolve the chat within the caller's scope (phone + role predicate).
   const { rows: [chat] } = await tenantQuery(
     tenant,
-    `SELECT id FROM wa_chats WHERE owner_user_id = $1 AND phone = $2`,
-    [ownerId, norm],
+    `SELECT c.id
+       FROM wa_chats c
+       LEFT JOIN leads l ON l.id = c.lead_id AND l.deleted_at IS NULL
+      WHERE c.phone = $1
+        AND ${linkedOnly ? 'c.lead_id IS NOT NULL AND' : ''} (${sc.where})
+      LIMIT 1`,
+    [norm, ...sc.params],
   );
   if (!chat) return [];
+  // Messages are stored under one owner key; scope is enforced at the chat level
+  // above, so here we fetch by chat_id.
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id, direction, body, media_r2_key,
             CASE WHEN media_r2_key IS NULL THEN NULL ELSE ARRAY[media_r2_key] END AS media_keys,
             media_type, at, status, wa_message_id AS provider_message_id
-       FROM wa_messages WHERE owner_user_id = $1 AND chat_id = $2
+       FROM wa_messages WHERE chat_id = $1
       ORDER BY at ASC LIMIT 500`,
-    [ownerId, chat.id],
+    [chat.id],
   );
   await tenantQuery(tenant, `UPDATE wa_chats SET unread = 0 WHERE id = $1`, [chat.id]).catch(() => {});
   return rows;
 };
 
-export const markChatRead = async (tenant, ownerId, phone) => {
-  await tenantQuery(
+// Resolve a chat the actor is allowed to act on (for send/read), by phone.
+export const resolveChatForActor = async (tenant, actor, phone) => {
+  const norm = normalizePhone(phone);
+  const sc = await waScope(tenant, actor, 2);
+  const linkedOnly = !ALL_ACCESS_ROLES.has(actor?.role);
+  const { rows: [chat] } = await tenantQuery(
     tenant,
-    `UPDATE wa_chats SET unread = 0 WHERE owner_user_id = $1 AND phone = $2`,
-    [ownerId, normalizePhone(phone)],
-  ).catch(() => {});
+    `SELECT c.id, c.phone
+       FROM wa_chats c
+       LEFT JOIN leads l ON l.id = c.lead_id AND l.deleted_at IS NULL
+      WHERE c.phone = $1
+        AND ${linkedOnly ? 'c.lead_id IS NOT NULL AND' : ''} (${sc.where})
+      LIMIT 1`,
+    [norm, ...sc.params],
+  );
+  return chat || null;
+};
+
+export const markChatRead = async (tenant, actor, phone) => {
+  const chat = await resolveChatForActor(tenant, actor, phone);
+  if (!chat) return;
+  await tenantQuery(tenant, `UPDATE wa_chats SET unread = 0 WHERE id = $1`, [chat.id]).catch(() => {});
 };
 
 // ── local templates (wa_templates) ──────────────────────────────

@@ -11,7 +11,7 @@ import { env } from '../../../config/env.js';
 import * as wabridge from './wabridge.js';
 import {
   getSettings, saveSettings, credsFor, resolveInboxOwner, recordOutbound,
-  listChats, listMessages, markChatRead, normalizePhone,
+  listChats, listMessages, markChatRead, resolveChatForActor, normalizePhone,
   listTemplates, addTemplate, deleteTemplate,
 } from './service.js';
 
@@ -79,19 +79,18 @@ router.get('/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Chats + messages are scoped by the caller's role (via the linked lead's
+// owner): counsellor→own, sales_manager→team, branch_manager→branch,
+// super_admin/account_manager→all.
 router.get('/chats', async (req, res, next) => {
   try {
-    const ownerId = await resolveInboxOwner(req.tenant);
-    if (!ownerId) return res.json({ data: [], meta: { requestId: req.id } });
-    res.json({ data: await listChats(req.tenant, ownerId), meta: { requestId: req.id } });
+    res.json({ data: await listChats(req.tenant, req.user), meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
 router.get('/chats/:phone/messages', async (req, res, next) => {
   try {
-    const ownerId = await resolveInboxOwner(req.tenant);
-    if (!ownerId) return res.json({ data: [], meta: { requestId: req.id } });
-    res.json({ data: await listMessages(req.tenant, ownerId, req.params.phone), meta: { requestId: req.id } });
+    res.json({ data: await listMessages(req.tenant, req.user, req.params.phone), meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
@@ -136,6 +135,17 @@ router.post('/chats/:phone/send', validate({ body: sendSchema }), async (req, re
     if (!allowSend(req.user.id)) throw rateLimited(60);
     const phone = normalizePhone(req.params.phone);
     if (!phone) throw forbidden('Invalid phone number');
+
+    // Scope check: if a chat exists for this number, the caller must be allowed
+    // to see it (own lead / team / branch / all). If no chat exists yet, allow —
+    // the caller is starting a new conversation (e.g. with a lead they own).
+    const allAccess = req.user.role === 'super_admin' || req.user.role === 'account_manager';
+    if (!allAccess) {
+      const inScope = await resolveChatForActor(req.tenant, req.user, phone);
+      const anyChat = await resolveChatForActor(req.tenant, { role: 'super_admin' }, phone);
+      if (anyChat && !inScope) throw forbidden('This conversation belongs to another counsellor.');
+    }
+
     const s = await getSettings(req.tenant);
     if (!(s.appKey && s.authKey && s.deviceId)) throw conflict('WhatsApp is not configured. Add WABridge keys in Settings → WhatsApp.');
     const creds = credsFor(s);
@@ -165,8 +175,7 @@ router.post('/chats/:phone/send', validate({ body: sendSchema }), async (req, re
 
 router.patch('/chats/:phone/read', async (req, res, next) => {
   try {
-    const ownerId = await resolveInboxOwner(req.tenant);
-    if (ownerId) await markChatRead(req.tenant, ownerId, req.params.phone);
+    await markChatRead(req.tenant, req.user, req.params.phone);
     res.status(204).end();
   } catch (err) { next(err); }
 });
