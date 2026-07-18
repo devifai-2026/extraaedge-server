@@ -15,6 +15,7 @@ import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, forbidden, conflict, rateLimited } from '../../lib/errors.js';
 import { env } from '../../config/env.js';
+import { headObject, getDownloadSignedUrl } from '../../lib/r2.js';
 import * as waGateway from '../../lib/wa-gateway.js';
 
 const router = express.Router();
@@ -94,11 +95,21 @@ router.get('/conversations', async (req, res, next) => {
     const { rows } = await tenantQuery(
       req.tenant,
       `WITH wa AS (
-         SELECT lead_id, body AS last_body, sent_at AS at, 'out' AS direction
+         SELECT lead_id,
+                COALESCE(NULLIF(body, ''),
+                         CASE WHEN media_r2_key IS NOT NULL
+                              THEN '📎 ' || COALESCE(media_filename, 'Attachment') END,
+                         '') AS last_body,
+                sent_at AS at, 'out' AS direction
            FROM message_log
           WHERE channel = 'whatsapp' AND user_id = $1 AND lead_id IS NOT NULL
          UNION ALL
-         SELECT lead_id, body AS last_body, received_at AS at, 'in' AS direction
+         SELECT lead_id,
+                COALESCE(NULLIF(body, ''),
+                         CASE WHEN media_urls IS NOT NULL AND array_length(media_urls, 1) > 0
+                              THEN '📎 Attachment' END,
+                         '') AS last_body,
+                received_at AS at, 'in' AS direction
            FROM message_reply
           WHERE channel = 'whatsapp' AND routed_to_user_id = $1 AND lead_id IS NOT NULL
        ),
@@ -128,11 +139,13 @@ router.get('/messages', validate({ query: z.object({ lead_id: z.string().uuid() 
     const leadId = req.query.lead_id;
     const { rows } = await tenantQuery(
       req.tenant,
-      `SELECT 'out' AS direction, id, body, status, sent_at AS at, provider_message_id
+      `SELECT 'out' AS direction, id, body, status, sent_at AS at, provider_message_id,
+              media_type, CASE WHEN media_r2_key IS NULL THEN NULL ELSE ARRAY[media_r2_key] END AS media_keys
          FROM message_log
         WHERE channel = 'whatsapp' AND user_id = $1 AND lead_id = $2
        UNION ALL
-       SELECT 'in' AS direction, id, body, NULL AS status, received_at AS at, provider_message_id
+       SELECT 'in' AS direction, id, body, NULL AS status, received_at AS at, provider_message_id,
+              NULL AS media_type, media_urls AS media_keys
          FROM message_reply
         WHERE channel = 'whatsapp' AND routed_to_user_id = $1 AND lead_id = $2
         ORDER BY at ASC NULLS LAST
@@ -149,8 +162,20 @@ router.get('/messages', validate({ query: z.object({ lead_id: z.string().uuid() 
   } catch (err) { next(err); }
 });
 
-// POST /send { lead_id, body } — free-text via the user's OWN connected number.
-const sendSchema = z.object({ lead_id: z.string().uuid(), body: z.string().min(1).max(4096) });
+// POST /send { lead_id, body?, media_r2_key? } — free-text and/or an attachment
+// via the user's OWN connected number. `media_r2_key` points at an object the
+// FE already uploaded through the shared /uploads presign pipeline; the body is
+// then the attachment's caption. At least one of body / media_r2_key required.
+const sendSchema = z
+  .object({
+    lead_id: z.string().uuid(),
+    body: z.string().max(4096).optional().default(''),
+    media_r2_key: z.string().min(1).max(512).optional(),
+  })
+  .refine((v) => (v.body && v.body.trim().length > 0) || v.media_r2_key, {
+    message: 'Provide a message body or an attachment',
+    path: ['body'],
+  });
 router.post('/send', validate({ body: sendSchema }), async (req, res, next) => {
   try {
     if (!allowSend(req.user.id)) throw rateLimited(60);
@@ -171,16 +196,31 @@ router.post('/send', validate({ body: sendSchema }), async (req, res, next) => {
     );
     if (!sess || sess.status !== 'connected') throw conflict('Your WhatsApp is not connected. Connect it first.');
 
+    // Resolve the attachment: confirm it exists in GCS (MIME/size come from the
+    // object itself) and mint a short-lived signed URL the gateway can fetch.
+    let media = null;
+    let mediaType = null;
+    let mediaFilename = null;
+    if (req.body.media_r2_key) {
+      const head = await headObject(req.body.media_r2_key);
+      if (!head) throw notFound('Attachment not found; upload it first');
+      mediaType = head.ContentType || 'application/octet-stream';
+      mediaFilename = req.body.media_r2_key.split('/').pop() || 'attachment';
+      const signedUrl = await getDownloadSignedUrl({ key: req.body.media_r2_key });
+      media = { signedUrl, filename: mediaFilename, mimetype: mediaType };
+    }
+
     const { rows: [logRow] } = await tenantQuery(
       req.tenant,
       `INSERT INTO message_log
-          (lead_id, user_id, channel, recipient, provider, status, body, user_whatsapp_session_id)
-       VALUES ($1,$2,'whatsapp',$3,'wwebjs','queued',$4,$5) RETURNING id`,
-      [lead.id, req.user.id, recipient, req.body.body, sess.id],
+          (lead_id, user_id, channel, recipient, provider, status, body,
+           media_r2_key, media_type, media_filename, user_whatsapp_session_id)
+       VALUES ($1,$2,'whatsapp',$3,'wwebjs','queued',$4,$5,$6,$7,$8) RETURNING id`,
+      [lead.id, req.user.id, recipient, req.body.body, req.body.media_r2_key ?? null, mediaType, mediaFilename, sess.id],
     );
 
     try {
-      const sent = await waGateway.sendMessage(req.tenant.id, req.user.id, { to: recipient, body: req.body.body });
+      const sent = await waGateway.sendMessage(req.tenant.id, req.user.id, { to: recipient, body: req.body.body, media });
       await tenantQuery(
         req.tenant,
         `UPDATE message_log SET status = 'sent', provider_message_id = $2, sent_at = now() WHERE id = $1`,

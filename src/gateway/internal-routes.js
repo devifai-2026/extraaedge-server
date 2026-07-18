@@ -32,9 +32,13 @@ router.get('/sessions/:tenantId/:userId/status', (req, res) => {
 
 router.post('/sessions/:tenantId/:userId/send', async (req, res) => {
   try {
-    const { to, body } = req.body ?? {};
-    if (!to || !body) return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'to and body required' } });
-    const out = await send({ tenantId: req.params.tenantId, userId: req.params.userId, to, body });
+    const { to, body, media } = req.body ?? {};
+    // A message needs a recipient and at least text OR media (media caption may
+    // be empty).
+    if (!to || (!body && !media?.signedUrl)) {
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'to and (body or media) required' } });
+    }
+    const out = await send({ tenantId: req.params.tenantId, userId: req.params.userId, to, body, media });
     res.json(out);
   } catch (err) {
     if (err.code === 'NOT_CONNECTED') {

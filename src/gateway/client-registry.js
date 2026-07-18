@@ -11,14 +11,16 @@
 // notify-api → API socket.io.
 import path from 'node:path';
 import os from 'node:os';
+import { nanoid } from 'nanoid';
 import pkg from 'whatsapp-web.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
+import { putObject, buildKey } from '../lib/r2.js';
 import { GcsStore, sessionGcsKey } from './remote-auth-gcs.js';
 import { notifyApi } from './notify-api.js';
 
-const { Client, RemoteAuth } = pkg;
+const { Client, RemoteAuth, MessageMedia } = pkg;
 
 // key -> { client, status, phone, tenantId, userId, tenantSlug, lastQr, readyAt }
 const clients = new Map();
@@ -103,17 +105,39 @@ const wireEvents = (entry) => {
         `SELECT id FROM user_whatsapp_sessions WHERE user_id = $1`,
         [userId],
       );
+
+      // If the lead attached media, pull the bytes down and stash them in GCS.
+      // We store the object KEY (not a URL) in message_reply.media_urls; the FE
+      // resolves each key to a short-lived signed URL via /uploads on demand.
+      let mediaKeys = null;
+      let hasMedia = false;
+      if (msg.hasMedia) {
+        try {
+          const media = await msg.downloadMedia();
+          if (media?.data) {
+            const ext = (media.mimetype?.split('/')[1] || 'bin').split(';')[0];
+            const key = buildKey({ tenantSlug: tenant.slug, purpose: 'whatsapp_inbound', id: nanoid(24), ext });
+            await putObject({ key, body: Buffer.from(media.data, 'base64'), contentType: media.mimetype });
+            mediaKeys = [key];
+            hasMedia = true;
+          }
+        } catch (mErr) {
+          logger.warn({ tenantId, userId, err: mErr.message }, 'wa inbound media download failed');
+        }
+      }
+
       await tenantQuery(
         tenant,
         `INSERT INTO message_reply
-            (lead_id, channel, provider_message_id, body, received_at, routed_to_user_id, user_whatsapp_session_id)
-         VALUES ($1,'whatsapp',$2,$3, now(), $4, $5)`,
-        [leadId, msg.id?._serialized ?? msg.id?.id ?? null, msg.body ?? '', userId, sess[0]?.id ?? null],
+            (lead_id, channel, provider_message_id, body, media_urls, received_at, routed_to_user_id, user_whatsapp_session_id)
+         VALUES ($1,'whatsapp',$2,$3,$4, now(), $5, $6)`,
+        [leadId, msg.id?._serialized ?? msg.id?.id ?? null, msg.body ?? '', mediaKeys, userId, sess[0]?.id ?? null],
       );
       notifyApi(tenantId, userId, 'whatsapp_message', {
         lead_id: leadId,
         from: fromNumber,
         body: msg.body ?? '',
+        has_media: hasMedia,
         received_at: new Date().toISOString(),
       });
     } catch (err) {
@@ -225,7 +249,10 @@ export const getStatus = (tenantId, userId) => {
   return { status: entry.status, phone: entry.phone ?? null };
 };
 
-export const send = async ({ tenantId, userId, to, body }) => {
+// `media`, when present, is { signedUrl, filename, mimetype } — a short-lived
+// GCS download URL the gateway fetches into a MessageMedia. With media the text
+// `body` becomes the caption; without media it's a plain text message.
+export const send = async ({ tenantId, userId, to, body, media }) => {
   const entry = clients.get(keyOf(tenantId, userId));
   if (!entry || entry.status !== 'connected') {
     const err = new Error('NOT_CONNECTED');
@@ -236,7 +263,20 @@ export const send = async ({ tenantId, userId, to, body }) => {
   // wants "<countrycode><number>@c.us". Callers pass E.164-ish strings.
   const digits = String(to).replace(/\D+/g, '');
   const chatId = `${digits}@c.us`;
-  const sent = await entry.client.sendMessage(chatId, body);
+  let sent;
+  if (media?.signedUrl) {
+    // unsafeMime: GCS signed URLs don't always expose a reliable content-type;
+    // we pass the MIME the API already resolved via headObject so the file is
+    // sent with the right type and name.
+    const msgMedia = await MessageMedia.fromUrl(media.signedUrl, {
+      unsafeMime: true,
+      ...(media.mimetype ? { mimetype: media.mimetype } : {}),
+      ...(media.filename ? { filename: media.filename } : {}),
+    });
+    sent = await entry.client.sendMessage(chatId, msgMedia, { caption: body || undefined });
+  } else {
+    sent = await entry.client.sendMessage(chatId, body);
+  }
   return { provider_message_id: sent.id?._serialized ?? sent.id?.id ?? null, status: 'sent' };
 };
 

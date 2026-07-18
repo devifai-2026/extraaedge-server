@@ -44,8 +44,10 @@ export const startSession = (tenantId, userId, tenantSlug) =>
 export const getStatus = (tenantId, userId) =>
   call('GET', `/sessions/${tenantId}/${userId}/status`);
 
-export const sendMessage = (tenantId, userId, { to, body }) =>
-  call('POST', `/sessions/${tenantId}/${userId}/send`, { to, body });
+// `media`, when present, is { signedUrl, filename, mimetype } — the gateway
+// fetches the signed URL into a MessageMedia and sends `body` as the caption.
+export const sendMessage = (tenantId, userId, { to, body, media }) =>
+  call('POST', `/sessions/${tenantId}/${userId}/send`, { to, body, media });
 
 export const logoutSession = (tenantId, userId) =>
   call('POST', `/sessions/${tenantId}/${userId}/logout`);
