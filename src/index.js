@@ -7,26 +7,37 @@ import { closeRedis } from './lib/redis.js';
 import { closeQueues } from './lib/queue.js';
 import { initSocket } from './lib/socket.js';
 
-// In-process queue mode: import workers so their handlers register on the same process.
-// (In production, QUEUE_DRIVER=bullmq runs each worker as its own process.)
-if (env.QUEUE_DRIVER === 'inprocess') {
-  await import('./workers/rule-processor.js');
-  await import('./workers/bulk-import-worker.js');
-  // Follow-up + notifications stack:
-  //   notification-worker translates queued event types into
-  //     notifications rows + websocket pushes.
-  //   followup-reminder-scheduler scans lead_followups every minute and
-  //     publishes 'follow_up_due' events when a planned follow-up's time
-  //     is reached.
-  //   missed-followup-scanner marks planned follow-ups as 'missed' once
-  //     they're past-due by N hours and publishes 'follow_up_missed'.
-  // Without these three the notifications popover stays empty for any
-  // follow-up activity, even though /follow-ups/* CRUD works.
-  await import('./workers/notification-worker.js');
-  await import('./workers/followup-reminder-scheduler.js');
-  await import('./workers/missed-followup-scanner.js');
-  await import('./workers/lms-class-reminder.js');
-}
+// In-process queue mode loads the worker modules so their handlers register on
+// this same process (bullmq mode runs each worker as its own process instead).
+// These imports open DB pools and start schedulers, which can take longer than
+// Hostinger's Node hosting allows before it expects app.listen() (a ~3s deadline
+// — see the "App did not call listen() within 3 seconds" runtime error). So we
+// call listen() FIRST, then load the workers asynchronously after the server is
+// already accepting connections. On Render/VPS this ordering is equally correct.
+const loadInprocessWorkers = async () => {
+  if (env.QUEUE_DRIVER !== 'inprocess') return;
+  try {
+    await import('./workers/rule-processor.js');
+    await import('./workers/bulk-import-worker.js');
+    // Follow-up + notifications stack:
+    //   notification-worker translates queued event types into
+    //     notifications rows + websocket pushes.
+    //   followup-reminder-scheduler scans lead_followups every minute and
+    //     publishes 'follow_up_due' events when a planned follow-up's time
+    //     is reached.
+    //   missed-followup-scanner marks planned follow-ups as 'missed' once
+    //     they're past-due by N hours and publishes 'follow_up_missed'.
+    // Without these three the notifications popover stays empty for any
+    // follow-up activity, even though /follow-ups/* CRUD works.
+    await import('./workers/notification-worker.js');
+    await import('./workers/followup-reminder-scheduler.js');
+    await import('./workers/missed-followup-scanner.js');
+    await import('./workers/lms-class-reminder.js');
+    logger.info('in-process workers loaded');
+  } catch (err) {
+    logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
+  }
+};
 
 const app = buildApp();
 const server = app.listen(env.PORT, () => {
@@ -34,6 +45,9 @@ const server = app.listen(env.PORT, () => {
   if (env.MOBILE_OTP_DEMO && env.NODE_ENV === 'production') {
     logger.warn('MOBILE_OTP_DEMO is ON in production — recorder-app login accepts the fixed OTP 1234');
   }
+  // Load workers only after we're listening, so a slow worker init can never
+  // trip the platform's startup deadline. Fire-and-forget.
+  loadInprocessWorkers();
 });
 
 // Attach socket.io to the same HTTP server.
