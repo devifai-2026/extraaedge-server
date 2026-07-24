@@ -71,10 +71,23 @@ export const getTenantPool = async (tenant) => {
     user: tenant.db_user,
     password: decrypt(tenant.db_password_encrypted),
     ssl: env.TENANT_DB_SSL ? { rejectUnauthorized: false } : false,
-    max: 15,
-    idleTimeoutMillis: 30_000,
+    // Bounded so LRU_MAX × max stays under the server's max_connections.
+    // See env.js TENANT_DB_POOL_MAX for the connection-budget math.
+    max: env.TENANT_DB_POOL_MAX,
+    idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 10_000,
   });
+  // On every new physical connection, cap how long it may sit idle inside an
+  // open transaction. A leaked/stuck txn (the "idle in transaction" slot we
+  // saw pinning a connection during the outage) is then reaped by Postgres
+  // instead of consuming a pool slot indefinitely.
+  if (env.TENANT_DB_IDLE_TXN_TIMEOUT_MS > 0) {
+    pool.on('connect', (client) => {
+      client
+        .query(`SET idle_in_transaction_session_timeout = ${env.TENANT_DB_IDLE_TXN_TIMEOUT_MS}`)
+        .catch((err) => logger.warn({ tenantId: tenant.id, err: err.message }, 'set idle_in_transaction_session_timeout failed'));
+    });
+  }
   pool.on('error', (err) => logger.error({ tenantId: tenant.id, err: err.message }, 'tenant pg pool error'));
   pools.set(tenant.id, pool);
   return pool;

@@ -61,7 +61,18 @@ registerWorker(QUEUE_NAMES.EVENTS, async ({ data }) => {
 // the pool only narrows *who* is eligible. Omit it (default) for the
 // tenant-wide behaviour used by admin creates and the bulk "auto-assign
 // unassigned" button.
-export const applyAssignment = async (tenant, lead, { restrictPool = null } = {}) => {
+export const applyAssignment = async (tenant, lead, { restrictPool = null, allowReassign = false } = {}) => {
+  // GUARD: never silently re-route a lead that already has an owner. This
+  // function unconditionally overwrote assigned_to, so ANY path that reached
+  // it with a live lead (queue replay after a restart, a rule fired on an
+  // update event, a bulk sweep) would rip the lead away from its counsellor.
+  // Re-read ownership from the DB rather than trusting the (possibly stale)
+  // `lead` snapshot the caller passed. Callers that legitimately reassign
+  // (manual transfer, "reassign all in team") must opt in with allowReassign.
+  if (!allowReassign) {
+    const { rows: [cur] } = await tenantQuery(tenant, `SELECT assigned_to FROM leads WHERE id = $1`, [lead.id]);
+    if (cur?.assigned_to) return null; // already owned → no-op, keep the owner
+  }
   const { rows: rules } = await tenantQuery(tenant, `SELECT * FROM assignment_rules WHERE is_active AND deleted_at IS NULL ORDER BY priority`);
   for (const rule of rules) {
     if (!evaluateCondition(rule.condition_json, { lead })) continue;
@@ -174,7 +185,22 @@ const pickTarget = async (tenant, rule, restrictPool = null) => {
     candidates.push(...narrowed);
   }
 
-  if (!candidates.length) return rule.fallback_user_id;
+  // Empty pool → use the fallback ONLY if it is itself an active counsellor.
+  // A fallback pointing at a branch_manager / admin (common: admins paste a
+  // manager UUID, or a counsellor gets promoted) must NOT receive leads —
+  // leads.assigned_to must always be a counsellor. If the fallback isn't a
+  // valid counsellor we return null so the caller leaves the lead UNASSIGNED
+  // rather than piling every lead onto one manager (the SpeedUp incident).
+  if (!candidates.length) {
+    if (!rule.fallback_user_id) return null;
+    const { rows: [fb] } = await tenantQuery(
+      tenant,
+      `SELECT id FROM users
+        WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
+      [rule.fallback_user_id],
+    );
+    return fb ? fb.id : null;
+  }
 
   const pool = candidates;
 

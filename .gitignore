@@ -18,3 +18,7 @@ tmp/
 
 # Stray lead-data exports (PII) — never commit
 /merged-leads-review.csv
+
+# incident recovery artifacts (contain lead data / one-off scripts)
+speedup-recovery.csv
+scripts/recover-speedup-reassign.js

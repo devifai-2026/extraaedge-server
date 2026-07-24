@@ -41,6 +41,15 @@ envVarGroups:
         sync: false
       - key: TENANT_DB_SSL
         value: "true"
+      # Connection-budget guard: LRU_MAX × POOL_MAX must stay under the
+      # Postgres max_connections (~100). 10 × 4 = 40, with headroom for
+      # workers + admin. Raising either risks pool-exhaustion outages.
+      - key: TENANT_POOL_LRU_MAX
+        value: "10"
+      - key: TENANT_DB_POOL_MAX
+        value: "4"
+      - key: TENANT_DB_IDLE_TXN_TIMEOUT_MS
+        value: "30000"
       - key: GCS_PROJECT_ID
         sync: false
       - key: GCS_BUCKET

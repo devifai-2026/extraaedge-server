@@ -72,7 +72,18 @@ const schema = z.object({
   TENANT_DB_SUPERUSER: stringNonEmpty,
   TENANT_DB_SUPERUSER_PASSWORD: stringNonEmpty,
   TENANT_DB_SSL: boolLike.default(false),
-  TENANT_POOL_LRU_MAX: intFrom(50),
+  // Connection-budget guard. Postgres caps total connections (Render default
+  // ~100). Worst case the API can open TENANT_POOL_LRU_MAX × TENANT_DB_POOL_MAX
+  // connections at once, so these MUST multiply to well under the server's
+  // max_connections (leaving headroom for workers + admin). Previous defaults
+  // (50 × 15 = 750) blew past a 100-connection ceiling and caused "timeout
+  // exceeded when trying to connect" pool-exhaustion outages. New defaults:
+  // 10 × 4 = 40, comfortably under 100.
+  TENANT_POOL_LRU_MAX: intFrom(10),
+  TENANT_DB_POOL_MAX: intFrom(4),
+  // Postgres kills any connection left "idle in transaction" longer than this
+  // (ms), so a leaked/stuck transaction can't pin a pool slot forever. 0 = off.
+  TENANT_DB_IDLE_TXN_TIMEOUT_MS: intFrom(30_000),
   TENANT_SECRET_ENCRYPTION_KEY: z
     .string()
     .regex(/^[0-9a-fA-F]{64}$/u, 'TENANT_SECRET_ENCRYPTION_KEY must be 64 hex chars (256 bits)'),

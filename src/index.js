@@ -52,6 +52,20 @@ process.on('uncaughtException', (err) => {
   logger.fatal({ err: err.message, stack: err.stack }, 'uncaught exception');
   shutdown('uncaughtException').catch(() => process.exit(1));
 });
+// An unhandled rejection previously only logged — so when the DB pool wedged
+// (connection-timeout rejections piling up), the process stayed alive but
+// broken, serving 500s indefinitely until someone noticed. Track the rate;
+// if rejections come in a sustained burst (a stuck pool, not a one-off), exit
+// so Render's health check restarts us into a clean process with fresh pools.
+let rejectionCount = 0;
+let rejectionWindowStart = Date.now();
 process.on('unhandledRejection', (reason) => {
   logger.error({ reason: String(reason) }, 'unhandled rejection');
+  const now = Date.now();
+  if (now - rejectionWindowStart > 60_000) { rejectionCount = 0; rejectionWindowStart = now; }
+  rejectionCount += 1;
+  if (rejectionCount >= 25) {
+    logger.fatal({ rejectionCount }, 'unhandled-rejection storm — likely wedged (DB pool?); restarting');
+    shutdown('unhandledRejection-storm').catch(() => process.exit(1));
+  }
 });
