@@ -116,3 +116,71 @@ export const buildApp = () => {
 
   return app;
 };
+
+// ---------------------------------------------------------------------------
+// Passenger / direct-run bootstrap.
+//
+// Hostinger's Passenger runs this file (src/app.js) as the startup file, not
+// src/index.js. Passenger expects the startup file to actually start listening;
+// this module only *exports* buildApp(), so on Hostinger the process would
+// export a factory and never listen → "App did not call listen() within 3
+// seconds" → 503. To support both entrypoints, when app.js is executed as the
+// main module we run the same startup sequence index.js uses: listen first,
+// then attach socket.io and load in-process workers after we're already
+// accepting connections (keeps startup under the platform's listen deadline).
+//
+// index.js still imports buildApp from here for local/Render use; that path
+// does NOT trigger this block, so there is no double-listen.
+const isDirectRun = (() => {
+  try {
+    const entry = process.argv[1] ? new URL(`file://${process.argv[1]}`).pathname : '';
+    return import.meta.url === `file://${entry}` || entry.endsWith('/src/app.js');
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  const { env } = await import('./config/env.js');
+  const { logger } = await import('./lib/logger.js');
+  const { initSocket } = await import('./lib/socket.js');
+  const { closeSystemPool } = await import('./db/system.js');
+  const { closeAllTenantPools } = await import('./db/tenant.js');
+  const { closeRedis } = await import('./lib/redis.js');
+  const { closeQueues } = await import('./lib/queue.js');
+
+  const loadInprocessWorkers = async () => {
+    if (env.QUEUE_DRIVER !== 'inprocess') return;
+    try {
+      await import('./workers/rule-processor.js');
+      await import('./workers/bulk-import-worker.js');
+      await import('./workers/notification-worker.js');
+      await import('./workers/followup-reminder-scheduler.js');
+      await import('./workers/missed-followup-scanner.js');
+      await import('./workers/lms-class-reminder.js');
+      logger.info('in-process workers loaded');
+    } catch (err) {
+      logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
+    }
+  };
+
+  const app = buildApp();
+  const server = app.listen(env.PORT, () => {
+    logger.info({ port: env.PORT, env: env.NODE_ENV }, 'extraaedge-backend listening (app.js direct run)');
+    if (env.MOBILE_OTP_DEMO && env.NODE_ENV === 'production') {
+      logger.warn('MOBILE_OTP_DEMO is ON in production — recorder-app login accepts the fixed OTP 1234');
+    }
+    loadInprocessWorkers();
+  });
+
+  initSocket(server);
+
+  const shutdown = async (signal) => {
+    logger.info({ signal }, 'shutting down');
+    server.close();
+    await Promise.allSettled([closeQueues(), closeRedis(), closeAllTenantPools(), closeSystemPool()]);
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}
