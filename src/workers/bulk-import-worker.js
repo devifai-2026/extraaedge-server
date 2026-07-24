@@ -374,14 +374,72 @@ const buildInsertPayload = (resolved) => {
   return lead;
 };
 
-const recordDuplicate = async (tenant, import_id, row_number, raw_row, dup, resolution) => {
-  const matched = matchedFieldFor(raw_row, dup);
-  await tenantQuery(
-    tenant,
-    `INSERT INTO bulk_import_duplicates (import_id, row_number, raw_row_json, matched_lead_id, match_field, match_value, resolution, resolved_at)
-     VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7, CASE WHEN $7 = 'pending' THEN NULL ELSE now() END)`,
-    [import_id, row_number, JSON.stringify(raw_row), dup.id, matched.field, matched.value, resolution],
-  );
+// Batched writer for the two side-effect tables (bulk_import_failures /
+// bulk_import_duplicates). These rows have NO dedup dependency on each other or
+// on the leads table, so unlike the lead insert they are safe to buffer and
+// flush as a single multi-row INSERT inside one transaction. This turns N
+// per-row round-trips into ceil(N / FLUSH_SIZE) — the main round-trip win for
+// imports with many invalid/duplicate rows — without changing any dedup or
+// assignment behavior in the row loop.
+const FLUSH_SIZE = 200;
+
+const createBatchWriter = (tenant) => {
+  const failures = []; // { import_id, row_number, raw_row, error_code, error_message }
+  const duplicates = []; // { import_id, row_number, raw_row, matched_lead_id, match_field, match_value, resolution }
+
+  const flushFailures = async () => {
+    if (!failures.length) return;
+    const batch = failures.splice(0, failures.length);
+    const values = [];
+    const params = [];
+    batch.forEach((f, idx) => {
+      const b = idx * 5;
+      values.push(`($${b + 1},$${b + 2},$${b + 3}::jsonb,$${b + 4},$${b + 5})`);
+      params.push(f.import_id, f.row_number, JSON.stringify(f.raw_row), f.error_code, f.error_message);
+    });
+    await tenantQuery(
+      tenant,
+      `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
+       VALUES ${values.join(',')}`,
+      params,
+    );
+  };
+
+  const flushDuplicates = async () => {
+    if (!duplicates.length) return;
+    const batch = duplicates.splice(0, duplicates.length);
+    const values = [];
+    const params = [];
+    batch.forEach((d, idx) => {
+      const b = idx * 7;
+      values.push(
+        `($${b + 1},$${b + 2},$${b + 3}::jsonb,$${b + 4},$${b + 5},$${b + 6},$${b + 7}, CASE WHEN $${b + 7} = 'pending' THEN NULL ELSE now() END)`,
+      );
+      params.push(d.import_id, d.row_number, JSON.stringify(d.raw_row), d.matched_lead_id, d.match_field, d.match_value, d.resolution);
+    });
+    await tenantQuery(
+      tenant,
+      `INSERT INTO bulk_import_duplicates (import_id, row_number, raw_row_json, matched_lead_id, match_field, match_value, resolution, resolved_at)
+       VALUES ${values.join(',')}`,
+      params,
+    );
+  };
+
+  return {
+    addFailure(import_id, row_number, raw_row, error_code, error_message) {
+      failures.push({ import_id, row_number, raw_row, error_code, error_message });
+      return failures.length >= FLUSH_SIZE ? flushFailures() : undefined;
+    },
+    addDuplicate(import_id, row_number, raw_row, dup, resolution) {
+      const matched = matchedFieldFor(raw_row, dup);
+      duplicates.push({
+        import_id, row_number, raw_row,
+        matched_lead_id: dup.id, match_field: matched.field, match_value: matched.value, resolution,
+      });
+      return duplicates.length >= FLUSH_SIZE ? flushDuplicates() : undefined;
+    },
+    flush: async () => { await flushFailures(); await flushDuplicates(); },
+  };
 };
 
 registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
@@ -463,6 +521,8 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
   if (name === 'commit' || name === 'retry') {
     const import_id = data.import_id ?? data.new_import_id;
     let insertedAny = false;
+    // Declared out here so the catch handler below can flush buffered rows.
+    const batch = createBatchWriter(tenant);
     try {
       await tenantQuery(tenant, `UPDATE bulk_imports SET status = 'processing', started_at = now() WHERE id = $1`, [import_id]);
       const { rows: [imp] } = await tenantQuery(tenant, `SELECT * FROM bulk_imports WHERE id = $1`, [import_id]);
@@ -478,6 +538,9 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
       // rows in a single upload distribute fairly across each manager's team.
       const assigneeCache = createAssigneeCache();
       let success = 0; let failed = 0; let duplicates = 0;
+      // `batch` (declared above the try) buffers failure/duplicate side-inserts
+      // so they flush as multi-row INSERTs instead of one round-trip per row.
+      // Flushed on the FLUSH_SIZE threshold inside the loop and after the loop.
       const emitProgress = makeProgressEmitter(tenant, imp);
       // First tick so the UI flips from "queued" to "0 / N" immediately.
       emitProgress({ total: rows.length, processed: 0, success: 0, failed: 0, duplicates: 0, phase: 'importing' }, { force: true });
@@ -489,12 +552,7 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
         const v = validateRow(mapped);
         if (!v.ok) {
           failed += 1;
-          await tenantQuery(
-            tenant,
-            `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-             VALUES ($1,$2,$3::jsonb,$4,$5)`,
-            [import_id, rowNum, JSON.stringify(row), v.error.code, v.error.message],
-          );
+          await batch.addFailure(import_id, rowNum, row, v.error.code, v.error.message);
           continue;
         }
 
@@ -507,23 +565,13 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
           const r = await resolveDropdowns(tenant, v.normalized, cache);
           if (!r.ok) {
             failed += 1;
-            await tenantQuery(
-              tenant,
-              `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-               VALUES ($1,$2,$3::jsonb,$4,$5)`,
-              [import_id, rowNum, JSON.stringify(row), r.error.code, r.error.message],
-            );
+            await batch.addFailure(import_id, rowNum, row, r.error.code, r.error.message);
             continue;
           }
           resolved = r.resolved;
         } catch (err) {
           failed += 1;
-          await tenantQuery(
-            tenant,
-            `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-             VALUES ($1,$2,$3::jsonb,'RESOLVER_FAILED',$4)`,
-            [import_id, rowNum, JSON.stringify(row), err.message.slice(0, 500)],
-          );
+          await batch.addFailure(import_id, rowNum, row, 'RESOLVER_FAILED', err.message.slice(0, 500));
           continue;
         }
 
@@ -553,7 +601,7 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
                  WHERE id = $1`,
                 [primary.id, resolved.name ?? '', resolved.email ?? ''],
               );
-              await recordDuplicate(tenant, import_id, rowNum, row, primary, 'merged');
+              await batch.addDuplicate(import_id, rowNum, row, primary, 'merged');
               success += 1;
               continue;
             }
@@ -563,7 +611,7 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             // auto-merged, silently losing the more-progressed lead's stage and
             // owner. Any duplicate that isn't an explicit update is skipped and
             // recorded so the operator can see it in the import's duplicate list.
-            await recordDuplicate(tenant, import_id, rowNum, row, primary, 'skipped');
+            await batch.addDuplicate(import_id, rowNum, row, primary, 'skipped');
             continue;
           }
 
@@ -603,13 +651,8 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
 
           if (curNorm && asgNorm && curNorm !== asgNorm) {
             failed += 1;
-            await tenantQuery(
-              tenant,
-              `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-               VALUES ($1,$2,$3::jsonb,'OWNER_MISMATCH',$4)`,
-              [import_id, rowNum, JSON.stringify(row),
-               `current_lead_owner_email (${curEmailRaw}) and assigned_to_email (${asgEmailRaw}) refer to different users. Leave one blank or make them the same.`],
-            );
+            await batch.addFailure(import_id, rowNum, row, 'OWNER_MISMATCH',
+              `current_lead_owner_email (${curEmailRaw}) and assigned_to_email (${asgEmailRaw}) refer to different users. Leave one blank or make them the same.`);
             continue;
           }
 
@@ -618,13 +661,8 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             const prevUser = await lookupUserByEmailStrict(tenant, assigneeCache, prevEmailRaw);
             if (!prevUser) {
               failed += 1;
-              await tenantQuery(
-                tenant,
-                `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-                 VALUES ($1,$2,$3::jsonb,'PREVIOUS_OWNER_NOT_FOUND',$4)`,
-                [import_id, rowNum, JSON.stringify(row),
-                 `previous_lead_owner_email "${prevEmailRaw}" did not match any active user in this tenant.`],
-              );
+              await batch.addFailure(import_id, rowNum, row, 'PREVIOUS_OWNER_NOT_FOUND',
+                `previous_lead_owner_email "${prevEmailRaw}" did not match any active user in this tenant.`);
               continue;
             }
             previousOwnerId = prevUser.id;
@@ -644,13 +682,8 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
               const which = curEmailRaw && String(curEmailRaw).trim()
                 ? 'current_lead_owner_email'
                 : 'assigned_to_email';
-              await tenantQuery(
-                tenant,
-                `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-                 VALUES ($1,$2,$3::jsonb,'OWNER_NOT_FOUND',$4)`,
-                [import_id, rowNum, JSON.stringify(row),
-                 `${which} "${ownerEmail}" did not match any active user in this tenant.`],
-              );
+              await batch.addFailure(import_id, rowNum, row, 'OWNER_NOT_FOUND',
+                `${which} "${ownerEmail}" did not match any active user in this tenant.`);
               continue;
             }
             // Found a real user. resolveAssignee picks a counsellor based on
@@ -708,17 +741,12 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             duplicates += 1;
             const [match] = await findDuplicates(tenant, { phone: resolved.phone });
             if (match) {
-              await recordDuplicate(tenant, import_id, rowNum, row, match, 'skipped');
+              await batch.addDuplicate(import_id, rowNum, row, match, 'skipped');
             }
             continue;
           }
           failed += 1;
-          await tenantQuery(
-            tenant,
-            `INSERT INTO bulk_import_failures (import_id, row_number, raw_row_json, error_code, error_message)
-             VALUES ($1,$2,$3::jsonb,'ROW_FAILED',$4)`,
-            [import_id, rowNum, JSON.stringify(row), err.message.slice(0, 500)],
-          );
+          await batch.addFailure(import_id, rowNum, row, 'ROW_FAILED', err.message.slice(0, 500));
         }
 
         // Live progress. Throttled inside makeProgressEmitter so a 30k-row
@@ -731,6 +759,12 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
           phase: 'importing',
         });
       }
+      // Flush any buffered failure/duplicate rows before we mark the import
+      // completed — the counts (failed/duplicates) were already tallied in the
+      // loop, but the table rows must be persisted so the operator's failure /
+      // duplicate lists match those counts.
+      await batch.flush();
+
       // Force a final "importing" tick so any rows since the last throttled
       // emit are visible before we transition phase.
       emitProgress({
@@ -804,6 +838,11 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
       }
     } catch (err) {
       logger.error({ err: err.message, import_id }, 'bulk import failed');
+      // Persist whatever failure/duplicate rows were buffered before the crash
+      // so they aren't silently lost. Best-effort — never mask the original err.
+      try { await batch.flush(); } catch (flushErr) {
+        logger.warn({ err: flushErr.message, import_id }, 'batch flush during failure handling failed');
+      }
       await tenantQuery(tenant, `UPDATE bulk_imports SET status = 'failed', completed_at = now() WHERE id = $1`, [import_id]);
     }
     return;
@@ -851,4 +890,9 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
       logger.error({ err: err.message, failure_id: data.failure_id }, 'retry_row failed');
     }
   }
-}, { concurrency: 2, jobName: '*' });
+  // concurrency: 1 — a bulk import fires many rapid per-row queries against the
+  // tenant pool (TENANT_DB_POOL_MAX=4). Running two imports at once could
+  // saturate that pool and starve interactive user requests for the tenant
+  // (the connection-exhaustion class of outage). One import at a time keeps
+  // bulk's footprint to ~1-2 connections, leaving headroom for live users.
+}, { concurrency: 1, jobName: '*' });
