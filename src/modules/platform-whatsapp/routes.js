@@ -34,6 +34,12 @@ router.put('/:tenantId/settings', validate({ params: tenantParam, body: settings
   catch (err) { next(err); }
 });
 
+// Delete/clear a tenant's WhatsApp config → admin UI shows "not configured".
+router.delete('/:tenantId/settings', validate({ params: tenantParam }), async (req, res, next) => {
+  try { res.json({ data: await repo.clearSettings(req.params.tenantId), meta: { requestId: req.id } }); }
+  catch (err) { next(err); }
+});
+
 // Messages (read-only).
 router.get('/:tenantId/chats', validate({ params: tenantParam }), async (req, res, next) => {
   try { res.json({ data: await repo.listChats(req.params.tenantId), meta: { requestId: req.id } }); }

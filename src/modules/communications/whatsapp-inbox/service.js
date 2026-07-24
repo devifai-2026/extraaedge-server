@@ -62,6 +62,20 @@ export const saveSettings = async (tenant, input) => {
   return getSettings(tenant);
 };
 
+// Wipe a tenant's WhatsApp config: clears the WABridge keys + disables the
+// integration so the admin UI reports "not configured". Keeps the row (and its
+// webhook_token) so re-enabling later doesn't churn the webhook URL.
+export const clearSettings = async (tenant) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE wa_settings SET
+       enabled = false, wabridge_app_key = '', wabridge_auth_key = '',
+       wabridge_device_id = '', business_phone = '', updated_at = now()
+     WHERE id = true`,
+  );
+  return getSettings(tenant);
+};
+
 // WABridge credentials object for the send client.
 export const credsFor = (settings) => ({ appKey: settings.appKey, authKey: settings.authKey, deviceId: settings.deviceId });
 
@@ -304,6 +318,25 @@ export const listChats = async (tenant, actor) => {
   return rows;
 };
 
+// Sidebar/dashboard badge: total unread messages + number of chats with any
+// unread, scoped to what the actor is allowed to see (same waScope as the
+// chat list). Cheap COUNT/SUM so it can be polled frequently.
+export const unreadSummary = async (tenant, actor) => {
+  const sc = await waScope(tenant, actor, 1);
+  const linkedOnly = !ALL_ACCESS_ROLES.has(actor?.role);
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT COALESCE(SUM(c.unread), 0)::int AS unread_messages,
+            COUNT(*) FILTER (WHERE c.unread > 0)::int AS unread_chats
+       FROM wa_chats c
+       LEFT JOIN leads l ON l.id = c.lead_id AND l.deleted_at IS NULL
+      WHERE c.is_group = false
+        AND ${linkedOnly ? 'c.lead_id IS NOT NULL AND' : ''} (${sc.where})`,
+    sc.params,
+  );
+  return { unread_messages: rows[0]?.unread_messages || 0, unread_chats: rows[0]?.unread_chats || 0 };
+};
+
 export const listMessages = async (tenant, actor, phone) => {
   const norm = normalizePhone(phone);
   const sc = await waScope(tenant, actor, 2);
@@ -367,6 +400,34 @@ export const listTemplates = async (tenant) => {
        FROM wa_templates ORDER BY created_at DESC`,
   );
   return rows;
+};
+
+// Build the human-readable message body for a sent template: look up the
+// locally-registered template by its provider template_id, then substitute
+// {{1}},{{2}},… with the supplied positional variables. Falls back to a
+// readable "[template <id>]" only when the template isn't registered locally,
+// so the chat thread shows the ACTUAL text we sent instead of an opaque id.
+export const renderTemplateBody = async (tenant, templateId, variables = []) => {
+  try {
+    const { rows: [tpl] } = await tenantQuery(
+      tenant,
+      `SELECT label, body FROM wa_templates WHERE template_id = $1`,
+      [String(templateId)],
+    );
+    if (tpl?.body) {
+      let text = tpl.body;
+      variables.forEach((v, idx) => {
+        text = text.replaceAll(`{{${idx + 1}}}`, v ?? '');
+      });
+      return text;
+    }
+    // Not registered locally — show label if we somehow have it, else the id
+    // plus the variables so the operator still sees what was sent.
+    const varStr = variables.length ? ` (${variables.join(', ')})` : '';
+    return `[template ${templateId}]${varStr}`;
+  } catch {
+    return `[template ${templateId}]`;
+  }
 };
 
 export const addTemplate = async (tenant, { template_id, label, body, category }, userId) => {

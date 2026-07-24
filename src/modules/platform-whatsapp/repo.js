@@ -41,6 +41,14 @@ export const saveSettings = async (tenantId, input) => {
   return { webhook_url: webhookUrl(tenant), configured: !!(saved.appKey && saved.authKey && saved.deviceId) };
 };
 
+// PO: delete a tenant's WhatsApp config. Clears keys + disables the
+// integration so the tenant's admin UI shows "not configured".
+export const clearSettings = async (tenantId) => {
+  const tenant = await requireTenant(tenantId);
+  const s = await inbox.clearSettings(tenant);
+  return { enabled: s.enabled, configured: !!(s.appKey && s.authKey && s.deviceId), webhook_url: webhookUrl(tenant) };
+};
+
 // The PO is cross-tenant all-access → view every chat (super_admin-equivalent).
 const ALL_ACCESS = { role: 'super_admin', id: null };
 

@@ -12,7 +12,7 @@ import * as wabridge from './wabridge.js';
 import {
   getSettings, saveSettings, credsFor, resolveInboxOwner, recordOutbound,
   listChats, listMessages, markChatRead, resolveChatForActor, normalizePhone,
-  listTemplates, addTemplate, deleteTemplate,
+  listTemplates, addTemplate, deleteTemplate, unreadSummary, renderTemplateBody,
 } from './service.js';
 
 const router = express.Router();
@@ -94,6 +94,14 @@ router.get('/chats/:phone/messages', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Unread summary for the sidebar dot / dashboard notification. Scoped to the
+// actor's visible chats (same rules as the chat list).
+router.get('/unread-count', async (req, res, next) => {
+  try {
+    res.json({ data: await unreadSummary(req.tenant, req.user), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 // Locally-registered templates (portal-approved id + body + variables). Used by
 // the composer's template picker. Any authed user can read; only super_admin
 // can add/delete.
@@ -156,7 +164,10 @@ router.post('/chats/:phone/send', validate({ body: sendSchema }), async (req, re
     try {
       if (req.body.type === 'template') {
         const out = await wabridge.sendTemplate(creds, { to: phone, templateId: req.body.templateId, variables: req.body.variables });
-        waMessageId = out.messageId; body = body || `[template ${req.body.templateId}]`;
+        waMessageId = out.messageId;
+        // Store the rendered template text (placeholders filled with the sent
+        // variables) so the chat thread shows the real message, not "[template id]".
+        body = body || await renderTemplateBody(req.tenant, req.body.templateId, req.body.variables || []);
       } else {
         const out = await wabridge.sendText(creds, { to: phone, message: req.body.message });
         waMessageId = out.messageId;
