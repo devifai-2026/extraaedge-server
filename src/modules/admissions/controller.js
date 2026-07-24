@@ -196,7 +196,19 @@ export const dashboard = async (req, res, next) => {
 
 export const pendingAdmissions = async (req, res, next) => {
   try {
-    const rows = await service.pendingAdmissions(req.tenant);
+    // All filters optional. Empty strings are treated as "not set".
+    const q = req.query || {};
+    const clean = (v) => (v === undefined || v === null || String(v).trim() === '' ? undefined : String(v).trim());
+    const filters = {
+      search: clean(q.search),
+      programId: clean(q.programId),
+      ownerId: clean(q.ownerId),
+      leadOwnerId: clean(q.leadOwnerId),
+      state: clean(q.state), // 'lead' | 'pending_approval' | 'on_break'
+      from: clean(q.from),   // ISO date/datetime, inclusive lower bound on event_at
+      to: clean(q.to),       // ISO date/datetime, inclusive upper bound on event_at
+    };
+    const rows = await service.pendingAdmissions(req.tenant, filters);
     res.json({
       data: rows,
       meta: { requestId: req.id, total: rows.length },

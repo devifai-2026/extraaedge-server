@@ -1107,7 +1107,37 @@ export const myStudents = async (tenant, counsellorId) => {
   return rows;
 };
 
-export const pendingAdmissions = async (tenant) => {
+// Pending-admissions queue with optional filters. All filters are applied in
+// SQL against the unified CTE so the FE never has to over-fetch. Supported
+// filter keys (all optional):
+//   search        → ILIKE match on student name / email / whatsapp
+//   programId     → exact program (course)
+//   ownerId       → the row's owner (lead.assigned_to for lead rows, the
+//                   admission's guiding counsellor for admission rows)
+//   leadOwnerId   → the underlying LEAD's assigned counsellor (leads.assigned_to)
+//   state         → 'lead' (no admission form) | 'pending_approval' | 'on_break'
+//   from / to     → inclusive date range on event_at (converted/created/break)
+export const pendingAdmissions = async (tenant, filters = {}) => {
+  const { search, programId, ownerId, leadOwnerId, state, from, to } = filters;
+  const params = [];
+  const conds = [];
+  const p = (v) => { params.push(v); return `$${params.length}`; };
+
+  if (search) {
+    const s = `%${String(search).trim()}%`;
+    conds.push(`(student_name ILIKE ${p(s)} OR email ILIKE ${p(s)} OR whatsapp_number ILIKE ${p(s)})`);
+  }
+  if (programId) conds.push(`program_id = ${p(programId)}`);
+  if (ownerId) conds.push(`owner_id = ${p(ownerId)}`);
+  if (leadOwnerId) conds.push(`lead_owner_id = ${p(leadOwnerId)}`);
+  if (state === 'lead') conds.push(`source_kind = 'lead'`);
+  else if (state === 'pending_approval') conds.push(`admission_status = 'pending_approval'`);
+  else if (state === 'on_break') conds.push(`admission_status = 'on_break'`);
+  if (from) conds.push(`event_at >= ${p(from)}`);
+  if (to) conds.push(`event_at <= ${p(to)}`);
+
+  const whereOuter = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
   const { rows } = await tenantQuery(
     tenant,
     `WITH unified AS (
@@ -1120,10 +1150,16 @@ export const pendingAdmissions = async (tenant) => {
          l.name              AS student_name,
          l.email             AS email,
          l.whatsapp_number   AS whatsapp_number,
+         l.program_id        AS program_id,
          p.name              AS program_name,
          l.converted_at      AS event_at,
          l.assigned_to       AS owner_id,
          u.name              AS owner_name,
+         -- Lead owner = the counsellor who owns the underlying lead. For lead
+         -- rows this equals owner_id; kept as its own column so the FE can show
+         -- and filter on it uniformly with admission rows.
+         l.assigned_to       AS lead_owner_id,
+         u.name              AS lead_owner_name,
          EXISTS (
            SELECT 1 FROM lead_fee_offers o WHERE o.lead_id = l.id
          )                   AS has_fee_offer,
@@ -1152,6 +1188,7 @@ export const pendingAdmissions = async (tenant) => {
          COALESCE(NULLIF(TRIM(a.first_name || ' ' || COALESCE(a.last_name, '')), ''), a.email) AS student_name,
          a.email             AS email,
          a.whatsapp_number   AS whatsapp_number,
+         a.program_id        AS program_id,
          p.name              AS program_name,
          -- For pending_approval rows the natural sort key is created_at
          -- (newest stub first). For on_break rows we use updated_at as
@@ -1161,6 +1198,11 @@ export const pendingAdmissions = async (tenant) => {
          CASE WHEN a.status = 'on_break' THEN a.updated_at ELSE a.created_at END AS event_at,
          a.guided_by_counsellor_id AS owner_id,
          u.name              AS owner_name,
+         -- Lead owner: the counsellor who owns the underlying LEAD. This can
+         -- differ from the admission's guiding counsellor (owner_id above), so
+         -- we resolve it from leads.assigned_to via a dedicated join.
+         l.assigned_to       AS lead_owner_id,
+         lu.name             AS lead_owner_name,
          -- Admission rows: an admission already exists, so the offer
          -- gate isn't relevant for this branch. Default to true so the
          -- FE doesn't gate the row buttons.
@@ -1170,10 +1212,13 @@ export const pendingAdmissions = async (tenant) => {
        FROM admissions a
        LEFT JOIN programs p ON p.id = a.program_id
        LEFT JOIN users u    ON u.id = a.guided_by_counsellor_id
+       LEFT JOIN leads l    ON l.id = a.lead_id
+       LEFT JOIN users lu   ON lu.id = l.assigned_to
        WHERE a.deleted_at IS NULL
          AND a.status IN ('pending_approval', 'on_break')
      )
-     SELECT * FROM unified ORDER BY event_at DESC NULLS LAST`,
+     SELECT * FROM unified ${whereOuter} ORDER BY event_at DESC NULLS LAST`,
+    params,
   );
   return rows;
 };

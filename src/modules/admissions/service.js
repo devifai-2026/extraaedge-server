@@ -683,7 +683,7 @@ export const dashboard = async (tenant, actor, branchId) => {
 // it only for counsellors.)
 export const myStudents = (tenant, actor) => repo.myStudents(tenant, actor?.id);
 
-export const pendingAdmissions = (tenant) => repo.pendingAdmissions(tenant);
+export const pendingAdmissions = (tenant, filters) => repo.pendingAdmissions(tenant, filters);
 export const pendingAdmissionsCount = (tenant) => repo.pendingAdmissionsCount(tenant);
 export const emiDigest = async (tenant, upcomingDays, actor) => {
   const branchId = await resolveAdmissionBranch(tenant, actor, undefined);
