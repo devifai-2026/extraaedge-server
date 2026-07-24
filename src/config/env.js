@@ -214,5 +214,10 @@ export const isDevelopment = () => env.NODE_ENV === 'development';
 
 export const corsOrigins = () =>
   env.CORS_ORIGINS.split(',')
-    .map((o) => o.trim())
+    // Strip whitespace AND stray literal escape sequences (a trailing "\n" —
+    // backslash + n as two characters — can survive in an env value that was
+    // exported/pasted with an encoded newline, and would make the last origin
+    // never match). Trim real whitespace and any leading/trailing \r or \n
+    // literals before comparing.
+    .map((o) => o.trim().replace(/^(?:\\[rn])+|(?:\\[rn])+$/g, '').trim())
     .filter(Boolean);
