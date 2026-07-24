@@ -140,47 +140,53 @@ const isDirectRun = (() => {
   }
 })();
 
+// NOTE: no top-level await here. Hostinger's Passenger loads this file with
+// require() (see lsnode.js), and require() throws ERR_REQUIRE_ASYNC_MODULE on
+// any module graph containing top-level await. So the whole bootstrap runs
+// inside an async IIFE — the module itself stays synchronous to load.
 if (isDirectRun) {
-  const { env } = await import('./config/env.js');
-  const { logger } = await import('./lib/logger.js');
-  const { initSocket } = await import('./lib/socket.js');
-  const { closeSystemPool } = await import('./db/system.js');
-  const { closeAllTenantPools } = await import('./db/tenant.js');
-  const { closeRedis } = await import('./lib/redis.js');
-  const { closeQueues } = await import('./lib/queue.js');
+  (async () => {
+    const { env } = await import('./config/env.js');
+    const { logger } = await import('./lib/logger.js');
+    const { initSocket } = await import('./lib/socket.js');
+    const { closeSystemPool } = await import('./db/system.js');
+    const { closeAllTenantPools } = await import('./db/tenant.js');
+    const { closeRedis } = await import('./lib/redis.js');
+    const { closeQueues } = await import('./lib/queue.js');
 
-  const loadInprocessWorkers = async () => {
-    if (env.QUEUE_DRIVER !== 'inprocess') return;
-    try {
-      await import('./workers/rule-processor.js');
-      await import('./workers/bulk-import-worker.js');
-      await import('./workers/notification-worker.js');
-      await import('./workers/followup-reminder-scheduler.js');
-      await import('./workers/missed-followup-scanner.js');
-      await import('./workers/lms-class-reminder.js');
-      logger.info('in-process workers loaded');
-    } catch (err) {
-      logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
-    }
-  };
+    const loadInprocessWorkers = async () => {
+      if (env.QUEUE_DRIVER !== 'inprocess') return;
+      try {
+        await import('./workers/rule-processor.js');
+        await import('./workers/bulk-import-worker.js');
+        await import('./workers/notification-worker.js');
+        await import('./workers/followup-reminder-scheduler.js');
+        await import('./workers/missed-followup-scanner.js');
+        await import('./workers/lms-class-reminder.js');
+        logger.info('in-process workers loaded');
+      } catch (err) {
+        logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
+      }
+    };
 
-  const app = buildApp();
-  const server = app.listen(env.PORT, () => {
-    logger.info({ port: env.PORT, env: env.NODE_ENV }, 'extraaedge-backend listening (app.js direct run)');
-    if (env.MOBILE_OTP_DEMO && env.NODE_ENV === 'production') {
-      logger.warn('MOBILE_OTP_DEMO is ON in production — recorder-app login accepts the fixed OTP 1234');
-    }
-    loadInprocessWorkers();
-  });
+    const app = buildApp();
+    const server = app.listen(env.PORT, () => {
+      logger.info({ port: env.PORT, env: env.NODE_ENV }, 'extraaedge-backend listening (app.js direct run)');
+      if (env.MOBILE_OTP_DEMO && env.NODE_ENV === 'production') {
+        logger.warn('MOBILE_OTP_DEMO is ON in production — recorder-app login accepts the fixed OTP 1234');
+      }
+      loadInprocessWorkers();
+    });
 
-  initSocket(server);
+    initSocket(server);
 
-  const shutdown = async (signal) => {
-    logger.info({ signal }, 'shutting down');
-    server.close();
-    await Promise.allSettled([closeQueues(), closeRedis(), closeAllTenantPools(), closeSystemPool()]);
-    process.exit(0);
-  };
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+    const shutdown = async (signal) => {
+      logger.info({ signal }, 'shutting down');
+      server.close();
+      await Promise.allSettled([closeQueues(), closeRedis(), closeAllTenantPools(), closeSystemPool()]);
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+  })();
 }
