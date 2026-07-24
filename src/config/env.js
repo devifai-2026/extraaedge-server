@@ -212,12 +212,20 @@ export const env = Object.freeze(parsed.data);
 export const isProduction = () => env.NODE_ENV === 'production';
 export const isDevelopment = () => env.NODE_ENV === 'development';
 
+// Normalize a single origin so comparison is robust to junk that creeps into
+// an exported/pasted CORS_ORIGINS value: surrounding whitespace, real control
+// chars (a literal newline = char 10, carriage return = 13), the two-char
+// escape literals "\n"/"\r", quotes, and a trailing slash. Any of these on the
+// last entry (e.g. "...onrender.com\n") made an exact includes() match fail and
+// the CORS middleware threw → 500 for that origin. We strip them all.
+export const normalizeOrigin = (s) => String(s ?? '')
+  .replace(/\\[rn]/g, '')       // literal backslash-r / backslash-n
+  .replace(/[\r\n\t]/g, '')     // real CR/LF/TAB control chars
+  .replace(/["']/g, '')         // stray quotes
+  .trim()
+  .replace(/\/+$/, '');         // trailing slash(es)
+
 export const corsOrigins = () =>
   env.CORS_ORIGINS.split(',')
-    // Strip whitespace AND stray literal escape sequences (a trailing "\n" —
-    // backslash + n as two characters — can survive in an env value that was
-    // exported/pasted with an encoded newline, and would make the last origin
-    // never match). Trim real whitespace and any leading/trailing \r or \n
-    // literals before comparing.
-    .map((o) => o.trim().replace(/^(?:\\[rn])+|(?:\\[rn])+$/g, '').trim())
+    .map(normalizeOrigin)
     .filter(Boolean);

@@ -2,7 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
-import { env, corsOrigins } from './config/env.js';
+import { env, corsOrigins, normalizeOrigin } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { requestId } from './middleware/requestId.js';
 import { requestLog } from './middleware/requestLog.js';
@@ -33,8 +33,17 @@ export const buildApp = () => {
     cors({
       origin: (origin, cb) => {
         const allowed = corsOrigins();
-        if (!origin || allowed.length === 0 || allowed.includes(origin)) return cb(null, true);
-        cb(new Error('CORS_ORIGIN_NOT_ALLOWED'));
+        // Normalize BOTH sides so a trailing slash or stray char on either the
+        // configured value or the incoming Origin header can't cause a false
+        // reject (which the error handler turns into a 500 for that origin).
+        const norm = normalizeOrigin(origin);
+        if (!origin || allowed.length === 0 || allowed.includes(norm)) return cb(null, true);
+        // A rejected CORS origin is expected traffic, not a server fault — log
+        // it and simply disable CORS headers for this response instead of
+        // throwing (throwing surfaced as an opaque 500). The browser then
+        // blocks the response client-side, which is the correct CORS behavior.
+        logger.warn({ origin }, 'CORS origin not allowed');
+        cb(null, false);
       },
       credentials: true,
       exposedHeaders: ['X-Request-Id', 'ETag', 'Last-Modified'],
