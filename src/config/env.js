@@ -219,11 +219,14 @@ export const isDevelopment = () => env.NODE_ENV === 'development';
 // last entry (e.g. "...onrender.com\n") made an exact includes() match fail and
 // the CORS middleware threw → 500 for that origin. We strip them all.
 export const normalizeOrigin = (s) => String(s ?? '')
-  .replace(/\\[rn]/g, '')       // literal backslash-r / backslash-n
   .replace(/[\r\n\t]/g, '')     // real CR/LF/TAB control chars
+  .replace(/\\[rn]/g, '')       // literal "\r" / "\n" escape sequences
   .replace(/["']/g, '')         // stray quotes
   .trim()
-  .replace(/\/+$/, '');         // trailing slash(es)
+  .replace(/[\\/]+$/g, '')      // trailing backslashes AND slashes (an exported
+                                // "\n" that lost its "n" leaves a bare "\" on the
+                                // last origin — the exact bug we hit)
+  .trim();
 
 export const corsOrigins = () =>
   env.CORS_ORIGINS.split(',')

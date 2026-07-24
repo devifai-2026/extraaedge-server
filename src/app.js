@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -142,6 +143,13 @@ export const buildApp = () => {
 // does NOT trigger this block, so there is no double-listen.
 const isDirectRun = (() => {
   try {
+    // Hostinger Passenger (lsnode.js) requires this file but sets process.argv[1]
+    // to lsnode.js, so the argv comparison below is false there. Detect Passenger
+    // explicitly via its env vars so the bootstrap (which calls listen) runs.
+    if (process.env.LSNODE_STARTUP_FILE || process.env.LSNODE_SOCKET
+        || process.env.LSNODE_ROOT || process.env.LSNODE_CONSOLE_LOG) {
+      return true;
+    }
     const entry = process.argv[1] ? new URL(`file://${process.argv[1]}`).pathname : '';
     return import.meta.url === `file://${entry}` || entry.endsWith('/src/app.js');
   } catch {
@@ -154,17 +162,44 @@ const isDirectRun = (() => {
 // any module graph containing top-level await. So the whole bootstrap runs
 // inside an async IIFE — the module itself stays synchronous to load.
 if (isDirectRun) {
-  (async () => {
-    const { env } = await import('./config/env.js');
-    const { logger } = await import('./lib/logger.js');
-    const { initSocket } = await import('./lib/socket.js');
-    const { closeSystemPool } = await import('./db/system.js');
-    const { closeAllTenantPools } = await import('./db/tenant.js');
-    const { closeRedis } = await import('./lib/redis.js');
-    const { closeQueues } = await import('./lib/queue.js');
+  // Hostinger's Passenger (lsnode.js) hijacks http.Server.prototype.listen and,
+  // right after require() of this file returns, checks whether listen() was
+  // already called. If not, it looks for an EXPORTED app to call listen on.
+  // Anything we do in an async IIFE runs AFTER require() returns — too late for
+  // that check, so the app never binds Passenger's socket → "did not call
+  // listen() within 3 seconds" → 503.
+  //
+  // Therefore build the Express app and call listen() SYNCHRONOUSLY during
+  // require. buildApp() is synchronous (its awaits are inside route handlers),
+  // so this is safe. Everything non-critical (socket.io, in-process workers,
+  // signal handlers) is deferred to a microtask AFTER listen so it can't delay
+  // the bind. config/env + logger are loaded via createRequire (sync) to keep
+  // the module graph free of top-level await.
+  const require = createRequire(import.meta.url);
+  const { env } = require('./config/env.js');
+  const { logger } = require('./lib/logger.js');
 
-    const loadInprocessWorkers = async () => {
-      if (env.QUEUE_DRIVER !== 'inprocess') return;
+  const app = buildApp();
+  // Passenger's customListen ignores the port and binds LSNODE_SOCKET; passing
+  // env.PORT keeps this correct when run standalone (Render/local) too.
+  const server = app.listen(env.PORT, () => {
+    logger.info({ port: env.PORT, env: env.NODE_ENV }, 'extraaedge-backend listening (app.js direct run)');
+    if (env.MOBILE_OTP_DEMO && env.NODE_ENV === 'production') {
+      logger.warn('MOBILE_OTP_DEMO is ON in production — recorder-app login accepts the fixed OTP 1234');
+    }
+  });
+
+  // Deferred, non-blocking startup: attach socket.io, load in-process workers,
+  // wire shutdown. Runs after listen() has already satisfied Passenger.
+  Promise.resolve().then(async () => {
+    try {
+      const { initSocket } = await import('./lib/socket.js');
+      initSocket(server);
+    } catch (err) {
+      logger.error({ err: err.message }, 'socket init failed');
+    }
+
+    if (env.QUEUE_DRIVER === 'inprocess') {
       try {
         await import('./workers/rule-processor.js');
         await import('./workers/bulk-import-worker.js');
@@ -176,26 +211,21 @@ if (isDirectRun) {
       } catch (err) {
         logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
       }
-    };
-
-    const app = buildApp();
-    const server = app.listen(env.PORT, () => {
-      logger.info({ port: env.PORT, env: env.NODE_ENV }, 'extraaedge-backend listening (app.js direct run)');
-      if (env.MOBILE_OTP_DEMO && env.NODE_ENV === 'production') {
-        logger.warn('MOBILE_OTP_DEMO is ON in production — recorder-app login accepts the fixed OTP 1234');
-      }
-      loadInprocessWorkers();
-    });
-
-    initSocket(server);
+    }
 
     const shutdown = async (signal) => {
       logger.info({ signal }, 'shutting down');
       server.close();
-      await Promise.allSettled([closeQueues(), closeRedis(), closeAllTenantPools(), closeSystemPool()]);
+      try {
+        const { closeSystemPool } = await import('./db/system.js');
+        const { closeAllTenantPools } = await import('./db/tenant.js');
+        const { closeRedis } = await import('./lib/redis.js');
+        const { closeQueues } = await import('./lib/queue.js');
+        await Promise.allSettled([closeQueues(), closeRedis(), closeAllTenantPools(), closeSystemPool()]);
+      } catch { /* best effort */ }
       process.exit(0);
     };
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('SIGINT', () => shutdown('SIGINT'));
-  })();
+  });
 }
