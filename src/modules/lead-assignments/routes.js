@@ -107,6 +107,22 @@ router.post(
       const { lead_id, assigned_to, assignment_type, reason } = req.body;
       const { forbidden } = await import('../../lib/errors.js');
 
+      // INVARIANT: leads.assigned_to must always point to an ACTIVE COUNSELLOR.
+      // Managers/admins own a TEAM of counsellors, they don't carry leads in
+      // their own queue. Without this check a branch_manager/sales_manager could
+      // reassign leads onto THEMSELVES (teamHierarchy includes the manager, so
+      // the scope check below passes for a self-target) — which is exactly the
+      // mass "all leads → one branch manager" incident. Reject any non-counsellor
+      // target here, before we touch the lead.
+      const { rows: targetRows } = await tenantQuery(
+        req.tenant,
+        `SELECT 1 FROM users WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
+        [assigned_to],
+      );
+      if (!targetRows[0]) {
+        throw forbidden('Leads can only be assigned to an active counsellor');
+      }
+
       // Sales-manager scope: the new owner must be inside this manager's team
       // hierarchy. Admins can reassign to any active counsellor.
       if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {

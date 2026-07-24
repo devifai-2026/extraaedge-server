@@ -296,6 +296,14 @@ export const bulkAssignSchema = z.object({
   }).optional(),
   assigned_to: z.string().uuid(),
   reason: z.string().optional(),
-}).refine((v) => (v.lead_ids && v.lead_ids.length > 0) || v.filter, {
-  message: 'Either lead_ids or filter must be provided',
+}).refine((v) => {
+  // Must target an explicit list, OR a filter with at least one real field
+  // set. An all-empty/all-undefined filter means "every lead in scope" — the
+  // shape that let one request reassign the whole tenant. Reject it: bulk
+  // assign has to be deliberately scoped.
+  if (v.lead_ids && v.lead_ids.length > 0) return true;
+  if (v.filter && Object.values(v.filter).some((x) => x !== undefined && x !== null && x !== '')) return true;
+  return false;
+}, {
+  message: 'Provide lead_ids, or a filter with at least one field — a blank filter is not allowed (it would select every lead)',
 });

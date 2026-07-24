@@ -1339,6 +1339,18 @@ export const stageCounts = async (tenant, opts = {}, scope) => {
 // stage (lowest order_index). This matches the "Fresh → Untouched → Working"
 // lifecycle and prevents leads from sitting in "no stage" once they have an owner.
 export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, reason, filter, scope }) => tenantTx(tenant, async (client) => {
+  // INVARIANT: leads.assigned_to must be an active counsellor (managers own a
+  // team, not leads). Reject a non-counsellor target before touching any lead —
+  // this is what stops "reassign everything onto a branch_manager".
+  const { rows: tgt } = await client.query(
+    `SELECT 1 FROM users WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
+    [assigned_to],
+  );
+  if (!tgt[0]) {
+    const err = new Error('Leads can only be assigned to an active counsellor');
+    err.status = 403; err.code = 'FORBIDDEN'; err.isAppError = true;
+    throw err;
+  }
   let ids = lead_ids ?? null;
   if (!ids) {
     const conds = ['deleted_at IS NULL'];

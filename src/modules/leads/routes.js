@@ -56,7 +56,15 @@ router.get(
 // stage-counts honors the same advanced-filter query params as /leads so the
 // tab labels update when the user applies a filter in the LeadList.
 router.get('/stage-counts', validate({ query: listQuery }), controller.stageCounts);
-router.post('/bulk-assign', validate({ body: bulkAssignSchema }), controller.bulkAssign);
+// Bulk (re)assign. Managers/admins only — counsellors can't mass-move leads.
+// The schema (bulkAssignSchema) additionally rejects an all-empty filter so a
+// blank request can't silently select every lead in scope.
+router.post(
+  '/bulk-assign',
+  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER),
+  validate({ body: bulkAssignSchema }),
+  controller.bulkAssign,
+);
 
 // Bulk hard-delete. Super-admin ONLY — counsellors / managers don't even
 // see the button on the FE, but we enforce here too because the FE check
