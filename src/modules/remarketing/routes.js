@@ -13,6 +13,26 @@ router.use(authRequired, tenantRequired);
 
 const idParam = z.object({ id: z.string().uuid() });
 
+// ── Per-tenant Facebook app settings (App ID + App Secret) ──
+const fbSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  app_id: z.string().max(64).optional(),
+  app_secret: z.string().max(128).optional(),
+  graph_version: z.string().max(16).optional(),
+});
+router.get('/fb-settings', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), async (req, res, next) => {
+  try {
+    const { getFbSettings } = await import('./fb-settings.js');
+    res.json({ data: await getFbSettings(req.tenant), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+router.put('/fb-settings', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: fbSettingsSchema }), async (req, res, next) => {
+  try {
+    const { saveFbSettings } = await import('./fb-settings.js');
+    res.json({ data: await saveFbSettings(req.tenant, req.body), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 // Audiences
 router.get('/audiences', async (req, res, next) => {
   try { const { rows } = await tenantQuery(req.tenant, `SELECT * FROM fb_audiences WHERE deleted_at IS NULL ORDER BY created_at DESC`); res.json({ data: rows, meta: { requestId: req.id } }); }
