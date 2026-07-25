@@ -15,6 +15,28 @@ Everything is **per-tenant**: each institute connects its own Page / ad account
 
 ---
 
+## Part 0 — "Connect with Facebook" (OAuth) — RECOMMENDED, no manual values
+
+The Remarketing page has a **"Connect with Facebook"** button. The user clicks
+it, logs in, clicks Allow, and the CRM auto-discovers their ad accounts + Pages
+and stores the tokens — no pasting IDs/tokens. To enable it (once, server-side):
+
+1. **Server env vars** (Hostinger → Environment variables):
+   - `FB_APP_ID = 562625862658786`  (the "Speedup InfoTech" app)
+   - `FB_APP_SECRET = <App Secret>`  (Meta app → App settings → Basic → Show)
+   - (optional) `FB_GRAPH_VERSION = v19.0`
+2. **Meta app → Facebook Login for Business → Settings** → add this exact
+   **Valid OAuth Redirect URI**:
+   `https://admissioncrm.live/api/v1/remarketing/oauth/callback`
+3. **App roles** → add the client's team as **Testers/Admins** so it works in
+   Development mode without App Review.
+4. Redeploy the server (so it picks up the env vars).
+
+That's it — users click "Connect with Facebook" and pick nothing manually. The
+manual token form (Parts A–D below) remains as an advanced fallback / reference.
+
+---
+
 ## Part A — Create the Meta App (once)
 
 1. Go to <https://developers.facebook.com/apps> → **Create App** → type **Business**.
