@@ -13,7 +13,7 @@ import {
   getSettings, saveSettings, credsFor, resolveInboxOwner, recordOutbound,
   listChats, listMessages, markChatRead, resolveChatForActor, normalizePhone,
   listTemplates, addTemplate, deleteTemplate, unreadSummary, renderTemplateBody,
-  linkChatToLead,
+  linkChatToLead, deleteChat,
 } from './service.js';
 
 const router = express.Router();
@@ -229,6 +229,17 @@ router.patch('/chats/:phone/read', async (req, res, next) => {
   try {
     await markChatRead(req.tenant, req.user, req.params.phone);
     res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// Hard-delete an entire conversation (messages + chat row). super_admin only.
+// The linked lead is left intact — this only clears the WhatsApp thread.
+router.delete('/chats/:phone', requireRole('super_admin'), async (req, res, next) => {
+  try {
+    const phone = normalizePhone(req.params.phone);
+    if (!phone) throw forbidden('Invalid phone number');
+    const result = await deleteChat(req.tenant, phone);
+    res.json({ data: result, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

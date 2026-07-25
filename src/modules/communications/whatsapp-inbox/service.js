@@ -8,7 +8,7 @@
 // CRM lead.
 import { nanoid } from 'nanoid';
 import { logger } from '../../../lib/logger.js';
-import { tenantQuery } from '../../../db/tenant.js';
+import { tenantQuery, tenantTx } from '../../../db/tenant.js';
 import { putObject, buildKey } from '../../../lib/r2.js';
 import { notifyAdmins } from '../../../lib/socket.js';
 import { downloadMedia, markRead } from './meta.js';
@@ -402,6 +402,23 @@ export const markChatRead = async (tenant, actor, phone) => {
   const chat = await resolveChatForActor(tenant, actor, phone);
   if (!chat) return;
   await tenantQuery(tenant, `UPDATE wa_chats SET unread = 0 WHERE id = $1`, [chat.id]).catch(() => {});
+};
+
+// Hard-delete a conversation: every wa_messages row for the number's chat(s),
+// then the wa_chats row(s) themselves. There can be more than one chat row per
+// phone (keyed per owner), so we match by phone. The linked lead (if any) is
+// intentionally left untouched — this only clears the WhatsApp thread.
+// super_admin-gated at the route. Returns counts for the response/log.
+export const deleteChat = async (tenant, phone) => {
+  const norm = normalizePhone(phone);
+  return tenantTx(tenant, async (client) => {
+    const { rows: chats } = await client.query(`SELECT id FROM wa_chats WHERE phone = $1`, [norm]);
+    const ids = chats.map((c) => c.id);
+    if (!ids.length) return { chats: 0, messages: 0 };
+    const del = await client.query(`DELETE FROM wa_messages WHERE chat_id = ANY($1::uuid[])`, [ids]);
+    await client.query(`DELETE FROM wa_chats WHERE id = ANY($1::uuid[])`, [ids]);
+    return { chats: ids.length, messages: del.rowCount || 0 };
+  });
 };
 
 // ── local templates (wa_templates) ──────────────────────────────
