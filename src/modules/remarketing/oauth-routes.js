@@ -14,6 +14,7 @@ import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { resolveTenantById, tenantQuery } from '../../db/tenant.js';
+import { sysQuery } from '../../db/system.js';
 import { encrypt, hmac, safeEqual } from '../../lib/crypto.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
@@ -109,6 +110,20 @@ router.get('/oauth/callback', async (req, res) => {
           st.u,
         ],
       ).catch((e) => logger.warn({ err: e.message }, 'store fb page integration failed'));
+      // Resolve the integration id we just created for this page, then register
+      // the page_id -> tenant map (system DB) so the single app-level Lead Ads
+      // webhook can route this page's events to this tenant.
+      const { rows: igRows } = await tenantQuery(
+        tenant,
+        `SELECT id FROM integrations WHERE type='facebook_ads' AND config_json->>'page_id' = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`,
+        [pg.id],
+      ).catch(() => ({ rows: [] }));
+      await sysQuery(
+        `INSERT INTO fb_page_tenants (page_id, tenant_id, integration_id, updated_at)
+         VALUES ($1,$2,$3, now())
+         ON CONFLICT (page_id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, integration_id = EXCLUDED.integration_id, updated_at = now()`,
+        [pg.id, tenant.id, igRows[0]?.id ?? null],
+      ).catch((e) => logger.warn({ err: e.message }, 'store page->tenant map failed'));
       await subscribePageToLeadgen(pg.id, pg.access_token).catch(() => {});
     }
 

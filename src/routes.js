@@ -66,6 +66,7 @@ import integrationsRouter from './modules/integrations/routes.js';
 import outboundWebhooksRouter from './modules/outbound-webhooks/routes.js';
 import remarketingRouter from './modules/remarketing/routes.js';
 import remarketingOauthRouter from './modules/remarketing/oauth-routes.js';
+import facebookWebhookRouter from './modules/integrations/facebook-webhook-routes.js';
 import ticketsRouter from './modules/tickets/routes.js';
 import auditLogRouter from './modules/audit-log/routes.js';
 import analyticsRouter from './modules/analytics/routes.js';
@@ -169,6 +170,11 @@ export const mountRoutes = (app) => {
   api.use('/bulk/leads', bulkIngestionRouter);
   api.use('/raw-data', rawDataRouter);
   api.use('/failed-leads', failedLeadsRouter);
+
+  // Facebook Lead Ads app-level webhook — UNauthenticated (Meta calls it).
+  // ONE URL for all pages; routes by page_id → tenant. Mounted here (outside
+  // any auth chain) so /facebook/webhook resolves without a JWT.
+  api.use('/facebook', facebookWebhookRouter);
 
   // Communications
   api.use('/email', emailRouter);

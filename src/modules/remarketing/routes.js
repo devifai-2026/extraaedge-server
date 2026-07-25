@@ -33,6 +33,17 @@ router.put('/fb-settings', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
   } catch (err) { next(err); }
 });
 
+// The app-level Lead Ads webhook URL + verify token to paste into the Meta App
+// (App Dashboard → Webhooks → Page). Same for all tenants (one app webhook);
+// routing to the tenant happens by page_id.
+router.get('/fb-webhook-info', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), async (req, res, next) => {
+  try {
+    const { fbVerifyToken } = await import('../integrations/facebook-webhook-routes.js');
+    const base = (process.env.BASE_URL || '').replace(/\/+$/, '');
+    res.json({ data: { url: `${base}/api/v1/facebook/webhook`, verify_token: fbVerifyToken() }, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 // Audiences
 router.get('/audiences', async (req, res, next) => {
   try { const { rows } = await tenantQuery(req.tenant, `SELECT * FROM fb_audiences WHERE deleted_at IS NULL ORDER BY created_at DESC`); res.json({ data: rows, meta: { requestId: req.id } }); }
