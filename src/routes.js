@@ -65,6 +65,7 @@ import attributionRouter from './modules/attribution/routes.js';
 import integrationsRouter from './modules/integrations/routes.js';
 import outboundWebhooksRouter from './modules/outbound-webhooks/routes.js';
 import remarketingRouter from './modules/remarketing/routes.js';
+import remarketingOauthRouter from './modules/remarketing/oauth-routes.js';
 import ticketsRouter from './modules/tickets/routes.js';
 import auditLogRouter from './modules/audit-log/routes.js';
 import analyticsRouter from './modules/analytics/routes.js';
@@ -207,6 +208,10 @@ export const mountRoutes = (app) => {
   // Integrations, tickets, audit, analytics, reports, work-sessions
   api.use('/integrations', integrationsRouter);
   api.use('/outbound-webhooks', outboundWebhooksRouter);
+  // FB OAuth (mounted BEFORE the authed remarketing router so the unauthenticated
+  // /remarketing/oauth/callback — hit by Facebook's browser redirect — resolves
+  // here instead of the auth chain).
+  api.use('/remarketing', remarketingOauthRouter);
   api.use('/remarketing', remarketingRouter);
   api.use('/tickets', ticketsRouter);
   api.use('/audit-log', auditLogRouter);

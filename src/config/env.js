@@ -193,6 +193,17 @@ const schema = z.object({
   AXIOM_DATASET: z.string().optional().default(''),
   METRICS_ENABLED: boolLike.default(true),
 
+  // ── Facebook / Meta app (ONE app across tenants; per-tenant tokens/ad
+  // accounts are stored per-tenant). Used for the "Connect with Facebook"
+  // OAuth flow (Marketing API audiences + Lead Ads). Leave blank to disable
+  // OAuth (the manual-token connect still works). FB_GRAPH_VERSION defaults to
+  // a current Graph version. ──
+  FB_APP_ID: z.string().optional().default(''),
+  FB_APP_SECRET: z.string().optional().default(''),
+  FB_GRAPH_VERSION: z.string().optional().default('v19.0'),
+  // Optional override for the OAuth redirect origin; defaults to BASE_URL.
+  FB_OAUTH_REDIRECT_BASE: z.string().optional().default(''),
+
   DEFAULT_TENANT_TIMEZONE: stringNonEmpty.default('Asia/Kolkata'),
   DEFAULT_TENANT_CURRENCY: stringNonEmpty.default('INR'),
   DEFAULT_TENANT_LANGUAGE: stringNonEmpty.default('en'),
