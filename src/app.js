@@ -225,6 +225,8 @@ if (isDirectRun) {
         await import('./workers/outbound-webhook-dispatcher.js');
         await import('./workers/attribution-snapshotter.js');
         await import('./workers/touch-recorder.js');
+        // Facebook Custom Audiences sync (remarketing outbound).
+        await import('./workers/remarketing-sync.js');
         logger.info('in-process workers loaded (incl. marketing engine)');
       } catch (err) {
         logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
