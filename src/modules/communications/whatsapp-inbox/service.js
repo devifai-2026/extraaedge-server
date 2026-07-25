@@ -79,6 +79,18 @@ export const clearSettings = async (tenant) => {
 // WABridge credentials object for the send client.
 export const credsFor = (settings) => ({ appKey: settings.appKey, authKey: settings.authKey, deviceId: settings.deviceId });
 
+// Link every chat row for a phone to a lead id (chats are keyed per owner+jid,
+// so there can be more than one row for the same number). Used when an operator
+// creates a lead from an unlinked chat.
+export const linkChatToLead = async (tenant, phone, leadId) => {
+  const norm = normalizePhone(phone);
+  await tenantQuery(
+    tenant,
+    `UPDATE wa_chats SET lead_id = $2 WHERE phone = $1`,
+    [norm, leadId],
+  );
+};
+
 // The shared inbox owner for a tenant = its (first) super_admin.
 const ownerCache = new Map(); // tenantId -> userId
 export const resolveInboxOwner = async (tenant) => {

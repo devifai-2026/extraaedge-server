@@ -13,6 +13,7 @@ import {
   getSettings, saveSettings, credsFor, resolveInboxOwner, recordOutbound,
   listChats, listMessages, markChatRead, resolveChatForActor, normalizePhone,
   listTemplates, addTemplate, deleteTemplate, unreadSummary, renderTemplateBody,
+  linkChatToLead,
 } from './service.js';
 
 const router = express.Router();
@@ -101,6 +102,46 @@ router.get('/unread-count', async (req, res, next) => {
     res.json({ data: await unreadSummary(req.tenant, req.user), meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
+
+// Create a CRM lead from an existing (unlinked) chat and assign it to a chosen
+// counsellor, then link every chat row for that number to the new lead. Admins
+// and account_managers only — they can assign to anyone; managers/counsellors
+// shouldn't mint arbitrary owners from here.
+const createLeadSchema = z.object({
+  name: z.string().min(1).max(200),
+  assigned_to: z.string().uuid(),
+  email: z.string().email().optional().or(z.literal('')),
+});
+router.post('/chats/:phone/create-lead',
+  requireRole('super_admin', 'account_manager'),
+  validate({ body: createLeadSchema }),
+  async (req, res, next) => {
+    try {
+      const phone = normalizePhone(req.params.phone);
+      if (!phone) throw forbidden('Invalid phone number');
+      // Lazy import avoids a circular dep (leads/service ↔ whatsapp-inbox).
+      const { createLead } = await import('../../leads/service.js');
+      // Assign directly to the picked counsellor; skip round-robin so the
+      // operator's choice is honored. on_duplicate:warn returns matches instead
+      // of throwing if the number already has a lead (shouldn't, since this is
+      // for unlinked chats, but be safe).
+      const lead = await createLead(
+        req.tenant,
+        req.user,
+        {
+          name: req.body.name,
+          whatsapp_number: phone,
+          phone,
+          email: req.body.email || undefined,
+          assigned_to: req.body.assigned_to,
+          first_touch_source: 'whatsapp',
+        },
+        { on_duplicate: 'warn', skip_auto_assign: true },
+      );
+      if (lead?.id) await linkChatToLead(req.tenant, phone, lead.id);
+      res.status(201).json({ data: { lead_id: lead?.id ?? null }, meta: { requestId: req.id } });
+    } catch (err) { next(err); }
+  });
 
 // Locally-registered templates (portal-approved id + body + variables). Used by
 // the composer's template picker. Any authed user can read; only super_admin
