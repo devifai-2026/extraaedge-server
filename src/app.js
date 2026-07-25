@@ -203,11 +203,29 @@ if (isDirectRun) {
       try {
         await import('./workers/rule-processor.js');
         await import('./workers/bulk-import-worker.js');
+        await import('./workers/bulk-export-worker.js');
         await import('./workers/notification-worker.js');
         await import('./workers/followup-reminder-scheduler.js');
         await import('./workers/missed-followup-scanner.js');
         await import('./workers/lms-class-reminder.js');
-        logger.info('in-process workers loaded');
+        // ── Marketing / campaign engine ──
+        // These consume the EMAIL/SMS/CAMPAIGN/DRIP/SCHEDULED_SEND/WORKFLOW
+        // queues (email-sender/sms-sender) and run the polling schedulers
+        // (drip, scheduled-send). Without them, campaign/drip/workflow/
+        // scheduled-send jobs are enqueued but never executed — the modules
+        // look "hardcoded"/dead. run-all.js imports the same set for the
+        // dedicated worker process; we load them in-process on Hostinger.
+        await import('./workers/email-sender.js');
+        await import('./workers/sms-sender.js');
+        await import('./workers/campaign-runner.js');
+        await import('./workers/drip-scheduler.js');
+        await import('./workers/scheduled-send-runner.js');
+        await import('./workers/workflow-executor.js');
+        // Outbound webhooks + attribution/touch bookkeeping that campaigns rely on.
+        await import('./workers/outbound-webhook-dispatcher.js');
+        await import('./workers/attribution-snapshotter.js');
+        await import('./workers/touch-recorder.js');
+        logger.info('in-process workers loaded (incl. marketing engine)');
       } catch (err) {
         logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
       }
