@@ -65,11 +65,24 @@ router.post('/:slug', express.json({ limit: '2mb' }), (req, res) => {
 
       const body = req.body || {};
 
-      // ── Meta envelope ──
-      if (body.object === 'whatsapp_business_account') {
-        for (const entry of body.entry || []) {
+      // ── Meta / Meta-style-nested envelope ──
+      // Meta Cloud API sends { object:'whatsapp_business_account', entry:[{changes:[...]}] }.
+      // Some WABridge accounts forward the SAME nested shape but WITHOUT the
+      // top-level `object`/`entry` wrapper — instead a top-level `changes:[...]`
+      // (each with value.messages[]). Handle all three: entry-wrapped, and
+      // bare top-level changes. If we find any Meta-style `changes`, process
+      // them here rather than falling through to the flat parser.
+      const metaEntries = body.object === 'whatsapp_business_account'
+        ? (body.entry || [])
+        : (Array.isArray(body.changes) ? [{ changes: body.changes }] : (body.entry || []));
+      const hasMetaChanges = metaEntries.some((e) => Array.isArray(e?.changes));
+      if (hasMetaChanges) {
+        logger.info({ slug: req.params.slug, raw: JSON.stringify(body).slice(0, 1500) }, 'wa webhook Meta-nested payload');
+        let stored = 0;
+        for (const entry of metaEntries) {
           for (const change of entry.changes || []) {
-            if (change.field !== 'messages') continue;
+            // Some senders omit `field`; only skip when it's explicitly non-messages.
+            if (change.field && change.field !== 'messages') continue;
             const value = change.value || {};
             for (const st of value.statuses || []) await applyStatus(tenant, st.id, st.status);
             const senderName = value.contacts?.[0]?.profile?.name || null;
@@ -80,9 +93,11 @@ router.post('/:slug', express.json({ limit: '2mb' }), (req, res) => {
                 mediaId: p.mediaId, mimeType: p.mimeType,
                 timestamp: msg.timestamp ? parseInt(msg.timestamp, 10) * 1000 : Date.now(), senderName,
               });
+              stored += 1;
             }
           }
         }
+        logger.info({ slug: req.params.slug, stored }, 'wa webhook (Meta-nested) processed');
         return;
       }
 
