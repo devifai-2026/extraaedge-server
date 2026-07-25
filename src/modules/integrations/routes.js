@@ -103,9 +103,60 @@ router.post('/inbound/:token', express.json({ limit: '2mb', verify: (req, _res, 
         return;
       }
 
-      // ── Generic custom inbound ── (future: map arbitrary JSON → createLead via
-      // inbound_webhooks.field_mapping_json). Logged above; no-op for now.
-      logger.info({ tenantId: tenant.id, type: integration?.type }, 'inbound webhook received (no handler)');
+      // ── Generic flat-JSON inbound ── (LeadsBridge / Zapier / custom): map a
+      // flat payload to a lead and create it. Field mapping comes from the
+      // integration config (config_json.field_mapping) with sensible defaults;
+      // we also accept many common key spellings so no mapping is required.
+      const cfg = integration?.config_json || {};
+      const map = cfg.field_mapping || {};
+      // LeadsBridge sometimes nests the lead under `data`; accept both.
+      const flat = (body && typeof body === 'object' && body.data && typeof body.data === 'object') ? { ...body, ...body.data } : body;
+      const lower = {};
+      for (const [k, v] of Object.entries(flat || {})) lower[String(k).toLowerCase().replace(/[\s-]+/g, '_')] = v;
+      const pickField = (crmKey, candidates) => {
+        const mapped = map[crmKey] && lower[String(map[crmKey]).toLowerCase().replace(/[\s-]+/g, '_')];
+        if (mapped != null && mapped !== '') return mapped;
+        for (const c of candidates) if (lower[c] != null && lower[c] !== '') return lower[c];
+        return null;
+      };
+      const name = pickField('name', ['full_name', 'name', 'fullname', 'first_name']);
+      const email = pickField('email', ['email', 'email_address', 'e_mail']);
+      const phoneRaw = pickField('phone', ['phone_number', 'phone', 'mobile', 'mobile_number', 'contact_number']);
+      const digits = phoneRaw ? String(phoneRaw).replace(/\D/g, '') : null;
+      if (!email && !digits) {
+        logger.warn({ tenantId: tenant.id, keys: Object.keys(lower) }, 'inbound webhook: no email/phone found — cannot create lead');
+        return;
+      }
+      const whatsapp = digits ? (digits.length === 10 ? `91${digits}` : digits) : null;
+      const channelName = cfg.default_channel || 'Facebook';
+      const sourceName = cfg.default_source || 'Facebook Lead Ads';
+      // Resolve/auto-create attribution dictionary ids.
+      const dictId = async (table, nm) => {
+        if (!nm) return null;
+        const { rows: f } = await tenantQuery(tenant, `SELECT id FROM ${table} WHERE lower(name)=lower($1) AND deleted_at IS NULL LIMIT 1`, [nm]);
+        if (f[0]) return f[0].id;
+        const { rows: c } = await tenantQuery(tenant, `INSERT INTO ${table} (name) VALUES ($1) RETURNING id`, [nm]);
+        return c[0]?.id ?? null;
+      };
+      const channelId = await dictId('lead_channels', channelName);
+      const sourceId = await dictId('lead_sources_dict', sourceName);
+      const input = {
+        name: name || `Facebook Lead ${digits || email || ''}`.trim(),
+        email: email || undefined,
+        phone: digits || undefined,
+        whatsapp_number: whatsapp || undefined,
+        first_touch_channel: channelName,
+        first_touch_source: sourceName,
+        sources: [{ channel_id: channelId, source_id: sourceId, is_primary: true }],
+      };
+      if (cfg.default_stage) input.stage_id = cfg.default_stage;
+      try {
+        const { createLead } = await import('../leads/service.js');
+        const created = await createLead(tenant, null, input, { on_duplicate: 'warn' });
+        logger.info({ tenantId: tenant.id, leadId: created?.id, source: 'inbound-webhook' }, 'inbound webhook lead created');
+      } catch (e) {
+        logger.error({ tenantId: tenant.id, err: e.message }, 'inbound webhook lead create failed');
+      }
     } catch (err) {
       logger.error({ err: err.message }, 'inbound webhook processing failed');
     }
