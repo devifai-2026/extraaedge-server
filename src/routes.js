@@ -59,6 +59,8 @@ import campaignsBulkRouter from './modules/campaigns-bulk/routes.js';
 import campaignsDripRouter from './modules/campaigns-drip/routes.js';
 import slaRouter from './modules/sla/routes.js';
 import referralsRouter from './modules/referrals/routes.js';
+import feedbackRouter from './modules/feedback/routes.js';
+import platformFeedbackRouter from './modules/platform-feedback/routes.js';
 import attributionRouter from './modules/attribution/routes.js';
 import integrationsRouter from './modules/integrations/routes.js';
 import outboundWebhooksRouter from './modules/outbound-webhooks/routes.js';
@@ -113,6 +115,8 @@ export const mountRoutes = (app) => {
   api.use('/platform/audit-log', platformAuditRouter);
   // Danger Request Log — full cross-tenant API activity (product_owner only).
   api.use('/platform/request-log', platformRequestLogRouter);
+  // Cross-tenant user-feedback viewer (product_owner only).
+  api.use('/platform/feedback', platformFeedbackRouter);
   // Recorder-app rollout metrics — APK account setups + per-number upload counts.
   api.use('/platform/recorder-metrics', platformRecorderMetricsRouter);
   // Cross-tenant lead inspector — drill into any tenant's lead + bulk imports.
@@ -196,6 +200,8 @@ export const mountRoutes = (app) => {
   api.use('/campaigns/drip', campaignsDripRouter);
   api.use('/sla-policies', slaRouter);
   api.use('/referrals', referralsRouter);
+  // In-app feedback popup (tenant users).
+  api.use('/feedback', feedbackRouter);
   api.use('/analytics/attribution', attributionRouter);
 
   // Integrations, tickets, audit, analytics, reports, work-sessions
