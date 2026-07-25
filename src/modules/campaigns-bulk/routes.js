@@ -8,6 +8,7 @@ import { tenantQuery } from '../../db/tenant.js';
 import { SYSTEM_TENANT_ROLES, QUEUE_NAMES, EVENT_TYPES } from '../../config/constants.js';
 import { notFound, forbidden } from '../../lib/errors.js';
 import { publish } from '../../lib/queue.js';
+import { countAudience } from '../../lib/audience.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -159,17 +160,11 @@ router.get('/:id/recipients', validate({ params: idParam }), async (req, res, ne
 
 router.post('/:id/preview', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
-    // Count how many leads currently match the filter — stubs complex filter JSON → single count query.
+    // Count how many leads currently match the filter — shared audience resolver.
     const { rows: [c] } = await tenantQuery(req.tenant, `SELECT audience_filter_json FROM campaigns_bulk WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
     if (!c) throw notFound('Campaign not found');
-    const filter = c.audience_filter_json ?? {};
-    const conds = ['deleted_at IS NULL'];
-    const params = [];
-    if (filter.stage_ids) { params.push(filter.stage_ids); conds.push(`stage_id = ANY($${params.length}::uuid[])`); }
-    if (filter.program_ids) { params.push(filter.program_ids); conds.push(`program_id = ANY($${params.length}::uuid[])`); }
-    if (filter.assigned_to) { params.push(filter.assigned_to); conds.push(`assigned_to = ANY($${params.length}::uuid[])`); }
-    const { rows } = await tenantQuery(req.tenant, `SELECT count(*)::int AS n FROM leads WHERE ${conds.join(' AND ')}`, params);
-    res.json({ data: { audience_count: rows[0].n }, meta: { requestId: req.id } });
+    const n = await countAudience(tenantQuery, req.tenant, c.audience_filter_json ?? {});
+    res.json({ data: { audience_count: n }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

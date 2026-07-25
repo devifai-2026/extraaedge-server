@@ -2,6 +2,7 @@ import { registerWorker, publish } from '../lib/queue.js';
 import { QUEUE_NAMES } from '../config/constants.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { logger } from '../lib/logger.js';
+import { buildAudienceWhere } from '../lib/audience.js';
 
 // WhatsApp is no longer an automated channel — it's per-user manual chat only
 // (whatsapp-web.js, personal numbers). Automated campaign/drip/workflow sends
@@ -15,13 +16,9 @@ registerWorker(QUEUE_NAMES.CAMPAIGN, async ({ data }) => {
     const { rows: [c] } = await tenantQuery(tenant, `SELECT * FROM campaigns_bulk WHERE id = $1`, [data.campaign_id]);
     if (!c || c.stage !== 'IN_PROGRESS') return;
 
-    const filter = c.audience_filter_json ?? {};
-    const conds = ['deleted_at IS NULL'];
-    const params = [];
-    if (filter.stage_ids) { params.push(filter.stage_ids); conds.push(`stage_id = ANY($${params.length}::uuid[])`); }
-    if (filter.program_ids) { params.push(filter.program_ids); conds.push(`program_id = ANY($${params.length}::uuid[])`); }
-    if (filter.assigned_to) { params.push(filter.assigned_to); conds.push(`assigned_to = ANY($${params.length}::uuid[])`); }
-    const { rows: leads } = await tenantQuery(tenant, `SELECT id, email, phone, whatsapp_number FROM leads WHERE ${conds.join(' AND ')}`, params);
+    // Shared audience resolver (stage/program/owner/source/channel/date/tags).
+    const { where, params } = buildAudienceWhere(c.audience_filter_json ?? {}, 1);
+    const { rows: leads } = await tenantQuery(tenant, `SELECT l.id, l.email, l.phone, l.whatsapp_number FROM leads l WHERE ${where}`, params);
 
     await tenantQuery(tenant, `UPDATE campaigns_bulk_stats SET leads_count = $2 WHERE campaign_id = $1`, [c.id, leads.length]);
 

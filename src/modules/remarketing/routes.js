@@ -7,7 +7,6 @@ import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { encrypt } from '../../lib/crypto.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
-import { notImplemented } from '../../lib/errors.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -73,7 +72,31 @@ router.get('/accounts', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENA
   catch (err) { next(err); }
 });
 
-router.post('/accounts/connect', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), (_req, res, next) => next(notImplemented('OAuth connect flow needs Facebook app credentials')));
-router.get('/accounts/callback', (_req, res, next) => next(notImplemented('OAuth callback — pending FB app setup')));
+// Connect an ad account by storing a System-User / long-lived token directly.
+// (Full OAuth callback can be added later; a token from the client's own
+// Business works without App Review in Development mode.)
+const connectSchema = z.object({
+  ad_account_id: z.string().min(1),
+  name: z.string().min(1),
+  access_token: z.string().min(1),
+});
+router.post('/accounts/connect', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: connectSchema }), async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `INSERT INTO fb_ad_accounts (ad_account_id, name, access_token_encrypted, connected_by)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (ad_account_id) DO UPDATE SET name = EXCLUDED.name, access_token_encrypted = EXCLUDED.access_token_encrypted, deleted_at = NULL
+       RETURNING id, ad_account_id, name, connected_at`,
+      [req.body.ad_account_id, req.body.name, encrypt(req.body.access_token), req.user.id],
+    );
+    res.status(201).json({ data: rows[0], meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+router.delete('/accounts/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+  try { await tenantQuery(req.tenant, `UPDATE fb_ad_accounts SET deleted_at = now() WHERE id = $1`, [req.params.id]); res.status(204).end(); }
+  catch (err) { next(err); }
+});
 
 export default router;
