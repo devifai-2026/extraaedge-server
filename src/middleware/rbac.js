@@ -23,6 +23,10 @@ export const requireTab = (tabKey) => (req, _res, next) => {
   if (!req.user) return next(unauthenticated());
   const tabs = req.user.allowedTabs;
   if (!Array.isArray(tabs)) return next(); // null = all tabs (e.g. system super_admin)
+  // '*' is the all-tabs wildcard (super_admin / branch_manager — see
+  // buildAllowedTabs in auth/service.js). Honor it so a wildcard grant covers
+  // every tab, not just those listed literally.
+  if (tabs.includes('*')) return next();
   if (!tabs.includes(tabKey)) return next(forbidden(`Tab not permitted: ${tabKey}`));
   next();
 };
