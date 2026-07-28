@@ -1092,14 +1092,20 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
         AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
     )`);
   }
-  // "Not updated / stale" — the lead has GONE QUIET: its last-touched time is
-  // OLDER than the cutoff, i.e. nobody has touched it since before the range.
-  // Last-touched = COALESCE(last_activity_at, updated_at, created_at) — the same
-  // "Last Updated" value shown in the table. The cutoff is `from` (the start of
-  // the range); if only `to` is given we use that. A lead touched on Jul 22 is
-  // NEWER than a June cutoff → correctly EXCLUDED (it isn't stale).
+  // "Not updated / stale" — the lead has GONE QUIET: its last REAL human touch
+  // is OLDER than the cutoff. We deliberately do NOT use last_activity_at here:
+  // system events (assign / reassign / auto_assign — including admin scripts &
+  // round-robin) bump last_activity_at to now(), which would make a genuinely
+  // stale lead look freshly touched. Instead we take the most recent
+  // lead_activities row whose type is a genuine human action, falling back to
+  // created_at when the lead has never been worked. Cutoff is `from` (the start
+  // of the range); if only `to` is given we use that.
   if (no_activity_from || no_activity_to) {
-    const touched = `COALESCE(l.last_activity_at, l.updated_at, l.created_at)`;
+    const touched = `COALESCE(
+      (SELECT max(a.created_at) FROM lead_activities a
+        WHERE a.lead_id = l.id
+          AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')),
+      l.created_at)`;
     const cutoff = no_activity_from || no_activity_to; // prefer the start bound
     params.push(cutoff);
     conds.push(`${touched} < $${params.length}::timestamptz`);
