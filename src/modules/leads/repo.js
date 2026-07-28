@@ -1,4 +1,25 @@
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
+import { forbidden } from '../../lib/errors.js';
+
+// INVARIANT: leads.assigned_to must ALWAYS be an active, non-deleted counsellor.
+// Managers/admins own a TEAM of counsellors, they don't carry leads directly.
+// This guard is enforced at the two shared DB sinks (insertLead + updateLead)
+// so EVERY write path — create, update (PUT /leads/:id), bulk-refer, quick-add,
+// workflow assign, bulk-import — is covered, not just the manual reassign route.
+// null/undefined (unassign, or "leave to round-robin") is always allowed.
+// Historically several paths wrote assigned_to with no role check, which is how
+// branch_manager / sales_manager ended up owning leads (the SpeedUp incident).
+const assertCounsellorTarget = async (client, assignedTo) => {
+  if (assignedTo === null || assignedTo === undefined) return;
+  const { rows } = await client.query(
+    `SELECT 1 FROM users
+      WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
+    [assignedTo],
+  );
+  if (!rows[0]) {
+    throw forbidden('Leads can only be assigned to an active counsellor');
+  }
+};
 
 // Follow-up date-window bounds normalization.
 //
@@ -85,6 +106,8 @@ export const findDuplicates = async (
 };
 
 export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, async (client) => {
+  // Enforce the counsellor-only ownership invariant at the shared sink.
+  await assertCounsellorTarget(client, input.assigned_to);
   // Main lead row.
   //
   // `followups` is a virtual array passed by callers (manual create form +
@@ -489,6 +512,13 @@ export const updateLead = async (tenant, id, updates, actorId = null) => tenantT
   const params = [];
   let i = 1;
   const { family, custom_values, sources, ...scalar } = updates;
+
+  // Enforce the counsellor-only ownership invariant when a PUT (or any other
+  // updateLead caller) tries to change assigned_to. Only validate when the key
+  // is actually present with a non-null value — clearing it (unassign) is fine.
+  if ('assigned_to' in scalar && scalar.assigned_to != null) {
+    await assertCounsellorTarget(client, scalar.assigned_to);
+  }
 
   // Snapshot stage/sub-stage BEFORE the UPDATE so we can detect a real
   // transition and log a `stage_changed` activity. Historically only the
@@ -938,6 +968,7 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
     lead_value, is_cold, is_converted, created_by, referral_code_used,
     email, phone, whatsapp_number,
     lead_origin,
+    no_activity_from, no_activity_to,
     is_touched,
     lead_age_from, lead_age_to,
     lead_score_from, lead_score_to,
@@ -1060,6 +1091,28 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
       SELECT 1 FROM lead_activities a WHERE a.lead_id = l.id
         AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
     )`);
+  }
+  // "Not updated / stale in a window" — leads with NO human activity AND NO
+  // follow-up whose timestamp falls inside [no_activity_from, no_activity_to].
+  // "Human" excludes the system assignment events so an auto-assigned but
+  // never-worked lead still counts as stale. Either bound is optional; with
+  // only a `to` bound it means "nothing done up to that date". Powers the
+  // Lead Manager "Not updated" report (counsellor-wise + global via scope).
+  if (no_activity_from || no_activity_to) {
+    const actConds = ["a.lead_id = l.id", "a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')"];
+    const fuConds = ['lf.lead_id = l.id', 'lf.deleted_at IS NULL'];
+    if (no_activity_from) {
+      params.push(no_activity_from);
+      actConds.push(`a.created_at >= $${params.length}::timestamptz`);
+      fuConds.push(`lf.next_action_datetime >= $${params.length}::timestamptz`);
+    }
+    if (no_activity_to) {
+      params.push(no_activity_to);
+      actConds.push(`a.created_at <= $${params.length}::timestamptz`);
+      fuConds.push(`lf.next_action_datetime <= $${params.length}::timestamptz`);
+    }
+    conds.push(`NOT EXISTS (SELECT 1 FROM lead_activities a WHERE ${actConds.join(' AND ')})
+                AND NOT EXISTS (SELECT 1 FROM lead_followups lf WHERE ${fuConds.join(' AND ')})`);
   }
   if (includeFlag) {
     if (flag === 'unassigned') {

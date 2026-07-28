@@ -7,7 +7,7 @@ import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
 import { QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
-import { notFound } from '../../lib/errors.js';
+import { notFound, forbidden } from '../../lib/errors.js';
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -386,6 +386,15 @@ router.post('/status-change', validate({ body: statusChangeSchema }), async (req
 router.post('/refer', validate({ body: referSchema }), async (req, res, next) => {
   try {
     const { lead_ids, assigned_to, reason } = req.body;
+    // Ownership invariant: bulk-refer target must be an active counsellor.
+    // (Mirrors the single-lead reassign route + the insertLead/updateLead sink
+    // guard — closes the mass "all leads → one manager" leak.)
+    const { rows: valid } = await tenantQuery(
+      req.tenant,
+      `SELECT 1 FROM users WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
+      [assigned_to],
+    );
+    if (!valid[0]) throw forbidden('Leads can only be referred to an active counsellor');
     const count = await tenantTx(req.tenant, async (client) => {
       // Resolve the new owner's manager once so we can snap leads.manager_id
       // (same as bulkAssign / the single-lead reassign path).

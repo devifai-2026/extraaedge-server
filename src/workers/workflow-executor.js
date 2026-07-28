@@ -69,14 +69,20 @@ registerWorker(QUEUE_NAMES.WORKFLOW, async ({ data }) => {
           switch (action.type) {
             case 'assign': {
               if (lead && action.user_id) {
-                // Snap manager_id from the new owner so leadlist + LeadCard
-                // hierarchy stay coherent. Also drop a timeline row so the
-                // workflow's effect is auditable. Mirrors rule-processor.js.
+                // Ownership invariant: only assign to an active counsellor. A
+                // workflow node configured with a manager/admin id must NOT
+                // become a lead owner — skip it instead of corrupting
+                // assigned_to. Mirrors rule-processor.pickTarget + the sink guard.
                 const { rows: mgrRows } = await tenantQuery(
                   tenant,
-                  `SELECT manager_id FROM users WHERE id = $1`,
+                  `SELECT manager_id, role, is_active FROM users WHERE id = $1 AND deleted_at IS NULL`,
                   [action.user_id],
                 );
+                if (mgrRows[0]?.role !== 'counsellor' || mgrRows[0]?.is_active !== true) {
+                  logger.warn({ tenantId: tenant.id, leadId: lead.id, target: action.user_id },
+                    'workflow assign: target is not an active counsellor — skipped');
+                  break;
+                }
                 const newManagerId = mgrRows[0]?.manager_id ?? null;
                 await tenantQuery(
                   tenant,

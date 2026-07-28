@@ -188,6 +188,10 @@ export const listQuery = z.object({
   // Lead origin quick-filter — acquisition channel the lead first came through
   // (whatsapp / facebook), matched against first_touch_source/channel.
   lead_origin: z.enum(['whatsapp', 'facebook']).optional(),
+  // "Not updated / stale" report — leads with no human activity AND no
+  // follow-up inside this window (either bound optional).
+  no_activity_from: z.string().optional(),
+  no_activity_to: z.string().optional(),
   // Accept 'true' / 'false' strings from query string and coerce explicitly.
   is_touched: z.preprocess((v) => {
     if (v === 'true' || v === true) return true;

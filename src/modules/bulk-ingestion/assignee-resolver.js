@@ -71,15 +71,20 @@ const loadCounsellorsFor = async (tenant, cache, manager_id) => {
 
 const loadAdminPool = async (tenant, cache, exclude_user_id) => {
   if (cache.adminPool) return cache.adminPool.filter((u) => u.id !== exclude_user_id);
+  // COUNSELLORS ONLY. A lead's assigned_to must always be a counsellor (managers
+  // own a team, not leads). This pool previously included sales_managers, which
+  // let a super_admin-owned bulk row land on a manager — violating the invariant
+  // and now rejected by the insertLead sink guard. Restrict to counsellors so
+  // the round-robin produces a valid owner every time.
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id, role, manager_id
        FROM users
-      WHERE role IN ($1, $2)
+      WHERE role = $1
         AND deleted_at IS NULL
         AND is_active = true
       ORDER BY id`,
-    [SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR],
+    [SYSTEM_TENANT_ROLES.COUNSELLOR],
   );
   cache.adminPool = rows;
   return rows.filter((u) => u.id !== exclude_user_id);
