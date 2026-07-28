@@ -1110,6 +1110,10 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
       params.push(no_activity_to);
       actConds.push(`a.created_at <= $${params.length}::timestamptz`);
       fuConds.push(`lf.next_action_datetime <= $${params.length}::timestamptz`);
+      // The lead must have EXISTED by the end of the window — a lead created
+      // AFTER the range trivially had no activity "in" it (it didn't exist
+      // yet), which wrongly surfaced brand-new leads. Require created_at <= to.
+      conds.push(`l.created_at <= $${params.length}::timestamptz`);
     }
     conds.push(`NOT EXISTS (SELECT 1 FROM lead_activities a WHERE ${actConds.join(' AND ')})
                 AND NOT EXISTS (SELECT 1 FROM lead_followups lf WHERE ${fuConds.join(' AND ')})`);
