@@ -1092,31 +1092,17 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
         AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
     )`);
   }
-  // "Not updated / stale in a window" — leads with NO human activity AND NO
-  // follow-up whose timestamp falls inside [no_activity_from, no_activity_to].
-  // "Human" excludes the system assignment events so an auto-assigned but
-  // never-worked lead still counts as stale. Either bound is optional; with
-  // only a `to` bound it means "nothing done up to that date". Powers the
-  // Lead Manager "Not updated" report (counsellor-wise + global via scope).
+  // "Not updated / stale" — the lead has GONE QUIET: its last-touched time is
+  // OLDER than the cutoff, i.e. nobody has touched it since before the range.
+  // Last-touched = COALESCE(last_activity_at, updated_at, created_at) — the same
+  // "Last Updated" value shown in the table. The cutoff is `from` (the start of
+  // the range); if only `to` is given we use that. A lead touched on Jul 22 is
+  // NEWER than a June cutoff → correctly EXCLUDED (it isn't stale).
   if (no_activity_from || no_activity_to) {
-    const actConds = ["a.lead_id = l.id", "a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')"];
-    const fuConds = ['lf.lead_id = l.id', 'lf.deleted_at IS NULL'];
-    if (no_activity_from) {
-      params.push(no_activity_from);
-      actConds.push(`a.created_at >= $${params.length}::timestamptz`);
-      fuConds.push(`lf.next_action_datetime >= $${params.length}::timestamptz`);
-    }
-    if (no_activity_to) {
-      params.push(no_activity_to);
-      actConds.push(`a.created_at <= $${params.length}::timestamptz`);
-      fuConds.push(`lf.next_action_datetime <= $${params.length}::timestamptz`);
-      // The lead must have EXISTED by the end of the window — a lead created
-      // AFTER the range trivially had no activity "in" it (it didn't exist
-      // yet), which wrongly surfaced brand-new leads. Require created_at <= to.
-      conds.push(`l.created_at <= $${params.length}::timestamptz`);
-    }
-    conds.push(`NOT EXISTS (SELECT 1 FROM lead_activities a WHERE ${actConds.join(' AND ')})
-                AND NOT EXISTS (SELECT 1 FROM lead_followups lf WHERE ${fuConds.join(' AND ')})`);
+    const touched = `COALESCE(l.last_activity_at, l.updated_at, l.created_at)`;
+    const cutoff = no_activity_from || no_activity_to; // prefer the start bound
+    params.push(cutoff);
+    conds.push(`${touched} < $${params.length}::timestamptz`);
   }
   if (includeFlag) {
     if (flag === 'unassigned') {
