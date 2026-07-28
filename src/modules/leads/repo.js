@@ -937,6 +937,7 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
     ug_graduation_year, pg_graduation_year,
     lead_value, is_cold, is_converted, created_by, referral_code_used,
     email, phone, whatsapp_number,
+    lead_origin,
     is_touched,
     lead_age_from, lead_age_to,
     lead_score_from, lead_score_to,
@@ -981,6 +982,14 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
   if (email) { params.push(`%${email}%`); conds.push(`l.email::text ILIKE $${params.length}`); }
   if (phone) { params.push(`%${phone}%`); conds.push(`l.phone ILIKE $${params.length}`); }
   if (whatsapp_number) { params.push(`%${whatsapp_number}%`); conds.push(`l.whatsapp_number ILIKE $${params.length}`); }
+  // Lead origin — the acquisition channel a lead first entered through, read
+  // from first_touch_source/first_touch_channel (set at createLead time). This
+  // powers the Lead Manager "WhatsApp leads" / "Facebook leads" quick filters.
+  if (lead_origin === 'whatsapp') {
+    conds.push(`(l.first_touch_source ILIKE 'whatsapp' OR l.first_touch_channel ILIKE 'whatsapp')`);
+  } else if (lead_origin === 'facebook') {
+    conds.push(`(l.first_touch_source ILIKE '%facebook%' OR l.first_touch_channel ILIKE '%facebook%')`);
+  }
   if (date_from) { params.push(date_from); conds.push(`l.created_at >= $${params.length}::timestamptz`); }
   if (date_to) { params.push(date_to); conds.push(`l.created_at <= $${params.length}::timestamptz`); }
   // Last-Updated date range (mirrors created_at's date_from/date_to).
@@ -1153,6 +1162,7 @@ export const list = async (tenant, opts, scope) => {
               l.program_id, l.assigned_to, l.team_id, l.lead_score, l.engagement_score,
               l.is_cold, l.created_at, l.updated_at, l.last_activity_at,
               l.primary_source_id,
+              l.first_touch_source, l.first_touch_channel,
               s.name  AS stage_name,
               ss.name AS sub_stage_name,
               p.name  AS program_name,

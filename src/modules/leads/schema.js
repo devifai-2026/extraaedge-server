@@ -185,6 +185,9 @@ export const listQuery = z.object({
   email: z.string().optional(),
   phone: z.string().optional(),
   whatsapp_number: z.string().optional(),
+  // Lead origin quick-filter — acquisition channel the lead first came through
+  // (whatsapp / facebook), matched against first_touch_source/channel.
+  lead_origin: z.enum(['whatsapp', 'facebook']).optional(),
   // Accept 'true' / 'false' strings from query string and coerce explicitly.
   is_touched: z.preprocess((v) => {
     if (v === 'true' || v === true) return true;

@@ -219,6 +219,54 @@ router.get('/channel-source', validate({ query: rangeQuery }), async (req, res, 
   } catch (err) { next(err); }
 });
 
+// ---------- Lead Origin (WhatsApp / Facebook / other) ----------
+// Powers the dashboard WhatsApp-leads stat card + trend. `counts` gives the
+// role-scoped totals per origin; `whatsapp_trend` is a daily new-WhatsApp-lead
+// series over the last `trend_days` (default 30) for the sparkline/graph.
+const originQuery = rangeQuery.extend({ trend_days: z.coerce.number().int().min(1).max(180).optional() });
+router.get('/lead-origin', validate({ query: originQuery }), async (req, res, next) => {
+  try {
+    const scope = await computeScope(req);
+    const { conds, params } = buildLeadConds(req.query, scope);
+    conds.push('deleted_at IS NULL');
+    const where = conds.join(' AND ');
+    const trendDays = req.query.trend_days || 30;
+
+    const [{ rows: countRows }, { rows: trendRows }] = await Promise.all([
+      tenantQuery(
+        req.tenant,
+        `SELECT
+           count(*) FILTER (WHERE first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp')::int AS whatsapp,
+           count(*) FILTER (WHERE first_touch_source ILIKE '%facebook%' OR first_touch_channel ILIKE '%facebook%')::int AS facebook,
+           count(*) FILTER (WHERE (first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp')
+                             AND converted_at IS NOT NULL)::int AS whatsapp_converted,
+           count(*)::int AS total
+         FROM leads WHERE ${where}`,
+        params,
+      ),
+      tenantQuery(
+        req.tenant,
+        `SELECT to_char(d::date, 'YYYY-MM-DD') AS day,
+                COALESCE(c.leads, 0)::int AS leads
+           FROM generate_series(
+                  (now()::date - ($${params.length + 1}::int - 1) * interval '1 day'),
+                  now()::date, interval '1 day') d
+           LEFT JOIN (
+             SELECT created_at::date AS day, count(*) AS leads
+               FROM leads
+              WHERE ${where}
+                AND (first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp')
+                AND created_at >= now()::date - ($${params.length + 1}::int - 1) * interval '1 day'
+              GROUP BY 1
+           ) c ON c.day = d::date
+          ORDER BY d`,
+        [...params, trendDays],
+      ),
+    ]);
+    res.json({ data: { counts: countRows[0], whatsapp_trend: trendRows }, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 // ---------- Program × Stage ----------
 router.get('/program-status', validate({ query: rangeQuery }), async (req, res, next) => {
   try {
