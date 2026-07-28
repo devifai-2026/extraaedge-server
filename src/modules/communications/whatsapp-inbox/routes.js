@@ -204,13 +204,13 @@ router.post('/chats/:phone/send', validate({ body: sendSchema }), async (req, re
     let body = req.body.message || '';
     try {
       if (req.body.type === 'template') {
-        const out = await wabridge.sendTemplate(creds, { to: phone, templateId: req.body.templateId, variables: req.body.variables });
+        const out = await wabridge.sendTemplate(creds, { to: phone, templateId: req.body.templateId, variables: req.body.variables, tenant: req.tenant });
         waMessageId = out.messageId;
         // Store the rendered template text (placeholders filled with the sent
         // variables) so the chat thread shows the real message, not "[template id]".
         body = body || await renderTemplateBody(req.tenant, req.body.templateId, req.body.variables || []);
       } else {
-        const out = await wabridge.sendText(creds, { to: phone, message: req.body.message });
+        const out = await wabridge.sendText(creds, { to: phone, message: req.body.message, tenant: req.tenant });
         waMessageId = out.messageId;
       }
     } catch (sendErr) {

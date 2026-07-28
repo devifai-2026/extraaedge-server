@@ -12,6 +12,7 @@ import { logger } from '../../../lib/logger.js';
 import { resolveTenantBySlug } from '../../../db/tenant.js';
 import { env } from '../../../config/env.js';
 import { recordInbound, applyStatus } from './service.js';
+import { logWaWebhook } from './webhook-log.js';
 
 const router = express.Router({ mergeParams: true });
 
@@ -64,6 +65,19 @@ router.post('/:slug', express.json({ limit: '2mb' }), (req, res) => {
       if (!tenant) { logger.warn({ slug: req.params.slug }, 'wa webhook: unknown tenant slug'); return; }
 
       const body = req.body || {};
+
+      // Persist the raw inbound payload for the PO console Webhooks tab.
+      // Best-effort phone extraction across the shapes we handle below.
+      {
+        const inboundPhone = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from
+          || body?.changes?.[0]?.value?.messages?.[0]?.from
+          || body?.from || body?.sender || body?.mobile || null;
+        logWaWebhook(tenant, {
+          direction: 'inbound', event: 'message', endpoint: req.params.slug,
+          phone: inboundPhone ? String(inboundPhone).replace(/\D/g, '') : null,
+          request: body,
+        }).catch(() => {});
+      }
 
       // ── Meta / Meta-style-nested envelope ──
       // Meta Cloud API sends { object:'whatsapp_business_account', entry:[{changes:[...]}] }.

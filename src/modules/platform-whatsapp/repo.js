@@ -2,7 +2,7 @@
 // and reuses the tenant-scoped inbox service against that tenant's DB. The PO
 // can view messages (read-only), edit a tenant's WhatsApp config/webhook, and
 // manage its locally-registered templates.
-import { resolveTenantById } from '../../db/tenant.js';
+import { resolveTenantById, tenantQuery } from '../../db/tenant.js';
 import { tenantNotFound } from '../../lib/errors.js';
 import { env } from '../../config/env.js';
 import * as inbox from '../communications/whatsapp-inbox/service.js';
@@ -77,4 +77,32 @@ export const addTemplate = async (tenantId, input) => {
 export const deleteTemplate = async (tenantId, id) => {
   const tenant = await requireTenant(tenantId);
   await inbox.deleteTemplate(tenant, id);
+};
+
+// Raw webhook / API payload log (inbound + outbound), newest first.
+// `direction` filter is optional ('inbound' | 'outbound').
+export const listWebhookLogs = async (tenantId, { direction = null, limit = 100 } = {}) => {
+  const tenant = await requireTenant(tenantId);
+  const conds = [];
+  const params = [];
+  if (direction === 'inbound' || direction === 'outbound') {
+    params.push(direction);
+    conds.push(`direction = $${params.length}`);
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  params.push(Math.min(Number(limit) || 100, 500));
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, direction, event, endpoint, phone, status_code, ok,
+            request_json, response_json, error, created_at
+       FROM wa_webhook_logs ${where}
+      ORDER BY created_at DESC
+      LIMIT $${params.length}`,
+    params,
+  ).catch((err) => {
+    // Table may not exist yet on a tenant that hasn't run the migration.
+    if (err?.code === '42P01') return { rows: [] };
+    throw err;
+  });
+  return rows;
 };

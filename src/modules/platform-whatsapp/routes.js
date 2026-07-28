@@ -50,6 +50,20 @@ router.get('/:tenantId/chats/:phone/messages', validate({ params: tenantPhonePar
   catch (err) { next(err); }
 });
 
+// Raw webhook / API payload log (inbound + outbound), newest first.
+const webhookLogQuery = z.object({
+  direction: z.enum(['inbound', 'outbound']).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+router.get('/:tenantId/webhook-logs', validate({ params: tenantParam, query: webhookLogQuery }), async (req, res, next) => {
+  try {
+    res.json({
+      data: await repo.listWebhookLogs(req.params.tenantId, { direction: req.query.direction, limit: req.query.limit }),
+      meta: { requestId: req.id },
+    });
+  } catch (err) { next(err); }
+});
+
 // Templates.
 router.get('/:tenantId/templates', validate({ params: tenantParam }), async (req, res, next) => {
   try { res.json({ data: await repo.listTemplates(req.params.tenantId), meta: { requestId: req.id } }); }
