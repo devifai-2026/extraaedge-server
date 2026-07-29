@@ -67,13 +67,22 @@ router.post('/:slug', express.json({ limit: '2mb' }), (req, res) => {
       const body = req.body || {};
 
       // Persist the raw inbound payload for the PO console Webhooks tab.
-      // Best-effort phone extraction across the shapes we handle below.
+      // Distinguish a real customer message from a delivery-status receipt, and
+      // pull the counterparty number from whichever shape applies:
+      //   message → value.messages[0].from
+      //   status  → value.statuses[0].recipient_id
       {
-        const inboundPhone = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from
-          || body?.changes?.[0]?.value?.messages?.[0]?.from
+        const value = body?.entry?.[0]?.changes?.[0]?.value
+          || body?.changes?.[0]?.value || {};
+        const msg = (value.messages || [])[0];
+        const st = (value.statuses || [])[0];
+        const flat = !msg && !st; // WABridge flat inbound
+        const event = msg ? 'message' : (st ? (st.status || 'status') : (flat ? 'message' : 'unknown'));
+        const inboundPhone = msg?.from
+          || st?.recipient_id
           || body?.from || body?.sender || body?.mobile || null;
         logWaWebhook(tenant, {
-          direction: 'inbound', event: 'message', endpoint: req.params.slug,
+          direction: 'inbound', event, endpoint: req.params.slug,
           phone: inboundPhone ? String(inboundPhone).replace(/\D/g, '') : null,
           request: body,
         }).catch(() => {});

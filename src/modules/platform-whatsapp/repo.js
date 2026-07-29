@@ -80,8 +80,10 @@ export const deleteTemplate = async (tenantId, id) => {
 };
 
 // Raw webhook / API payload log (inbound + outbound), newest first.
-// `direction` filter is optional ('inbound' | 'outbound').
-export const listWebhookLogs = async (tenantId, { direction = null, limit = 100 } = {}) => {
+// `direction` filter is optional ('inbound' | 'outbound'). `since` (ISO string)
+// limits to rows created on/after that instant (used by the last-24h / last-7d
+// quick filters).
+export const listWebhookLogs = async (tenantId, { direction = null, since = null, limit = 100 } = {}) => {
   const tenant = await requireTenant(tenantId);
   const conds = [];
   const params = [];
@@ -89,8 +91,12 @@ export const listWebhookLogs = async (tenantId, { direction = null, limit = 100 
     params.push(direction);
     conds.push(`direction = $${params.length}`);
   }
+  if (since) {
+    params.push(since);
+    conds.push(`created_at >= $${params.length}::timestamptz`);
+  }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-  params.push(Math.min(Number(limit) || 100, 500));
+  params.push(Math.min(Number(limit) || 100, 1000));
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id, direction, event, endpoint, phone, status_code, ok,
@@ -105,4 +111,46 @@ export const listWebhookLogs = async (tenantId, { direction = null, limit = 100 
     throw err;
   });
   return rows;
+};
+
+// Aggregate counts for the Webhooks tab graphs:
+//   hourly — last 24h in 1-hour buckets (inbound vs outbound)
+//   daily  — last 7 days in 1-day buckets (inbound vs outbound)
+// Both series are gap-filled so the chart has a continuous x-axis.
+export const webhookLogStats = async (tenantId) => {
+  const tenant = await requireTenant(tenantId);
+  const run = async (bucket, interval, step) => {
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT to_char(g.b, $1) AS label,
+              COALESCE(i.n, 0)::int AS inbound,
+              COALESCE(o.n, 0)::int AS outbound
+         FROM generate_series(
+                date_trunc($2, now()) - $3::interval,
+                date_trunc($2, now()), ('1 ' || $2)::interval) g(b)
+         LEFT JOIN (
+           SELECT date_trunc($2, created_at) b, count(*) n
+             FROM wa_webhook_logs
+            WHERE direction = 'inbound' AND created_at >= now() - $3::interval
+            GROUP BY 1) i ON i.b = g.b
+         LEFT JOIN (
+           SELECT date_trunc($2, created_at) b, count(*) n
+             FROM wa_webhook_logs
+            WHERE direction = 'outbound' AND created_at >= now() - $3::interval
+            GROUP BY 1) o ON o.b = g.b
+        ORDER BY g.b`,
+      [bucket, step, interval],
+    );
+    return rows;
+  };
+  try {
+    const [hourly, daily] = await Promise.all([
+      run('HH24:00', '24 hours', 'hour'),
+      run('Mon DD', '7 days', 'day'),
+    ]);
+    return { hourly, daily };
+  } catch (err) {
+    if (err?.code === '42P01') return { hourly: [], daily: [] };
+    throw err;
+  }
 };

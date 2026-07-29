@@ -53,14 +53,22 @@ router.get('/:tenantId/chats/:phone/messages', validate({ params: tenantPhonePar
 // Raw webhook / API payload log (inbound + outbound), newest first.
 const webhookLogQuery = z.object({
   direction: z.enum(['inbound', 'outbound']).optional(),
-  limit: z.coerce.number().int().min(1).max(500).optional(),
+  since: z.string().optional(), // ISO instant (last-24h / last-7d quick filters)
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
 });
 router.get('/:tenantId/webhook-logs', validate({ params: tenantParam, query: webhookLogQuery }), async (req, res, next) => {
   try {
     res.json({
-      data: await repo.listWebhookLogs(req.params.tenantId, { direction: req.query.direction, limit: req.query.limit }),
+      data: await repo.listWebhookLogs(req.params.tenantId, { direction: req.query.direction, since: req.query.since, limit: req.query.limit }),
       meta: { requestId: req.id },
     });
+  } catch (err) { next(err); }
+});
+
+// Aggregated counts for the Webhooks tab graphs (last 24h hourly + last 7d daily).
+router.get('/:tenantId/webhook-log-stats', validate({ params: tenantParam }), async (req, res, next) => {
+  try {
+    res.json({ data: await repo.webhookLogStats(req.params.tenantId), meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
