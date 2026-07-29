@@ -24,6 +24,21 @@ export const buildApp = () => {
   app.set('etag', false);
 
   app.use(requestId);
+
+  // Drop automated scanner / bot traffic early. This is a pure JSON API server:
+  // the ONLY valid top-level paths are the API, the health probes, and the
+  // one-shot migrate hooks. Anything else (/wp-admin/install.php, /.env,
+  // /phpmyadmin, /.git/config, random exploit probes — known or novel) is junk,
+  // so we 404 it here, BEFORE logging + rate-limiting + body parsing. This
+  // whitelist approach means we don't have to enumerate scanner paths: if it
+  // isn't a real route, it's dropped. Frontends live on separate hosts, so
+  // there is no legitimate non-API path (not even `/`).
+  const ALLOWED_TOP_LEVEL = /^\/(api\/|healthz$|readyz$|__one_shot_migrate)/;
+  app.use((req, res, next) => {
+    if (ALLOWED_TOP_LEVEL.test(req.path)) return next();
+    return res.status(404).type('text/plain').send('Not found');
+  });
+
   app.use(
     helmet({
       contentSecurityPolicy: false, // API server — no HTML
