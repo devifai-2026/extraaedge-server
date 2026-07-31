@@ -253,22 +253,26 @@ router.get('/lead-origin', validate({ query: originQuery }), async (req, res, ne
     );
     const WA = `first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp'`;
     const FB = `first_touch_source ILIKE '%facebook%' OR first_touch_channel ILIKE '%facebook%'`;
-    const [{ rows: countRows }, { rows: waTrend }, { rows: fbTrend }] = await Promise.all([
+    const JD = `first_touch_source ILIKE '%justdial%' OR first_touch_channel ILIKE '%justdial%'`;
+    const [{ rows: countRows }, { rows: waTrend }, { rows: fbTrend }, { rows: jdTrend }] = await Promise.all([
       tenantQuery(
         req.tenant,
         `SELECT
            count(*) FILTER (WHERE ${WA})::int AS whatsapp,
            count(*) FILTER (WHERE ${FB})::int AS facebook,
+           count(*) FILTER (WHERE ${JD})::int AS justdial,
            count(*) FILTER (WHERE (${WA}) AND converted_at IS NOT NULL)::int AS whatsapp_converted,
            count(*) FILTER (WHERE (${FB}) AND converted_at IS NOT NULL)::int AS facebook_converted,
+           count(*) FILTER (WHERE (${JD}) AND converted_at IS NOT NULL)::int AS justdial_converted,
            count(*)::int AS total
          FROM leads WHERE ${where}`,
         params,
       ),
       trendQuery(WA),
       trendQuery(FB),
+      trendQuery(JD),
     ]);
-    res.json({ data: { counts: countRows[0], whatsapp_trend: waTrend, facebook_trend: fbTrend }, meta: { requestId: req.id } });
+    res.json({ data: { counts: countRows[0], whatsapp_trend: waTrend, facebook_trend: fbTrend, justdial_trend: jdTrend }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

@@ -143,6 +143,29 @@ router.post('/inbound/:token', express.json({ limit: '2mb', verify: (req, _res, 
       // Optional extras many inbound sources send (JustDial: requirement + city).
       const city = pickField('city', ['city', 'area', 'location']);
       const requirement = pickField('requirement', ['requirement', 'message', 'notes', 'comments', 'enquiry', 'query', 'search']);
+      // Per-integration assignee pool (config_json.assignee_pool = [counsellor
+      // ids]). When set, leads from THIS source are round-robin'd ONLY among
+      // those counsellors (load-balanced: fewest leads from this source wins),
+      // never the tenant-wide pool. Used for JustDial: admin picks the
+      // counsellors who should receive JD leads.
+      const pool = Array.isArray(cfg.assignee_pool) ? cfg.assignee_pool.filter(Boolean) : [];
+      let poolAssignee = null;
+      if (pool.length) {
+        const { rows: pr } = await tenantQuery(
+          tenant,
+          `SELECT u.id
+             FROM users u
+             LEFT JOIN leads l ON l.assigned_to = u.id AND l.deleted_at IS NULL
+                               AND l.first_touch_source ILIKE $2
+            WHERE u.id = ANY($1::uuid[]) AND u.role = 'counsellor'
+              AND u.is_active = true AND u.deleted_at IS NULL
+            GROUP BY u.id
+            ORDER BY count(l.id) ASC, u.id
+            LIMIT 1`,
+          [pool, sourceName],
+        );
+        poolAssignee = pr[0]?.id ?? null;
+      }
       const input = {
         name: name || `${sourceName} Lead ${digits || email || ''}`.trim(),
         email: email || undefined,
@@ -155,9 +178,14 @@ router.post('/inbound/:token', express.json({ limit: '2mb', verify: (req, _res, 
         sources: [{ channel_id: channelId, source_id: sourceId, is_primary: true }],
       };
       if (cfg.default_stage) input.stage_id = cfg.default_stage;
+      // When a pool is configured, assign within it and DON'T fall back to the
+      // tenant-wide round-robin (honors "only these counsellors"). If the pool
+      // has no valid active counsellor right now, the lead stays unassigned for
+      // an admin to route — it never leaks to someone outside the pool.
+      if (pool.length) input.assigned_to = poolAssignee || undefined;
       try {
         const { createLead } = await import('../leads/service.js');
-        const created = await createLead(tenant, null, input, { on_duplicate: 'warn' });
+        const created = await createLead(tenant, null, input, { on_duplicate: 'warn', skip_auto_assign: pool.length > 0 });
         logger.info({ tenantId: tenant.id, leadId: created?.id, source: 'inbound-webhook' }, 'inbound webhook lead created');
       } catch (e) {
         logger.error({ tenantId: tenant.id, err: e.message }, 'inbound webhook lead create failed');
@@ -179,6 +207,56 @@ const createSchema = z.object({
 const updateSchema = createSchema.partial();
 const idParam = z.object({ id: z.string().uuid() });
 const COLS = 'id, type, name, config_json, status, last_health_check_at, last_error, created_by, created_at, updated_at';
+
+// ── JustDial lead-assignment pool ──────────────────────────────────────────
+// The admin picks which counsellors receive JustDial (Gmail) leads; the inbound
+// handler round-robins JD leads ONLY among them. Stored on the JustDial
+// integration's config_json.assignee_pool. Placed before '/:id' — the extra
+// path segment means '/:id' won't shadow it, but keep it early for clarity.
+const findJustDial = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, config_json FROM integrations WHERE type='webhook_inbound' AND name='JustDial Leads' AND deleted_at IS NULL LIMIT 1`,
+  );
+  return rows[0] || null;
+};
+router.get('/justdial/assignee-pool', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), async (req, res, next) => {
+  try {
+    const ig = await findJustDial(req.tenant);
+    res.json({ data: { pool: ig?.config_json?.assignee_pool || [], configured: !!ig }, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+router.put('/justdial/assignee-pool', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: z.object({ pool: z.array(z.string().uuid()) }) }), async (req, res, next) => {
+  try {
+    // Keep only ids that are active counsellors — leads must never be assigned
+    // to a non-counsellor (mirrors the ownership invariant).
+    let pool = req.body.pool;
+    if (pool.length) {
+      const { rows: valid } = await tenantQuery(
+        req.tenant,
+        `SELECT id FROM users WHERE id = ANY($1::uuid[]) AND role='counsellor' AND is_active=true AND deleted_at IS NULL`,
+        [pool],
+      );
+      pool = valid.map((v) => v.id);
+    }
+    let ig = await findJustDial(req.tenant);
+    if (!ig) {
+      const cfg = { default_channel: 'JustDial', default_source: 'JustDial', field_mapping: { name: 'full_name', email: 'email', phone: 'phone' }, assignee_pool: pool };
+      await tenantQuery(
+        req.tenant,
+        `INSERT INTO integrations (type, name, config_json, status, created_by) VALUES ('webhook_inbound','JustDial Leads',$1::jsonb,'published',$2)`,
+        [JSON.stringify(cfg), req.user.id],
+      );
+    } else {
+      await tenantQuery(
+        req.tenant,
+        `UPDATE integrations SET config_json = COALESCE(config_json,'{}'::jsonb) || jsonb_build_object('assignee_pool', $2::jsonb), updated_at = now() WHERE id = $1`,
+        [ig.id, JSON.stringify(pool)],
+      );
+    }
+    res.json({ data: { pool }, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
 
 router.get('/', async (req, res, next) => {
   try { const { rows } = await tenantQuery(req.tenant, `SELECT ${COLS} FROM integrations WHERE deleted_at IS NULL ORDER BY created_at DESC`); res.json({ data: rows, meta: { requestId: req.id } }); }
