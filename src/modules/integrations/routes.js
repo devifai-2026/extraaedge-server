@@ -141,7 +141,7 @@ router.post('/inbound/:token', express.json({ limit: '2mb', verify: (req, _res, 
       const channelId = await dictId('lead_channels', channelName);
       const sourceId = await dictId('lead_sources_dict', sourceName);
       const input = {
-        name: name || `Facebook Lead ${digits || email || ''}`.trim(),
+        name: name || `${sourceName} Lead ${digits || email || ''}`.trim(),
         email: email || undefined,
         phone: digits || undefined,
         whatsapp_number: whatsapp || undefined,
