@@ -140,11 +140,16 @@ router.post('/inbound/:token', express.json({ limit: '2mb', verify: (req, _res, 
       };
       const channelId = await dictId('lead_channels', channelName);
       const sourceId = await dictId('lead_sources_dict', sourceName);
+      // Optional extras many inbound sources send (JustDial: requirement + city).
+      const city = pickField('city', ['city', 'area', 'location']);
+      const requirement = pickField('requirement', ['requirement', 'message', 'notes', 'comments', 'enquiry', 'query', 'search']);
       const input = {
         name: name || `${sourceName} Lead ${digits || email || ''}`.trim(),
         email: email || undefined,
         phone: digits || undefined,
         whatsapp_number: whatsapp || undefined,
+        city: city || undefined,
+        remarks: requirement ? String(requirement).slice(0, 500) : undefined,
         first_touch_channel: channelName,
         first_touch_source: sourceName,
         sources: [{ channel_id: channelId, source_id: sourceId, is_primary: true }],
