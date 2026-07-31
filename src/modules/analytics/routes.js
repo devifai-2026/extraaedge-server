@@ -232,38 +232,43 @@ router.get('/lead-origin', validate({ query: originQuery }), async (req, res, ne
     const where = conds.join(' AND ');
     const trendDays = req.query.trend_days || 30;
 
-    const [{ rows: countRows }, { rows: trendRows }] = await Promise.all([
+    // Daily new-lead trend for one origin (whatsapp | facebook), gap-filled.
+    const trendQuery = (originCond) => tenantQuery(
+      req.tenant,
+      `SELECT to_char(d::date, 'YYYY-MM-DD') AS day,
+              COALESCE(c.leads, 0)::int AS leads
+         FROM generate_series(
+                (now()::date - ($${params.length + 1}::int - 1) * interval '1 day'),
+                now()::date, interval '1 day') d
+         LEFT JOIN (
+           SELECT created_at::date AS day, count(*) AS leads
+             FROM leads
+            WHERE ${where}
+              AND (${originCond})
+              AND created_at >= now()::date - ($${params.length + 1}::int - 1) * interval '1 day'
+            GROUP BY 1
+         ) c ON c.day = d::date
+        ORDER BY d`,
+      [...params, trendDays],
+    );
+    const WA = `first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp'`;
+    const FB = `first_touch_source ILIKE '%facebook%' OR first_touch_channel ILIKE '%facebook%'`;
+    const [{ rows: countRows }, { rows: waTrend }, { rows: fbTrend }] = await Promise.all([
       tenantQuery(
         req.tenant,
         `SELECT
-           count(*) FILTER (WHERE first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp')::int AS whatsapp,
-           count(*) FILTER (WHERE first_touch_source ILIKE '%facebook%' OR first_touch_channel ILIKE '%facebook%')::int AS facebook,
-           count(*) FILTER (WHERE (first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp')
-                             AND converted_at IS NOT NULL)::int AS whatsapp_converted,
+           count(*) FILTER (WHERE ${WA})::int AS whatsapp,
+           count(*) FILTER (WHERE ${FB})::int AS facebook,
+           count(*) FILTER (WHERE (${WA}) AND converted_at IS NOT NULL)::int AS whatsapp_converted,
+           count(*) FILTER (WHERE (${FB}) AND converted_at IS NOT NULL)::int AS facebook_converted,
            count(*)::int AS total
          FROM leads WHERE ${where}`,
         params,
       ),
-      tenantQuery(
-        req.tenant,
-        `SELECT to_char(d::date, 'YYYY-MM-DD') AS day,
-                COALESCE(c.leads, 0)::int AS leads
-           FROM generate_series(
-                  (now()::date - ($${params.length + 1}::int - 1) * interval '1 day'),
-                  now()::date, interval '1 day') d
-           LEFT JOIN (
-             SELECT created_at::date AS day, count(*) AS leads
-               FROM leads
-              WHERE ${where}
-                AND (first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp')
-                AND created_at >= now()::date - ($${params.length + 1}::int - 1) * interval '1 day'
-              GROUP BY 1
-           ) c ON c.day = d::date
-          ORDER BY d`,
-        [...params, trendDays],
-      ),
+      trendQuery(WA),
+      trendQuery(FB),
     ]);
-    res.json({ data: { counts: countRows[0], whatsapp_trend: trendRows }, meta: { requestId: req.id } });
+    res.json({ data: { counts: countRows[0], whatsapp_trend: waTrend, facebook_trend: fbTrend }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
