@@ -187,7 +187,7 @@ export const listQuery = z.object({
   whatsapp_number: z.string().optional(),
   // Lead origin quick-filter — acquisition channel the lead first came through
   // (whatsapp / facebook), matched against first_touch_source/channel.
-  lead_origin: z.enum(['whatsapp', 'facebook']).optional(),
+  lead_origin: z.enum(['whatsapp', 'facebook', 'justdial']).optional(),
   // "Not updated / stale" report — leads with no human activity AND no
   // follow-up inside this window (either bound optional).
   no_activity_from: z.string().optional(),
