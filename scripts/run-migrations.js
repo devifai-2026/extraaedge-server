@@ -13,8 +13,25 @@ import { decrypt } from '../src/lib/crypto.js';
 import { logger } from '../src/lib/logger.js';
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 
+// Accepts both `--target=tenant` and `--target tenant`. Only the first form
+// used to parse: `--target tenant` set target=true and then died with
+// "Unknown target: true", which is what `npm run migrate:tenant` expands to —
+// so the npm aliases in package.json have never worked.
 const parseArgs = () => {
-  const args = Object.fromEntries(process.argv.slice(2).map((a) => a.replace(/^--/, '').split('=')).map(([k, v = true]) => [k, v]));
+  const argv = process.argv.slice(2);
+  const args = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    if (!argv[i].startsWith('--')) continue;
+    const [key, inlineValue] = argv[i].replace(/^--/, '').split('=');
+    if (inlineValue !== undefined) {
+      args[key] = inlineValue;
+    } else if (argv[i + 1] && !argv[i + 1].startsWith('--')) {
+      args[key] = argv[i + 1];
+      i += 1;
+    } else {
+      args[key] = true;
+    }
+  }
   return args;
 };
 

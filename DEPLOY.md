@@ -73,12 +73,10 @@ Not run by the workflow — schema changes should be deliberate. Run them from a
 machine that can reach the database:
 
 ```bash
-node scripts/run-migrations.js --target=system
-node scripts/run-migrations.js --target=tenant     # fans out over every tenant DB
+npm run migrate:system
+npm run migrate:tenant                              # fans out over every tenant DB
+node scripts/run-migrations.js --target=tenant --slug=demo   # one tenant
 ```
-
-Note the `=`. `npm run migrate:tenant` is **broken**: the arg parser only
-accepts `--target=<x>`, so the npm alias dies with `Unknown target: true`.
 
 ## Manual deploy (if Actions is down)
 
