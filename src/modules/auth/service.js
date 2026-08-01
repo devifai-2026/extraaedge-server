@@ -402,6 +402,29 @@ const maskPhone = (phone) => {
   return `${d.slice(0, 2)}XXXXXX${d.slice(-2)}`;
 };
 
+// Which template to send the login code with, in order of preference:
+//   1. wa_settings.wabridge_template_otp — an explicit per-tenant override
+//   2. the OTP template the tenant already registered in wa_templates
+//   3. env.WABRIDGE_TEMPLATE_OTP (returning undefined lets the sender apply it)
+//
+// Step 2 exists so a tenant that has registered its template in the console
+// needs no extra configuration: ids are per WABridge account, and the global
+// env id belongs to a different account, which WABridge rejects with a 400.
+const otpTemplateFor = async (tenant) => {
+  try {
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT template_id FROM wa_templates
+        WHERE label ILIKE '%otp%' OR body ILIKE '%otp%'
+        ORDER BY (label ILIKE '%otp%') DESC, created_at ASC
+        LIMIT 1`,
+    );
+    return rows[0]?.template_id || undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const issueWebOtp = async (tenant, user, digits, { binding }) => {
   const code = generateOtp(env.WEB_OTP_LENGTH);
   // Expire (not verify) any pending code so a resend invalidates the previous
@@ -429,7 +452,7 @@ const issueWebOtp = async (tenant, user, digits, { binding }) => {
       to: digits,
       code,
       creds: wa?.enabled ? { appKey: wa.appKey, authKey: wa.authKey, deviceId: wa.deviceId } : undefined,
-      templateId: wa?.templateOtp || undefined,
+      templateId: wa?.templateOtp || await otpTemplateFor(tenant),
     });
   } catch (err) {
     // Kill the code we just stored: leaving it live after a failed send would
