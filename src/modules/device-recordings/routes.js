@@ -8,8 +8,12 @@
 //   1. POST /presign  { content_type, size_bytes, client_ref? }
 //        -> { upload_url, method:'PUT', headers, r2_key }
 //   2. PUT the .m4a bytes straight to upload_url (GCS).
-//   3. POST /confirm  { r2_key, phone, file_name?, duration_seconds?, client_ref? }
-//        -> server HEADs the object, matches phone -> lead, records the row.
+//   3. POST /confirm  { r2_key, phone?, file_name?, duration_seconds?,
+//                       client_ref?, content_hash? }
+//        -> server HEADs the object, matches phone -> lead(s), records the row.
+//        phone is optional (no number in the file name => 'unmatched');
+//        content_hash (sha256 of the bytes) dedupes re-uploads of the same
+//        audio under any name — duplicates are acknowledged, never re-stored.
 //
 // Two distinct actors hit this router:
 //   - the DEVICE (POST /presign, POST /confirm), authenticated by the shared
@@ -46,8 +50,10 @@ const MANAGER_ROLES = [
 ];
 
 // Resolve which live lead(s) a phone number belongs to. Uses the SAME
-// normalized expression as `leads_unique_phone_digits`, so the lookup is
-// index-backed and consistent with dedup.
+// normalized expression as `leads_unique_phone_digits` (last 10 digits, so
+// 98XXXXXXXX, 9198XXXXXXXX and +91-98XX XXXXXX all hit the same lead), and
+// checks whatsapp_number / alternate_contact too — the same trio the lead
+// dedup and lead-pool search already consider.
 //
 // Returns { status, lead_ids[], digits }:
 //   - unmatched : no live lead (or < 10 digits). lead_ids = [].
@@ -61,7 +67,9 @@ const matchLeads = async (tenant, phoneRaw) => {
     tenant,
     `SELECT id FROM leads
       WHERE deleted_at IS NULL
-        AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10) = $1`,
+        AND (right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10) = $1
+          OR right(regexp_replace(coalesce(whatsapp_number,''), '\\D', '', 'g'), 10) = $1
+          OR right(regexp_replace(coalesce(alternate_contact,''), '\\D', '', 'g'), 10) = $1)`,
     [digits],
   );
   const lead_ids = rows.map((r) => r.id);
@@ -143,17 +151,22 @@ router.post('/presign', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
 // never leave a row pointing at nothing.
 const confirmSchema = z.object({
   r2_key: z.string().min(1),
-  phone: z.string().min(1),                 // the CALLED number (matched to a lead)
+  // The CALLED number (matched to a lead). Optional: a full-device scan also
+  // uploads audio whose file name carries no number — stored as 'unmatched'.
+  phone: z.string().optional(),
   counsellor_phone: z.string().optional(),  // the uploading counsellor's own number
   file_name: z.string().max(255).optional(),
   duration_seconds: z.coerce.number().int().nonnegative().optional(),
   client_ref: z.string().max(255).optional(),
+  // sha256 (hex) of the file bytes, computed on the device — dedup key.
+  content_hash: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
 });
 
 router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, validate({ body: confirmSchema }), async (req, res, next) => {
   try {
-    const { r2_key, phone, counsellor_phone, file_name, duration_seconds, client_ref } = req.body;
+    const { r2_key, phone, counsellor_phone, file_name, duration_seconds, client_ref, content_hash } = req.body;
     const clientRef = client_ref || null;
+    const contentHash = content_hash ? content_hash.toLowerCase() : null;
     const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : null;
 
     // Only accept keys inside this tenant's recording namespace — a device
@@ -163,16 +176,35 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
       throw validationError([{ path: 'r2_key', message: 'r2_key is not in this tenant recording namespace' }]);
     }
 
-    // Idempotency: a retrying device may re-confirm. Return the existing row.
-    if (clientRef) {
+    // Idempotency + dedup. Two keys:
+    //   - client_ref   : a retrying device re-confirms the same upload.
+    //   - content_hash : the same audio arrives again under another name/path
+    //                    (file copies, ledger lost on reinstall, second phone).
+    // Soft-deleted rows count on purpose — once a manager deletes a recording,
+    // a re-upload is acknowledged but never resurrected. The just-PUT orphan
+    // object is dropped so duplicates don't pile up in the bucket either.
+    const dupConds = [];
+    const dupParams = [];
+    if (clientRef) { dupParams.push(clientRef); dupConds.push(`client_ref = $${dupParams.length}`); }
+    if (contentHash) { dupParams.push(contentHash); dupConds.push(`content_hash = $${dupParams.length}`); }
+    if (dupConds.length) {
       const { rows: existing } = await tenantQuery(
         req.tenant,
-        `SELECT id, match_status, lead_id FROM device_recordings
-          WHERE client_ref = $1 AND deleted_at IS NULL`,
-        [clientRef],
+        `SELECT id, match_status, lead_id, r2_key, deleted_at FROM device_recordings
+          WHERE ${dupConds.join(' OR ')}
+          ORDER BY (deleted_at IS NULL) DESC, uploaded_at DESC
+          LIMIT 1`,
+        dupParams,
       );
       if (existing[0]) {
-        return res.status(200).json({ data: existing[0], meta: { requestId: req.id, idempotent: true } });
+        if (existing[0].r2_key !== r2_key) {
+          deleteObject(r2_key).catch(() => { /* orphan cleanup is best-effort */ });
+        }
+        const { id, match_status, lead_id } = existing[0];
+        return res.status(200).json({
+          data: { id, match_status, lead_id },
+          meta: { requestId: req.id, idempotent: true, duplicate: true, deleted: Boolean(existing[0].deleted_at) },
+        });
       }
     }
 
@@ -187,7 +219,7 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
       throw validationError([{ path: 'r2_key', message: `Expected an audio file, got "${head.ContentType}"` }]);
     }
 
-    const { status, lead_ids, digits } = await matchLeads(req.tenant, phone);
+    const { status, lead_ids, digits } = await matchLeads(req.tenant, phone ?? '');
     // JWT-authed app: the uploader IS the logged-in counsellor. Legacy api-key
     // devices still resolve by the counsellor's own phone number.
     const uploadedBy = req.user?.id
@@ -197,31 +229,57 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
     // backward-compatible single-lead reads; the join carries the full set.
     const primaryLeadId = lead_ids[0] ?? null;
 
-    const { rows } = await tenantQuery(
-      req.tenant,
-      `INSERT INTO device_recordings
-         (lead_id, phone_raw, phone_digits, match_status, multi_match, r2_key, file_name,
-          size_bytes, duration_seconds, content_type, device_id, client_ref,
-          uploaded_by, counsellor_phone)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-       RETURNING id, match_status, lead_id, multi_match`,
-      [
-        primaryLeadId,
-        phone,
-        digits || null,
-        status,
-        multiMatch,
-        r2_key,
-        file_name ?? null,
-        head.ContentLength ?? null,
-        duration_seconds ?? null,
-        head.ContentType ?? null,
-        deviceId,
-        clientRef,
-        uploadedBy,
-        counsellor_phone ?? null,
-      ],
-    );
+    let rows;
+    try {
+      ({ rows } = await tenantQuery(
+        req.tenant,
+        `INSERT INTO device_recordings
+           (lead_id, phone_raw, phone_digits, match_status, multi_match, r2_key, file_name,
+            size_bytes, duration_seconds, content_type, device_id, client_ref,
+            uploaded_by, counsellor_phone, content_hash)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         RETURNING id, match_status, lead_id, multi_match`,
+        [
+          primaryLeadId,
+          phone ?? '',
+          digits || null,
+          status,
+          multiMatch,
+          r2_key,
+          file_name ?? null,
+          head.ContentLength ?? null,
+          duration_seconds ?? null,
+          head.ContentType ?? null,
+          deviceId,
+          clientRef,
+          uploadedBy,
+          counsellor_phone ?? null,
+          contentHash,
+        ],
+      ));
+    } catch (err) {
+      // Unique-index race: a concurrent confirm won with the same client_ref /
+      // content_hash. Treat exactly like the dedup pre-check above.
+      if (err?.code === '23505') {
+        const { rows: winner } = await tenantQuery(
+          req.tenant,
+          `SELECT id, match_status, lead_id, r2_key, deleted_at FROM device_recordings
+            WHERE ${[clientRef ? 'client_ref = $1' : null, contentHash ? `content_hash = $${clientRef ? 2 : 1}` : null].filter(Boolean).join(' OR ')}
+            ORDER BY (deleted_at IS NULL) DESC, uploaded_at DESC
+            LIMIT 1`,
+          [clientRef, contentHash].filter(Boolean),
+        );
+        if (winner[0]) {
+          if (winner[0].r2_key !== r2_key) deleteObject(r2_key).catch(() => {});
+          const { id, match_status, lead_id } = winner[0];
+          return res.status(200).json({
+            data: { id, match_status, lead_id },
+            meta: { requestId: req.id, idempotent: true, duplicate: true, deleted: Boolean(winner[0].deleted_at) },
+          });
+        }
+      }
+      throw err;
+    }
     const recordingId = rows[0].id;
 
     // Attach the recording to EVERY matching lead: a join row + a timeline
@@ -268,7 +326,9 @@ router.use(authRequired, tenantRequired, requireRole(...MANAGER_ROLES, SYSTEM_TE
 const isOwnOnly = (user) => user.role === SYSTEM_TENANT_ROLES.COUNSELLOR;
 
 const listQuery = z.object({
-  match_status: z.enum(['matched', 'unmatched', 'ambiguous']).optional(),
+  // 'matched' includes multi-lead matches — both tabs of the review UI only
+  // distinguish "attached to lead(s)" vs "needs review".
+  match_status: z.enum(['matched', 'unmatched', 'multi']).optional(),
   lead_id: z.string().uuid().optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -276,29 +336,39 @@ const listQuery = z.object({
 const idParam = z.object({ id: z.string().uuid() });
 
 // List recordings (default newest first), filterable by match_status so staff
-// can work the 'unmatched' queue.
+// can work the 'matched' and 'unmatched' tabs.
 router.get('/', validate({ query: listQuery }), async (req, res, next) => {
   try {
     const conds = ['dr.deleted_at IS NULL'];
     const params = [];
     if (isOwnOnly(req.user)) { params.push(req.user.id); conds.push(`dr.uploaded_by = $${params.length}`); }
-    if (req.query.match_status) { params.push(req.query.match_status); conds.push(`dr.match_status = $${params.length}`); }
+    if (req.query.match_status === 'matched') {
+      conds.push(`dr.match_status IN ('matched', 'multi')`);
+    } else if (req.query.match_status) {
+      params.push(req.query.match_status);
+      conds.push(`dr.match_status = $${params.length}`);
+    }
     if (req.query.lead_id) { params.push(req.query.lead_id); conds.push(`dr.lead_id = $${params.length}`); }
     const offset = (req.query.page - 1) * req.query.limit;
     params.push(req.query.limit, offset);
     const { rows } = await tenantQuery(
       req.tenant,
       `SELECT dr.id, dr.lead_id, dr.phone_raw, dr.phone_digits, dr.match_status,
-              dr.file_name, dr.size_bytes, dr.duration_seconds, dr.device_id,
-              dr.uploaded_at, l.name AS lead_name
+              dr.multi_match, dr.file_name, dr.size_bytes, dr.duration_seconds,
+              dr.device_id, dr.uploaded_at, l.name AS lead_name,
+              u.name AS uploaded_by_name,
+              count(*) OVER() AS total_count
          FROM device_recordings dr
          LEFT JOIN leads l ON l.id = dr.lead_id
+         LEFT JOIN users u ON u.id = dr.uploaded_by
         WHERE ${conds.join(' AND ')}
         ORDER BY dr.uploaded_at DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
-    res.json({ data: rows, meta: { requestId: req.id } });
+    const total = rows[0] ? Number(rows[0].total_count) : 0;
+    const data = rows.map(({ total_count, ...row }) => row);
+    res.json({ data, meta: { requestId: req.id, total, page: req.query.page, limit: req.query.limit } });
   } catch (err) { next(err); }
 });
 
@@ -368,10 +438,10 @@ router.post('/:id/attach', validate({ params: idParam, body: attachBody }), asyn
   } catch (err) { next(err); }
 });
 
-// Soft-delete + best-effort drop of the GCS object. All review-tab roles may
-// delete; counsellors only recordings they uploaded (404 like the other
-// own-only routes, so existence isn't leaked).
-router.delete('/:id', validate({ params: idParam }), async (req, res, next) => {
+// Soft-delete + best-effort drop of the GCS object. Deleting is reserved for
+// manager-tier roles (super_admin / branch_manager / sales_manager) — a
+// counsellor can review and attach, but never remove an uploaded recording.
+router.delete('/:id', requireRole(...MANAGER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -379,7 +449,6 @@ router.delete('/:id', validate({ params: idParam }), async (req, res, next) => {
       [req.params.id],
     );
     if (!rows[0]) throw notFound('Recording not found');
-    if (isOwnOnly(req.user) && rows[0].uploaded_by !== req.user.id) throw notFound('Recording not found');
     await tenantQuery(req.tenant, `UPDATE device_recordings SET deleted_at = now() WHERE id = $1`, [req.params.id]);
     deleteObject(rows[0].r2_key).catch(() => { /* leak the file rather than fail the delete */ });
     res.status(204).end();
