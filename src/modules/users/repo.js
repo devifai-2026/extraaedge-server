@@ -56,6 +56,19 @@ export const findById = async (tenant, id) => {
 
 // Multi-branch membership for teaching staff (user_branches join). Primary
 // branch stays on users.branch_id; these are the ADDITIONAL branches they work.
+// Label-only projection for pick-lists: no email/phone/permissions, every
+// active user, ordered for display.
+export const listOptions = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT u.id, u.name, u.role, u.branch_id, u.designation
+       FROM users u
+      WHERE u.deleted_at IS NULL AND u.is_active = true
+      ORDER BY u.name ASC`,
+  );
+  return rows;
+};
+
 export const listUserBranchIds = async (tenant, userId) => {
   const { rows } = await tenantQuery(tenant, `SELECT branch_id FROM user_branches WHERE user_id = $1`, [userId]);
   return rows.map((r) => r.branch_id);

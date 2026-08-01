@@ -49,6 +49,10 @@ const MANAGER_ROLES = [
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 ];
 
+// QA reviewers list and play recordings to score them (see modules/qa-reviews),
+// but never attach or delete — those stay manager-only.
+const READ_ROLES = [...MANAGER_ROLES, SYSTEM_TENANT_ROLES.QA];
+
 // Resolve which live lead(s) a phone number belongs to. Uses the SAME
 // normalized expression as `leads_unique_phone_digits` (last 10 digits, so
 // 98XXXXXXXX, 9198XXXXXXXX and +91-98XX XXXXXX all hit the same lead), and
@@ -92,6 +96,12 @@ const resolveUploader = async (tenant, counsellorPhone) => {
     [digits],
   );
   return rows[0]?.id ?? null;
+};
+
+// The uploader's branch at upload time — snapshotted onto the recording.
+const resolveBranch = async (tenant, userId) => {
+  const { rows } = await tenantQuery(tenant, `SELECT branch_id FROM users WHERE id = $1`, [userId]);
+  return rows[0]?.branch_id ?? null;
 };
 
 // ------------------------------ DEVICE: PRESIGN -----------------------------
@@ -224,6 +234,10 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
     // devices still resolve by the counsellor's own phone number.
     const uploadedBy = req.user?.id
       ?? (counsellor_phone ? await resolveUploader(req.tenant, counsellor_phone) : null);
+    // Snapshot the uploading counsellor's branch so QA review and the manager
+    // reports can filter branch-wise without re-deriving it later (a staff
+    // transfer must not re-file historical calls).
+    const branchId = uploadedBy ? await resolveBranch(req.tenant, uploadedBy) : null;
     const multiMatch = lead_ids.length > 1;
     // The primary lead (first match) stays on device_recordings.lead_id for
     // backward-compatible single-lead reads; the join carries the full set.
@@ -236,8 +250,8 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
         `INSERT INTO device_recordings
            (lead_id, phone_raw, phone_digits, match_status, multi_match, r2_key, file_name,
             size_bytes, duration_seconds, content_type, device_id, client_ref,
-            uploaded_by, counsellor_phone, content_hash)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            uploaded_by, counsellor_phone, content_hash, branch_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          RETURNING id, match_status, lead_id, multi_match`,
         [
           primaryLeadId,
@@ -255,6 +269,7 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
           uploadedBy,
           counsellor_phone ?? null,
           contentHash,
+          branchId,
         ],
       ));
     } catch (err) {
@@ -320,7 +335,7 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
 // ------------------------------- CRM READ/ADMIN -----------------------------
 // Counsellors can reach these routes too, but only ever see their OWN uploads
 // (enforced per-query via `ownOnly`). Managers/admins see everything in scope.
-router.use(authRequired, tenantRequired, requireRole(...MANAGER_ROLES, SYSTEM_TENANT_ROLES.COUNSELLOR));
+router.use(authRequired, tenantRequired, requireRole(...READ_ROLES, SYSTEM_TENANT_ROLES.COUNSELLOR));
 
 // True when the actor is limited to their own uploaded recordings.
 const isOwnOnly = (user) => user.role === SYSTEM_TENANT_ROLES.COUNSELLOR;
@@ -330,6 +345,9 @@ const listQuery = z.object({
   // distinguish "attached to lead(s)" vs "needs review".
   match_status: z.enum(['matched', 'unmatched', 'multi']).optional(),
   lead_id: z.string().uuid().optional(),
+  // Sent by the admin's branch switcher (withBranch); recordings carry the
+  // uploading counsellor's branch.
+  branch_id: z.string().uuid().optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
@@ -349,6 +367,7 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
       conds.push(`dr.match_status = $${params.length}`);
     }
     if (req.query.lead_id) { params.push(req.query.lead_id); conds.push(`dr.lead_id = $${params.length}`); }
+    if (req.query.branch_id) { params.push(req.query.branch_id); conds.push(`dr.branch_id = $${params.length}`); }
     const offset = (req.query.page - 1) * req.query.limit;
     params.push(req.query.limit, offset);
     const { rows } = await tenantQuery(

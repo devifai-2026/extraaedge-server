@@ -51,6 +51,7 @@ import whatsappWebhookRouter from './modules/communications/whatsapp-inbox/webho
 import scheduledSendsRouter from './modules/scheduled-sends/routes.js';
 import callsRouter from './modules/calls/routes.js';
 import deviceRecordingsRouter from './modules/device-recordings/routes.js';
+import qaReviewsRouter from './modules/qa-reviews/routes.js';
 import paymentsRouter from './modules/payments/routes.js';
 import subscriptionsRouter from './modules/subscriptions/routes.js';
 import assignmentRulesRouter from './modules/assignment-rules/routes.js';
@@ -196,6 +197,7 @@ export const mountRoutes = (app) => {
   // Android call-recorder app uploads (device shared-secret auth on POST; CRM
   // JWT auth on the read/admin routes).
   api.use('/device-recordings', deviceRecordingsRouter);
+  api.use('/qa-reviews', qaReviewsRouter);
   api.use('/payments', paymentsRouter);
   api.use('/subscription', subscriptionsRouter);
 

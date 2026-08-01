@@ -8,7 +8,7 @@ import { logger } from '../lib/logger.js';
 import {
   DEFAULT_BUSINESS_HOURS, DEFAULT_TAB_KEYS, CALL_DISPOSITIONS,
   HEAD_TRAINER_TAB_KEYS, TRAINER_TAB_KEYS, STUDENT_TAB_KEYS,
-  HR_TAB_KEYS, PLACEMENT_TAB_KEYS,
+  HR_TAB_KEYS, PLACEMENT_TAB_KEYS, QA_TAB_KEYS,
 } from '../config/constants.js';
 
 const { Client } = pg;
@@ -89,8 +89,11 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       // CSV export and sudo-login (impersonation) — are enforced at the route
       // layer, not via tab keys, so the tab grant can be the full set. Lead /
       // analytics visibility is scoped server-side to their branch subtree.
-      { name: 'branch_manager', description: 'Runs a branch — admin-like, minus lead export & user impersonation', scope: 'branch_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.map((t) => [t, 'full'])) },
-      { name: 'sales_manager', description: 'Manages a team of counsellors', scope: 'sales_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration').map((t) => [t, 'full'])) },
+      // 'qa.reviews' is withheld from both manager tiers: the scoring routes
+      // behind it accept only qa + super_admin, so granting the tab would put
+      // a page in their sidebar that 403s on load.
+      { name: 'branch_manager', description: 'Runs a branch — admin-like, minus lead export & user impersonation', scope: 'branch_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => t !== 'qa.reviews').map((t) => [t, 'full'])) },
+      { name: 'sales_manager', description: 'Manages a team of counsellors', scope: 'sales_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration' && t !== 'qa.reviews').map((t) => [t, 'full'])) },
       { name: 'counsellor', description: 'Handles assigned leads', scope: 'counsellor', is_system: true, tab_permissions: {
         dashboard: 'full', leads: 'full', raw_data: 'read_only', failed_leads: 'read_only',
         followups: 'full', whatsapp: 'full', bulk_upload: 'full',
@@ -116,6 +119,9 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       { name: 'hr', description: 'HR — interview evaluation + certificates', scope: 'hr', is_system: true, tab_permissions: Object.fromEntries(HR_TAB_KEYS.map((t) => [t, 'full'])) },
       // placement team: companies, job openings, applications, criteria firing.
       { name: 'placement', description: 'Placement — companies, openings, applications', scope: 'placement', is_system: true, tab_permissions: Object.fromEntries(PLACEMENT_TAB_KEYS.map((t) => [t, 'full'])) },
+      // Call-quality reviewer. Only the review queue — the qa.feedback report
+      // belongs to the manager tiers, which get it via DEFAULT_TAB_KEYS.
+      { name: 'qa', description: 'QA — reviews and rates counsellor call recordings', scope: 'qa', is_system: true, tab_permissions: Object.fromEntries(QA_TAB_KEYS.map((t) => [t, 'full'])) },
     ];
     const roleIds = {};
     for (const r of roleBundles) {

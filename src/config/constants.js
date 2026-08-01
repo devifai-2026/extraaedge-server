@@ -18,6 +18,11 @@ export const SYSTEM_TENANT_ROLES = Object.freeze({
   // manager (or directly to the tenant's super_admin). Scoped lead
   // visibility: they only see leads where converted_at IS NOT NULL.
   ACCOUNT_MANAGER: 'account_manager',
+  // Call-quality reviewer. Listens to matched call recordings across the
+  // tenant and scores the counsellor who made the call against the
+  // qa_review_parameters rubric. Read-only on leads — the only thing they
+  // write is a review.
+  QA: 'qa',
 });
 
 // Manager-tier roles whose lead/ticket/analytics visibility is their own
@@ -227,6 +232,12 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // converted lead's admission status without leaving their normal
   // surfaces. Defaulted to super_admin only at provisioning time.
   'admissions.pipeline',
+  // ---- QA call reviews ---------------------------------------------------
+  // qa.reviews is the reviewer's scoring queue (qa + super_admin only — the
+  // routes behind it reject manager tiers). qa.feedback is the read-back
+  // report for admins / branch managers / sales managers.
+  'qa.reviews',
+  'qa.feedback',
   // Counsellor-facing admissions tab: shows ONLY the students they converted
   // (scoped server-side by guided_by_counsellor_id). They configure the fee
   // offer + send the admission link from here. Seeded to counsellor.
@@ -307,3 +318,6 @@ export const HR_TAB_KEYS = Object.freeze([
 export const PLACEMENT_TAB_KEYS = Object.freeze([
   'placement.dashboard', 'placement.companies', 'placement.openings', 'placement.applications',
 ]);
+// QA: the review queue is the reviewer's working surface; the feedback report
+// is the manager read-back, so the two are granted separately.
+export const QA_TAB_KEYS = Object.freeze(['qa.reviews']);

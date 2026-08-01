@@ -18,6 +18,18 @@ const loadUpdatedAt = async (req) => repo.getUpdatedAt(req.tenant, req.params.id
 // /users/team — before the :id routes so it doesn't match
 router.get('/team', controller.myTeam);
 
+// /users/options — id + name + role for every active user, for populating
+// owner / counsellor pick-lists.
+//
+// Deliberately NOT behind requireRole and NOT paginated, unlike GET /users:
+// that route is the staff-management surface (full records, 50 per page,
+// manager-tier only, branch_manager sees just their manager_id subtree), and
+// filter dropdowns built on it silently came up empty for accounts-module
+// roles and for branch managers with no direct reports — and truncated at 50
+// for everyone else. Colleague names are already tenant-visible via Lead Pool,
+// so labels are safe here; anything sensitive stays on GET /users.
+router.get('/options', controller.options);
+
 // Update the current user's UI theme (3 brand colors). Open to every
 // authenticated tenant role — each user manages their own theme. The
 // route lives before /:id so the literal "me" doesn't match the UUID

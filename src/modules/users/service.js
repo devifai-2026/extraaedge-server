@@ -144,6 +144,10 @@ export const listUsers = async (tenant, query, actor) => {
   return repo.list(tenant, query);
 };
 
+// Unscoped, unpaginated label source for filter dropdowns — see the route
+// comment on /users/options for why this doesn't mirror listUsers' scoping.
+export const listUserOptions = async (tenant) => repo.listOptions(tenant);
+
 export const getUser = async (tenant, id) => {
   const row = await repo.findById(tenant, id);
   if (!row) throw notFound('User not found');

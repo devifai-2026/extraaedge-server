@@ -23,6 +23,12 @@ export const list = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const options = async (req, res, next) => {
+  try {
+    res.json({ data: await service.listUserOptions(req.tenant), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const get = async (req, res, next) => {
   try { res.json({ data: await service.getUser(req.tenant, req.params.id), meta: { requestId: req.id } }); }
   catch (err) { next(err); }
