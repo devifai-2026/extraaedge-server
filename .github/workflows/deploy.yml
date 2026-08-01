@@ -88,14 +88,20 @@ jobs:
           echo "== restart requested"
           REMOTE
 
-      - name: Wait for the app to come back
+      - name: Wait for the new process to serve
         run: |
-          for i in $(seq 1 20); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' https://admissioncrm.live/healthz || true)
-            if [ "$code" = "200" ]; then echo "healthz OK after ${i} attempt(s)"; exit 0; fi
-            sleep 5
+          # healthz alone is not enough: it can be answered by the OLD worker
+          # that is still up while Passenger respawns, and then the first real
+          # request lands mid-restart and 503s. Poll a route instead, and treat
+          # 5xx/000 as "still warming".
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://admissioncrm.live/api/v1/qa-reviews/parameters || echo 000)
+            case "$code" in
+              5*|000) sleep 5 ;;
+              *) echo "serving after ${i} attempt(s) (status $code)"; exit 0 ;;
+            esac
           done
-          echo "::error::app did not return 200 from /healthz within 100s"
+          echo "::error::app never stopped returning 5xx within 150s"
           exit 1
 
       - name: Smoke-test the API
@@ -106,16 +112,28 @@ jobs:
           # This is the check that distinguishes new code from old — /users/*
           # and /platform/* 401 either way because their routers mount
           # authRequired ahead of routing.
-          for path in /api/v1/qa-reviews/parameters /api/v1/qa-reviews/queue; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "https://admissioncrm.live$path")
-            echo "GET $path -> $code"
-            [ "$code" = "401" ] || { echo "::error::$path returned $code, expected 401"; fail=1; }
-          done
+          #
+          # Retries on 5xx only: a wrong-but-stable status (404) fails fast,
+          # while a cold worker gets a moment to warm up.
+          check() {
+            local method="$1" path="$2" want="$3" code=
+            for _ in 1 2 3 4 5; do
+              if [ "$method" = POST ]; then
+                code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                  -H 'Content-Type: application/json' -d '{}' "https://admissioncrm.live$path" || echo 000)
+              else
+                code=$(curl -s -o /dev/null -w '%{http_code}' "https://admissioncrm.live$path" || echo 000)
+              fi
+              case "$code" in 5*|000) sleep 5 ;; *) break ;; esac
+            done
+            echo "$method $path -> $code"
+            [ "$code" = "$want" ] || { echo "::error::$path returned $code, expected $want"; fail=1; }
+          }
 
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-            -H 'Content-Type: application/json' -d '{}' \
-            https://admissioncrm.live/api/v1/platform/impersonate/tenant-admin)
-          echo "POST /api/v1/platform/impersonate/tenant-admin -> $code"
-          [ "$code" = "401" ] || { echo "::error::impersonate route returned $code, expected 401"; fail=1; }
+          check GET  /api/v1/qa-reviews/parameters 401
+          check GET  /api/v1/qa-reviews/queue 401
+          check POST /api/v1/platform/impersonate/tenant-admin 401
+          # Passwordless login config must be readable without a session.
+          check GET  '/api/v1/auth/login-methods?tenant_slug=demo' 200
 
           exit $fail
