@@ -12,6 +12,24 @@ export const start = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const startTenantAdmin = async (req, res, next) => {
+  try {
+    const result = await service.startTenantAdminImpersonation({
+      actor: req.user,
+      input: req.body,
+      ip: req.ip,
+      user_agent: req.headers['user-agent'],
+    });
+    res.status(201).json({ data: result, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const exchange = async (req, res, next) => {
+  try {
+    res.json({ data: await service.exchangeHandoff({ code: req.body.code }), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const stop = async (req, res, next) => {
   try {
     const session_id = req.user.impersonationSessionId ?? req.user.sessionId;

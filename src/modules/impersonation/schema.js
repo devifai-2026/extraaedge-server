@@ -7,6 +7,20 @@ export const startImpersonationSchema = z.object({
   read_only: z.boolean().default(true),
 });
 
+// One-click entry into a tenant's own admin console. The target user is
+// resolved server-side (the tenant's super_admin), so the console only names
+// the tenant. A reason is still recorded — it just doesn't have to be typed
+// for the common "go look at their setup" case.
+export const startTenantAdminSchema = z.object({
+  tenant_id: z.string().uuid(),
+  reason: z.string().max(500).default('Product-owner support access'),
+  read_only: z.boolean().optional(),
+});
+
+export const exchangeHandoffSchema = z.object({
+  code: z.string().min(20).max(200),
+});
+
 export const sessionIdParam = z.object({ id: z.string().uuid() });
 
 export const listQuery = z.object({

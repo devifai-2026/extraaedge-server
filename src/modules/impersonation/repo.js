@@ -9,6 +9,34 @@ export const startSession = async ({ platform_user_id, tenant_id, tenant_user_id
   return rows[0];
 };
 
+// Attach a one-time handoff code (hashed) to a freshly started session.
+export const setHandoff = async (id, { code_hash, expires_at }) => {
+  const { rows } = await sysQuery(
+    `UPDATE impersonation_sessions
+        SET handoff_code_hash = $2, handoff_expires_at = $3, handoff_used_at = NULL
+      WHERE id = $1 RETURNING *`,
+    [id, code_hash, expires_at],
+  );
+  return rows[0] ?? null;
+};
+
+// Redeem a handoff code. The UPDATE itself is the guard: the WHERE clause
+// only matches an unused, unexpired, still-open session, so two concurrent
+// redemptions can't both win.
+export const redeemHandoff = async (code_hash) => {
+  const { rows } = await sysQuery(
+    `UPDATE impersonation_sessions
+        SET handoff_used_at = now()
+      WHERE handoff_code_hash = $1
+        AND handoff_used_at IS NULL
+        AND handoff_expires_at > now()
+        AND ended_at IS NULL
+      RETURNING *`,
+    [code_hash],
+  );
+  return rows[0] ?? null;
+};
+
 export const endSession = async (id) => {
   const { rows } = await sysQuery(
     `UPDATE impersonation_sessions SET ended_at = now() WHERE id = $1 AND ended_at IS NULL RETURNING *`,
