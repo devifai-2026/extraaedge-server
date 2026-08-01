@@ -1,5 +1,12 @@
 # systemd setup
 
+> ⚠️ **This is NOT how production runs.** admissioncrm.live is LiteSpeed
+> Passenger on Hostinger shared hosting — there is no systemd unit and no
+> `/opt/extraaedge`. Following the steps below against production will appear
+> to work and change nothing. See [`DEPLOY.md`](../../DEPLOY.md).
+>
+> Kept for a future VPS migration.
+
 ```bash
 sudo cp extraaedge-api.service /etc/systemd/system/
 sudo cp [email protected] /etc/systemd/system/

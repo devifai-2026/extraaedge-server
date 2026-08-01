@@ -1,0 +1,121 @@
+name: Deploy to Hostinger
+
+# Every push to main ships. The box is LiteSpeed Passenger on Hostinger shared
+# hosting, NOT the systemd setup described in ops/systemd/ — see DEPLOY.md.
+#
+# Two directories matter and confusing them is the classic failure here:
+#   ~/domains/admissioncrm.live/nodejs                 the git checkout
+#   ~/domains/.builds/current/nodejs                   what Passenger runs
+# So the job pulls into the checkout, syncs src/ into the live build, and
+# touches the build's own tmp/restart.txt (the configured PassengerRestartDir).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # manual re-deploy from the Actions tab
+
+concurrency:
+  # Never let two deploys interleave their rsync + restart.
+  group: deploy-hostinger
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Authorise SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.HOSTINGER_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pin the host key so a MITM can't collect the deploy key.
+          printf '%s\n' "${{ secrets.HOSTINGER_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          SSH_HOST: ${{ secrets.HOSTINGER_HOST }}
+          SSH_PORT: ${{ secrets.HOSTINGER_PORT }}
+          SSH_USER: ${{ secrets.HOSTINGER_USER }}
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
+            "SHA=$SHA bash -l -s" <<'REMOTE'
+          set -euo pipefail
+
+          D="$HOME/domains/admissioncrm.live"
+          SRC="$D/nodejs"
+          LIVE="$D/.builds/current/nodejs"
+
+          [ -d "$SRC/.git" ] || { echo "::error::git checkout missing at $SRC"; exit 1; }
+          [ -d "$LIVE/src" ] || { echo "::error::live build missing at $LIVE"; exit 1; }
+
+          # Hostinger's Node is off the default non-interactive PATH.
+          ALT_NODE=/opt/alt/alt-nodejs20/root/usr/bin
+          [ -d "$ALT_NODE" ] && export PATH="$ALT_NODE:$PATH"
+
+          cd "$SRC"
+          echo "== before: $(git log -1 --format='%h %s')"
+          git fetch --quiet origin main
+          git pull --ff-only origin main
+          echo "== after:  $(git log -1 --format='%h %s')"
+
+          # Fail loudly if the box didn't land on the commit that triggered
+          # this run — a silent old-code deploy is the thing we're preventing.
+          LOCAL_SHA="$(git rev-parse HEAD)"
+          if [ "$LOCAL_SHA" != "$SHA" ]; then
+            echo "::warning::server is on $LOCAL_SHA but this run is for $SHA"
+          fi
+
+          # Only reinstall when the dependency set actually changed; npm ci on
+          # every push costs minutes on shared hosting for no benefit.
+          if ! diff -q package.json "$LIVE/package.json" >/dev/null 2>&1; then
+            echo "== package.json changed, installing"
+            npm install --omit=dev --no-audit --no-fund
+            cp package.json package-lock.json "$LIVE/" 2>/dev/null || true
+            rsync -a node_modules/ "$LIVE/node_modules/"
+          else
+            echo "== dependencies unchanged"
+          fi
+
+          # src/ only: keeps the build's own .env and node_modules untouched.
+          rsync -a --delete "$SRC/src/" "$LIVE/src/"
+          echo "== synced src/ into the live build"
+
+          mkdir -p "$LIVE/tmp"
+          touch "$LIVE/tmp/restart.txt"
+          echo "== restart requested"
+          REMOTE
+
+      - name: Wait for the app to come back
+        run: |
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://admissioncrm.live/healthz || true)
+            if [ "$code" = "200" ]; then echo "healthz OK after ${i} attempt(s)"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::app did not return 200 from /healthz within 100s"
+          exit 1
+
+      - name: Smoke-test the API
+        run: |
+          fail=0
+
+          # A mounted route answers 401 (auth required); an unmounted one 404s.
+          # This is the check that distinguishes new code from old — /users/*
+          # and /platform/* 401 either way because their routers mount
+          # authRequired ahead of routing.
+          for path in /api/v1/qa-reviews/parameters /api/v1/qa-reviews/queue; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://admissioncrm.live$path")
+            echo "GET $path -> $code"
+            [ "$code" = "401" ] || { echo "::error::$path returned $code, expected 401"; fail=1; }
+          done
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            https://admissioncrm.live/api/v1/platform/impersonate/tenant-admin)
+          echo "POST /api/v1/platform/impersonate/tenant-admin -> $code"
+          [ "$code" = "401" ] || { echo "::error::impersonate route returned $code, expected 401"; fail=1; }
+
+          exit $fail
