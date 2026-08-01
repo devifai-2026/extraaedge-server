@@ -1,0 +1,80 @@
+name: Diagnose production
+
+# Manually-run, read-only look at the live box. Exists because the app returns
+# deliberately vague errors to clients (it should) while the real cause goes to
+# the server log — and reading that otherwise means a human SSHing in.
+#
+# Output is filtered to the lines needed for a specific question; it never
+# prints the .env or any credential value.
+on:
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: 'Extra pattern to search the app log for (optional)'
+        required: false
+        default: ''
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Authorise SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.HOSTINGER_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.HOSTINGER_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Inspect
+        env:
+          SSH_HOST: ${{ secrets.HOSTINGER_HOST }}
+          SSH_PORT: ${{ secrets.HOSTINGER_PORT }}
+          SSH_USER: ${{ secrets.HOSTINGER_USER }}
+          EXTRA_GREP: ${{ inputs.grep }}
+        run: |
+          ssh -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
+            "EXTRA_GREP='$EXTRA_GREP' bash -l -s" <<'REMOTE'
+          set -uo pipefail
+          LIVE="$HOME/domains/admissioncrm.live/.builds/current/nodejs"
+          LOG="$LIVE/console.log"
+
+          echo "===== deployed commit ====="
+          (cd "$HOME/domains/admissioncrm.live/nodejs" && git log -1 --format='%h %s')
+
+          echo
+          echo "===== is the live code current? ====="
+          grep -q "creds: wa?.enabled" "$LIVE/src/modules/auth/service.js" \
+            && echo "tenant-creds OTP fix: PRESENT" || echo "tenant-creds OTP fix: MISSING (stale build)"
+          grep -q "resolveCreds" "$LIVE/src/lib/providers/whatsapp-wabridge.js" \
+            && echo "per-tenant sender:    PRESENT" || echo "per-tenant sender:    MISSING (stale build)"
+
+          echo
+          echo "===== WhatsApp env the process resolved (no secret values) ====="
+          # Read from the env file the preloader injects, printing only whether
+          # each key is set — never its value.
+          CFG="$HOME/domains/admissioncrm.live/.builds/config/.env"
+          if [ -f "$CFG" ]; then
+            grep -E '^(WABRIDGE_|MOBILE_OTP_DEMO|OTP_LOGIN_ENFORCED|NODE_ENV|APP_WEB_URL)' "$CFG" \
+              | awk -F= '{k=$1; v=substr($0,index($0,"=")+1);
+                  if (k ~ /(KEY|TOKEN|SECRET|PASSWORD)$/)
+                    printf "%s=<%s>\n", k, (length(v)>0 ? "set" : "empty");
+                  else printf "%s=%s\n", k, (length(v)>0 ? v : "<empty>")}'
+          else
+            echo "(no $CFG)"
+          fi
+
+          echo
+          echo "===== last OTP send failures ====="
+          grep -a -A5 "OTP send failed" "$LOG" 2>/dev/null | tail -24 || echo "(none)"
+
+          echo
+          echo "===== last WABridge responses ====="
+          grep -a -A6 "WABridge template send failed" "$LOG" 2>/dev/null | tail -16 || echo "(none)"
+
+          if [ -n "${EXTRA_GREP:-}" ]; then
+            echo
+            echo "===== matches for: $EXTRA_GREP ====="
+            grep -a -A3 "$EXTRA_GREP" "$LOG" 2>/dev/null | tail -30 || echo "(none)"
+          fi
+          REMOTE
