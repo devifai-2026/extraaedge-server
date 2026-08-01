@@ -19,6 +19,29 @@ export const refresh = async (req, res, next) => {
 };
 
 // Counsellor recorder app login (institute code + profile phone + OTP).
+export const loginMethods = async (req, res, next) => {
+  try {
+    res.json({ data: await service.loginMethods({ tenant_slug: req.query.tenant_slug }), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const webRequestOtp = async (req, res, next) => {
+  try {
+    res.json({ data: await service.requestWebLoginOtp(req.body), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+export const webVerifyOtp = async (req, res, next) => {
+  try {
+    const result = await service.verifyWebLoginOtp({
+      ...req.body,
+      ip: req.ip,
+      user_agent: req.headers['user-agent'],
+    });
+    res.json({ data: result, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const mobileRequestOtp = async (req, res, next) => {
   try {
     const result = await service.requestMobileLoginOtp(req.body);

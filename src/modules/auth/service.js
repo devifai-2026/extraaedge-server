@@ -166,6 +166,14 @@ const loginTenantUser = async ({ email, password, tenant_slug, ip, user_agent })
   const tenant = await resolveTenantBySlug(tenant_slug);
   if (tenant.status !== 'active') throw tenantSuspended();
 
+  // Passwordless rollout: once OTP_LOGIN_ENFORCED is on, only the allowlisted
+  // slugs (the demo tenant) may still post a password. Everyone else is sent
+  // to the WhatsApp OTP flow. Kept as a server-side check so an old cached
+  // build of the login page can't bypass it.
+  if (!tenantUsesPassword(tenant.slug)) {
+    throw forbidden('This institute signs in with a WhatsApp OTP — password login is disabled');
+  }
+
   const user = await repo.findUserByEmail(tenant, email);
   if (!user || !user.is_active) throw unauthenticated('Invalid credentials');
 
@@ -323,6 +331,192 @@ export const verifyMobileLoginOtp = async ({ tenant_slug, phone, otp, ip, user_a
       [user.id, digits],
     );
     throw validationError([{ path: 'otp', message: 'Invalid or expired OTP' }]);
+  }
+
+  return mintTenantSession(tenant, user, { ip, user_agent });
+};
+
+// ---------- passwordless web login (WhatsApp OTP) ----------
+//
+// Sign-in is email + phone, and BOTH must belong to the same active user in
+// that tenant before anything is sent — the phone alone would let anyone
+// enumerate accounts, and the email alone would let anyone point a colleague's
+// account at their own handset.
+//
+// The no-phone-on-file case is the one exception: there is nothing to match
+// against, so the user supplies a number and it is bound only after the code
+// sent to it verifies. That still requires knowing a valid tenant + email, and
+// every bind is logged.
+//
+// Deliberately NOT wired to MOBILE_OTP_DEMO. That flag makes the recorder
+// app's OTP a fixed '1234'; honouring it here would turn every web account's
+// password into '1234' the moment WhatsApp broke. A send failure surfaces as
+// an error instead.
+
+// Tenants that keep password login (the demo tenant), parsed from config.
+const passwordLoginSlugs = () => new Set(
+  String(env.PASSWORD_LOGIN_SLUGS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+export const tenantUsesPassword = (slug) => !env.OTP_LOGIN_ENFORCED || passwordLoginSlugs().has(String(slug || '').toLowerCase());
+
+// What the login screen should render for a tenant.
+export const loginMethods = async ({ tenant_slug }) => {
+  const tenant = await resolveTenantBySlug(tenant_slug);
+  if (tenant.status !== 'active') throw tenantSuspended();
+  const allowlisted = passwordLoginSlugs().has(tenant.slug.toLowerCase());
+  return {
+    tenant_slug: tenant.slug,
+    tenant_name: tenant.brand_name ?? tenant.name,
+    // Whether the server will still ACCEPT a password. Stays true for
+    // everyone while OTP_LOGIN_ENFORCED is off — the break-glass that keeps
+    // logins possible if WhatsApp delivery turns out to be broken.
+    password: tenantUsesPassword(tenant.slug),
+    // Whether the login screen should OFFER a password box. Only the
+    // allowlisted tenants (demo), so every other institute sees the OTP form
+    // immediately, before enforcement is switched on.
+    password_ui: allowlisted,
+    otp: true,
+  };
+};
+
+const findWebLoginUser = async (tenant, email) => {
+  const user = await repo.findUserByEmail(tenant, email);
+  // Same message whether the address is unknown or inactive — a login form
+  // shouldn't confirm which addresses exist.
+  if (!user || !user.is_active) {
+    throw unauthenticated('No active account with this email in this institute');
+  }
+  return user;
+};
+
+// Mask for display: 98XXXXXX10 — enough for the user to recognise which of
+// their numbers it is, not enough to read it off someone else's screen.
+const maskPhone = (phone) => {
+  const d = last10Digits(phone);
+  if (d.length < 10) return null;
+  return `${d.slice(0, 2)}XXXXXX${d.slice(-2)}`;
+};
+
+const issueWebOtp = async (tenant, user, digits, { binding }) => {
+  const code = generateOtp(env.WEB_OTP_LENGTH);
+  // Expire (not verify) any pending code so a resend invalidates the previous
+  // one without polluting verified_at, which the recorder metrics count.
+  await tenantQuery(
+    tenant,
+    `UPDATE otp_verifications SET expires_at = now()
+      WHERE user_id = $1 AND purpose = 'web_login' AND verified_at IS NULL AND expires_at > now()`,
+    [user.id],
+  );
+  await tenantQuery(
+    tenant,
+    `INSERT INTO otp_verifications (user_id, purpose, channel, address, otp_hash, expires_at, max_attempts)
+     VALUES ($1, 'web_login', 'whatsapp', $2, $3, $4, $5)`,
+    [user.id, digits, hashOtp(code, digits), otpExpiryDate(), env.OTP_MAX_ATTEMPTS],
+  );
+
+  try {
+    await sendPhoneOtp({ to: digits, code });
+  } catch (err) {
+    // Kill the code we just stored: leaving it live after a failed send would
+    // let a retry storm accumulate valid codes nobody received.
+    await tenantQuery(
+      tenant,
+      `UPDATE otp_verifications SET expires_at = now()
+        WHERE user_id = $1 AND purpose = 'web_login' AND verified_at IS NULL`,
+      [user.id],
+    );
+    logger.error({ err: err.message, user_id: user.id, tenant: tenant.slug }, 'web-login OTP send failed');
+    throw validationError([{
+      path: 'phone',
+      message: 'Could not send the OTP over WhatsApp right now. Contact your admin if this continues.',
+    }]);
+  }
+
+  logger.info({ user_id: user.id, tenant: tenant.slug, binding }, 'web-login OTP issued');
+  return {
+    sent: true,
+    binding,
+    phone_masked: maskPhone(digits),
+    expires_in_minutes: env.OTP_TTL_MINUTES,
+    otp_length: env.WEB_OTP_LENGTH,
+  };
+};
+
+export const requestWebLoginOtp = async ({ tenant_slug, email, phone }) => {
+  const tenant = await resolveTenantBySlug(tenant_slug);
+  if (tenant.status !== 'active') throw tenantSuspended();
+  const user = await findWebLoginUser(tenant, email);
+
+  const onFile = last10Digits(user.phone ?? '');
+
+  // Nothing bound yet → tell the client to collect a number. Without a phone
+  // supplied we cannot send anything.
+  if (onFile.length < 10) {
+    if (!phone) {
+      return { needs_phone: true, sent: false, email: user.email, name: user.name };
+    }
+    const digits = last10Digits(phone);
+    if (digits.length < 10) {
+      throw validationError([{ path: 'phone', message: 'Enter a valid 10-digit phone number' }]);
+    }
+    // The number is NOT written to the user yet — only after the code
+    // verifies (see verifyWebLoginOtp).
+    return issueWebOtp(tenant, user, digits, { binding: true });
+  }
+
+  // Bound already → the supplied number must be that number.
+  if (!phone) {
+    throw validationError([{ path: 'phone', message: 'Enter the phone number registered on this account' }]);
+  }
+  if (last10Digits(phone) !== onFile) {
+    throw unauthenticated('That phone number does not match this account. Ask your admin to update it.');
+  }
+  return issueWebOtp(tenant, user, onFile, { binding: false });
+};
+
+export const verifyWebLoginOtp = async ({ tenant_slug, email, otp, ip, user_agent }) => {
+  const tenant = await resolveTenantBySlug(tenant_slug);
+  if (tenant.status !== 'active') throw tenantSuspended();
+  const user = await findWebLoginUser(tenant, email);
+
+  // Find the live code first so we know which number it went to — that's the
+  // number to bind when the account had none.
+  const { rows: pending } = await tenantQuery(
+    tenant,
+    `SELECT id, address FROM otp_verifications
+      WHERE user_id = $1 AND purpose = 'web_login' AND verified_at IS NULL
+        AND expires_at > now() AND attempts < max_attempts
+      ORDER BY created_at DESC LIMIT 1`,
+    [user.id],
+  );
+  if (!pending[0]) throw validationError([{ path: 'otp', message: 'This code has expired — request a new one' }]);
+
+  const { address } = pending[0];
+  const { rows: ok } = await tenantQuery(
+    tenant,
+    `UPDATE otp_verifications SET verified_at = now()
+      WHERE id = $1 AND otp_hash = $2 AND verified_at IS NULL AND expires_at > now()
+      RETURNING id`,
+    [pending[0].id, hashOtp(otp, address)],
+  );
+  if (!ok[0]) {
+    await tenantQuery(
+      tenant,
+      `UPDATE otp_verifications SET attempts = attempts + 1 WHERE id = $1`,
+      [pending[0].id],
+    );
+    throw validationError([{ path: 'otp', message: 'Incorrect code' }]);
+  }
+
+  // First-time bind: the code proves control of the handset, so record it.
+  if (last10Digits(user.phone ?? '').length < 10) {
+    await tenantQuery(tenant, `UPDATE users SET phone = $2, updated_at = now() WHERE id = $1`, [user.id, address]);
+    user.phone = address;
+    logger.warn({ user_id: user.id, tenant: tenant.slug }, 'web-login bound a new phone to an account that had none');
   }
 
   return mintTenantSession(tenant, user, { ip, user_agent });

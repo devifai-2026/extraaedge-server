@@ -21,6 +21,25 @@ export const mobileOtpVerifySchema = mobileOtpRequestSchema.extend({
   otp: z.string().min(4).max(8),
 });
 
+// Passwordless web login. `phone` is optional on the request so the client can
+// probe an email first: an account with no number on file comes back as
+// { needs_phone: true }, and the client re-posts with the number to bind.
+export const webOtpRequestSchema = z.object({
+  tenant_slug: z.string().min(1).max(80),
+  email: z.string().email(),
+  phone: z.string().min(10).max(20).optional(),
+});
+
+export const webOtpVerifySchema = z.object({
+  tenant_slug: z.string().min(1).max(80),
+  email: z.string().email(),
+  otp: z.string().min(4).max(8),
+});
+
+export const loginMethodsQuery = z.object({
+  tenant_slug: z.string().min(1).max(80),
+});
+
 export const forgotPasswordSchema = z.object({
   email: z.string().email(),
   tenant_slug: z.string().optional(),

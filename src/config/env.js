@@ -162,8 +162,25 @@ const schema = z.object({
   WABRIDGE_APP_KEY: z.string().optional().default(''),
   WABRIDGE_AUTH_KEY: z.string().optional().default(''),
   WABRIDGE_DEVICE_ID: z.string().optional().default(''),
-  // Numeric template id for the OTP WhatsApp template (speedup_template).
-  WABRIDGE_TEMPLATE_OTP: z.string().optional().default(''),
+  // Numeric template id for the OTP WhatsApp template
+  // (closeflow_template_otp: "Hello , here is your {{1}} for CloseFlow {{2}} .
+  // *CloseFlow*" — {{1}} = 'OTP', {{2}} = the code).
+  WABRIDGE_TEMPLATE_OTP: z.string().optional().default('1005583772355301'),
+
+  // ── Passwordless web login (WhatsApp OTP) ──
+  // Tenant users sign in with email + phone; both must belong to the same
+  // account, then a 4-digit code goes to that number over WhatsApp.
+  //
+  // ENFORCED is the kill switch and defaults to FALSE on purpose: turning it
+  // on rejects password logins tenant-wide, so if WhatsApp delivery is not
+  // actually working every user is locked out at once. Ship the code, confirm
+  // a real code arrives in production, THEN set this true.
+  OTP_LOGIN_ENFORCED: boolLike.default(false),
+  // Slugs that keep password login even once OTP is enforced. 'demo' is the
+  // sales/demo tenant, which must keep working exactly as before.
+  PASSWORD_LOGIN_SLUGS: z.string().optional().default('demo'),
+  // Digits in the web-login code.
+  WEB_OTP_LENGTH: z.coerce.number().int().min(4).max(8).default(4),
 
   // ── WhatsApp inbox (WABridge send + Meta Cloud API webhook receive) ──
   // Outbound goes through WABridge (above). Inbound + delivery status + media
