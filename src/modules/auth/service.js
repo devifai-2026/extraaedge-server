@@ -12,6 +12,7 @@ import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
 import { last10Digits } from '../../lib/phone.js';
 import { sendPhoneOtp } from '../../lib/providers/whatsapp-wabridge.js';
+import { getSettings as getWaSettings } from '../communications/whatsapp-inbox/service.js';
 import { logger } from '../../lib/logger.js';
 
 // Tries to sign a download URL for the user's avatar object. Swallows
@@ -419,7 +420,17 @@ const issueWebOtp = async (tenant, user, digits, { binding }) => {
   );
 
   try {
-    await sendPhoneOtp({ to: digits, code });
+    // Send through THIS tenant's WABridge account. Each institute has its own
+    // (wa_settings), and a template only works on the account that owns it —
+    // using the platform-wide env keys is what made WABridge answer
+    // "You don't have enough permission to perform this action!".
+    const wa = await getWaSettings(tenant).catch(() => null);
+    await sendPhoneOtp({
+      to: digits,
+      code,
+      creds: wa?.enabled ? { appKey: wa.appKey, authKey: wa.authKey, deviceId: wa.deviceId } : undefined,
+      templateId: wa?.templateOtp || undefined,
+    });
   } catch (err) {
     // Kill the code we just stored: leaving it live after a failed send would
     // let a retry storm accumulate valid codes nobody received.

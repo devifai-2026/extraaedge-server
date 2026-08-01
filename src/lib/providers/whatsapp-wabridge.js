@@ -10,6 +10,18 @@ import { logger } from '../logger.js';
 const isConfigured = () =>
   Boolean(env.WABRIDGE_APP_KEY && env.WABRIDGE_AUTH_KEY && env.WABRIDGE_DEVICE_ID);
 
+// Credentials to send with. Each institute uses its OWN WABridge account
+// (wa_settings per tenant — see the 1700000108000 migration), so callers that
+// act for a tenant must pass those; the global env keys are only a fallback
+// for tenants that have not configured their own. Sending a tenant's template
+// with the global keys is what WABridge answers with
+// "You don't have enough permission to perform this action!".
+const resolveCreds = (creds) => ({
+  appKey: creds?.appKey || env.WABRIDGE_APP_KEY,
+  authKey: creds?.authKey || env.WABRIDGE_AUTH_KEY,
+  deviceId: creds?.deviceId || env.WABRIDGE_DEVICE_ID,
+});
+
 // WABridge expects 91 + last-10 digits for Indian numbers.
 const normalizeNumber = (raw) => {
   const digits = String(raw ?? '').replace(/\D/g, '');
@@ -19,19 +31,20 @@ const normalizeNumber = (raw) => {
 
 // Send a template message. `variables` is positional: [ {{1}}, {{2}}, ... ].
 // Returns { messageId }. Throws if not configured or the API reports failure.
-export const sendTemplate = async ({ to, templateId, variables = [] }) => {
-  if (!isConfigured()) {
-    throw new Error('WABridge not configured (set WABRIDGE_APP_KEY / WABRIDGE_AUTH_KEY / WABRIDGE_DEVICE_ID)');
+export const sendTemplate = async ({ to, templateId, variables = [], creds }) => {
+  const { appKey, authKey, deviceId } = resolveCreds(creds);
+  if (!appKey || !authKey || !deviceId) {
+    throw new Error('WABridge not configured for this tenant (set its app key / auth key / device id in WhatsApp settings)');
   }
   if (!templateId) throw new Error('WABridge templateId is required');
   const destination = normalizeNumber(to);
   if (!destination) throw new Error('Invalid destination number');
 
   const payload = {
-    'app-key': env.WABRIDGE_APP_KEY,
-    'auth-key': env.WABRIDGE_AUTH_KEY,
+    'app-key': appKey,
+    'auth-key': authKey,
     destination_number: destination,
-    device_id: env.WABRIDGE_DEVICE_ID,
+    device_id: deviceId,
     template_id: templateId,
     variables,
     button_variable: [],
@@ -55,8 +68,15 @@ export const sendTemplate = async ({ to, templateId, variables = [] }) => {
 // Send the phone-change OTP using the speedup_template
 // ("Here is Your {{1}} for speedup crm *{{2}}* *Speedup Team*"):
 //   {{1}} = "OTP", {{2}} = the code.
-export const sendPhoneOtp = async ({ to, code }) =>
-  sendTemplate({ to, templateId: env.WABRIDGE_TEMPLATE_OTP, variables: ['OTP', code] });
+// `creds` / `templateId` come from the tenant's own wa_settings when the
+// caller is acting for a tenant; both fall back to the global env.
+export const sendPhoneOtp = async ({ to, code, creds, templateId }) =>
+  sendTemplate({
+    to,
+    templateId: templateId || env.WABRIDGE_TEMPLATE_OTP,
+    variables: ['OTP', code],
+    creds,
+  });
 
 // ── Free-text send (WhatsApp inbox) ──
 // POST {BASE}/createtextmessage. Free-text only delivers inside WhatsApp's 24h

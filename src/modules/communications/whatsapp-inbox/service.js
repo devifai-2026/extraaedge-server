@@ -25,7 +25,7 @@ export const getSettings = async (tenant) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT enabled, wabridge_app_key, wabridge_auth_key, wabridge_device_id,
-            business_phone, webhook_token, updated_at
+            business_phone, webhook_token, wabridge_template_otp, updated_at
        FROM wa_settings WHERE id = true`,
   );
   const r = rows[0] || {};
@@ -36,6 +36,9 @@ export const getSettings = async (tenant) => {
     deviceId: r.wabridge_device_id || '',
     businessPhone: r.business_phone || '',
     webhookToken: r.webhook_token || '',
+    // Login-OTP template on THIS tenant's WABridge account. Empty -> the
+    // platform default (env.WABRIDGE_TEMPLATE_OTP).
+    templateOtp: r.wabridge_template_otp || '',
     updatedAt: r.updated_at || null,
   };
 };
@@ -48,7 +51,8 @@ export const saveSettings = async (tenant, input) => {
     tenant,
     `UPDATE wa_settings SET
        enabled = $1, wabridge_app_key = $2, wabridge_auth_key = $3,
-       wabridge_device_id = $4, business_phone = $5, webhook_token = $6, updated_at = now()
+       wabridge_device_id = $4, business_phone = $5, webhook_token = $6,
+       wabridge_template_otp = $7, updated_at = now()
      WHERE id = true`,
     [
       input.enabled ?? cur.enabled,
@@ -57,6 +61,7 @@ export const saveSettings = async (tenant, input) => {
       input.deviceId ?? cur.deviceId,
       input.businessPhone ?? cur.businessPhone,
       webhookToken,
+      input.templateOtp ?? cur.templateOtp,
     ],
   );
   return getSettings(tenant);
