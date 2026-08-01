@@ -42,6 +42,7 @@ router.get('/settings', requireRole('super_admin'), async (req, res, next) => {
         auth_key: s.authKey ? '••••••••' : '',      // never echo the secret back in full
         device_id: s.deviceId,
         business_phone: s.businessPhone,
+        template_otp: s.templateOtp,
         webhook_url: webhookUrl(req),
         configured: !!(s.appKey && s.authKey && s.deviceId),
       },
@@ -56,6 +57,7 @@ const settingsSchema = z.object({
   auth_key: z.string().max(400).optional(),   // '••••••••' left unchanged → ignored below
   device_id: z.string().max(200).optional(),
   business_phone: z.string().max(20).optional(),
+  template_otp: z.string().max(64).optional(),
 });
 router.put('/settings', requireRole('super_admin'), validate({ body: settingsSchema }), async (req, res, next) => {
   try {
@@ -67,6 +69,7 @@ router.put('/settings', requireRole('super_admin'), validate({ body: settingsSch
       authKey: b.auth_key && b.auth_key !== '••••••••' ? b.auth_key : undefined,
       deviceId: b.device_id,
       businessPhone: b.business_phone,
+      templateOtp: b.template_otp,
     });
     res.json({ data: { webhook_url: webhookUrl(req), configured: !!(saved.appKey && saved.authKey && saved.deviceId) }, meta: { requestId: req.id } });
   } catch (err) { next(err); }

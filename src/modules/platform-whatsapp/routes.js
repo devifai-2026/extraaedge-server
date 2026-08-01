@@ -28,6 +28,7 @@ const settingsSchema = z.object({
   auth_key: z.string().max(400).optional(),
   device_id: z.string().max(200).optional(),
   business_phone: z.string().max(20).optional(),
+  template_otp: z.string().max(64).optional(),
 });
 router.put('/:tenantId/settings', validate({ params: tenantParam, body: settingsSchema }), async (req, res, next) => {
   try { res.json({ data: await repo.saveSettings(req.params.tenantId, req.body), meta: { requestId: req.id } }); }

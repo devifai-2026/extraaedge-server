@@ -24,6 +24,9 @@ export const getSettings = async (tenantId) => {
     auth_key: s.authKey ? '••••••••' : '',
     device_id: s.deviceId,
     business_phone: s.businessPhone,
+    // Login-OTP template on THIS tenant's WABridge account. Blank = fall back
+    // to the platform default; a template only works on the account owning it.
+    template_otp: s.templateOtp,
     webhook_url: webhookUrl(tenant),
     configured: !!(s.appKey && s.authKey && s.deviceId),
   };
@@ -37,6 +40,7 @@ export const saveSettings = async (tenantId, input) => {
     authKey: input.auth_key && input.auth_key !== '••••••••' ? input.auth_key : undefined,
     deviceId: input.device_id,
     businessPhone: input.business_phone,
+    templateOtp: input.template_otp,
   });
   return { webhook_url: webhookUrl(tenant), configured: !!(saved.appKey && saved.authKey && saved.deviceId) };
 };
