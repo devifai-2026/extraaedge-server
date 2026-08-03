@@ -41,6 +41,7 @@ import savedFiltersRouter from './modules/saved-filters/routes.js';
 import followUpsRouter from './modules/follow-ups/routes.js';
 import quickAddRouter from './modules/quick-add/routes.js';
 import bulkIngestionRouter from './modules/bulk-ingestion/routes.js';
+import bulkAdmissionsRouter from './modules/bulk-admissions/routes.js';
 import rawDataRouter from './modules/raw-data/routes.js';
 import failedLeadsRouter from './modules/failed-leads/routes.js';
 import emailRouter from './modules/communications/email-routes.js';
@@ -171,6 +172,9 @@ export const mountRoutes = (app) => {
   api.use('/follow-ups', followUpsRouter);
   api.use('/quick-add', quickAddRouter);
   api.use('/bulk/leads', bulkIngestionRouter);
+  // Accounts-side historical admission importer. Separate mount (and role
+  // gate) from /bulk/leads because it writes money, not just leads.
+  api.use('/bulk/admissions', bulkAdmissionsRouter);
   api.use('/raw-data', rawDataRouter);
   api.use('/failed-leads', failedLeadsRouter);
 

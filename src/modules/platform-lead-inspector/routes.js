@@ -44,8 +44,15 @@ router.post('/:tenantId/leads/:leadId/restore', validate({ params: tenantLeadPar
   } catch (err) { next(err); }
 });
 
-// Bulk imports for a tenant.
-router.get('/:tenantId/bulk-imports', validate({ params: tenantParam, query: z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }) }), async (req, res, next) => {
+// Bulk imports for a tenant. Both importers by default (lead uploads and
+// Accounts admission imports); ?kind= narrows to one.
+router.get('/:tenantId/bulk-imports', validate({
+  params: tenantParam,
+  query: z.object({
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+    kind: z.enum(['leads', 'admissions']).optional(),
+  }),
+}), async (req, res, next) => {
   try {
     const data = await repo.listBulkImports(req.params.tenantId, req.query);
     res.json({ data, meta: { requestId: req.id } });

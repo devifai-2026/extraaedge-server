@@ -408,19 +408,30 @@ export const restoreLead = async (tenantId, leadId, actor) => {
 
 // Bulk imports for a tenant (status, file, row counts) — the product_owner's
 // window into "the bulk upload that failed".
-export const listBulkImports = async (tenantId, { limit = 50 }) => {
+//
+// Covers BOTH importers: the counsellor lead upload (kind='leads') and the
+// Accounts historical-admission import (kind='admissions'). The PO is the
+// escalation path for either, so the default is deliberately unfiltered;
+// pass ?kind= to narrow. `kind` is selected so the UI can label each row —
+// without it an admission import reads as a lead upload with odd counts.
+export const listBulkImports = async (tenantId, { limit = 50, kind } = {}) => {
   const tenant = await requireTenant(tenantId);
+  const params = [];
+  let where = '';
+  if (kind) { params.push(kind); where = `WHERE bi.kind = $${params.length}`; }
+  params.push(Math.min(Number(limit) || 50, 200));
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT bi.id, bi.created_at, bi.started_at, bi.completed_at, bi.status,
+    `SELECT bi.id, bi.kind, bi.created_at, bi.started_at, bi.completed_at, bi.status,
             bi.duplicate_handling, bi.total_rows, bi.success_rows, bi.failed_rows,
             bi.duplicate_rows, bi.file_name, bi.file_r2_key, bi.source,
             u.name AS by_name, u.email AS by_email
        FROM bulk_imports bi
        LEFT JOIN users u ON u.id = bi.user_id
+       ${where}
       ORDER BY bi.created_at DESC
-      LIMIT $1`,
-    [Math.min(Number(limit) || 50, 200)],
+      LIMIT $${params.length}`,
+    params,
   );
   return { tenant: { id: tenant.id, slug: tenant.slug, name: tenant.name }, imports: rows };
 };
@@ -443,5 +454,15 @@ export const getBulkImport = async (tenantId, importId) => {
        FROM bulk_import_failures WHERE import_id = $1 ORDER BY row_number LIMIT 1000`,
     [importId],
   );
-  return { import: imp[0], failures };
+  // Duplicates too. For an admission import these are the interesting rows —
+  // "the student was already in the CRM" is the normal case during a
+  // migration, not an error, so a failures-only view would look empty while
+  // the operator is staring at a half-imported file.
+  const { rows: duplicates } = await tenantQuery(
+    tenant,
+    `SELECT row_number, raw_row_json, matched_lead_id, match_field, match_value, resolution
+       FROM bulk_import_duplicates WHERE import_id = $1 ORDER BY row_number LIMIT 1000`,
+    [importId],
+  );
+  return { import: imp[0], failures, duplicates };
 };

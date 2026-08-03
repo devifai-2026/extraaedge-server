@@ -3,6 +3,10 @@ import { QUEUE_NAMES } from '../config/constants.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { getDownloadSignedUrl } from '../lib/r2.js';
 import { parseSpreadsheetBuffer } from '../lib/csv.js';
+// isBlank / normalizePhone / parseCsvDate used to live in this file. They
+// moved to lib/ when the Accounts admission importer needed the same parsing
+// (workers can't import each other — that would run their registerWorker).
+import { isBlank, normalizePhone, parseCsvDate } from '../lib/spreadsheet-values.js';
 import { findDuplicates, insertLead } from '../modules/leads/repo.js';
 import { autoAssignUnassigned } from '../modules/leads/service.js';
 import { resolveDropdowns, createCache } from '../modules/bulk-ingestion/resolver.js';
@@ -70,110 +74,6 @@ const applyMapping = (row, mapping, defaults) => {
 // { ok: false, error: { code, message } }. The normalized object trims
 // strings and lowercases the email so duplicate detection is reliable.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
-// Accepts +91xxxxxxxxxx, 91xxxxxxxxxx, or 10-digit mobile numbers. The
-// bulk-lead template documents +CC format but real-world uploads are messy,
-// so we accept more shapes and normalize.
-const normalizePhone = (raw) => {
-  if (!raw) return '';
-  const digits = String(raw).replace(/[^\d+]/gu, '');
-  if (!digits) return '';
-  // Strip leading + for length check
-  const noPlus = digits.replace(/^\+/u, '');
-  if (noPlus.length < 10 || noPlus.length > 15) return null; // signal invalid
-  return digits.startsWith('+') ? digits : `+${noPlus.length === 10 ? '91' + noPlus : noPlus}`;
-};
-
-const isBlank = (v) => v === undefined || v === null || String(v).trim() === '';
-
-// Parser for the date columns in the bulk template.
-//
-// Returns Date on success, null on a string that doesn't match any accepted
-// format, undefined on blank input (so callers can distinguish "not provided"
-// from "provided but invalid").
-//
-// Accepted inputs, in order of precedence:
-//   • Real JS Date — ExcelJS hands these back for cells that Excel itself
-//     interpreted as dates (which happens to our DD-MM-YYYY strings the
-//     moment Excel auto-formats the column on open). Pass through as-is.
-//   • ISO 8601 strings — produced by csv.js when it flattens a Date cell
-//     before this worker sees it (e.g. "2026-04-17T21:40:00.000Z").
-//     Same intent as a Date object; parse straight back.
-//   • Our documented "DD-MM-YYYY HH:mm:ss" plain-text format — what users
-//     paste when ExtraAEdge gives them the data verbatim.
-//
-// Anything else (US "MM/DD/YYYY", just a date, free text, etc.) is rejected
-// so silent date-format mixups don't corrupt the timeline.
-const DDMMYYYY_RE = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/u;
-const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/u;
-const IST_OFFSET_MIN = 330; // 5h 30m
-
-// Re-interpret a Date object's wall-clock components as IST and return the
-// corresponding UTC Date. ExcelJS hands us Date instances for cells the
-// spreadsheet auto-formatted as dates — but those Dates are constructed in
-// the Node process's local TZ, which on most servers is UTC. The result is
-// that "24/05/2026 14:55" (intended IST) becomes 14:55 UTC instead of
-// 14:55 IST (= 09:25 UTC), a silent 5h30m drift.
-//
-// Strategy: read whatever the Date's UTC h:m:s says (those are the digits
-// the user typed, since the Date was constructed at UTC midnight-ish), and
-// re-anchor them to IST.
-const reinterpretAsIst = (d) => {
-  const yyyy = d.getUTCFullYear();
-  const mm = d.getUTCMonth();
-  const dd = d.getUTCDate();
-  const hh = d.getUTCHours();
-  const mi = d.getUTCMinutes();
-  const ss = d.getUTCSeconds();
-  return new Date(Date.UTC(yyyy, mm, dd, hh, mi, ss) - IST_OFFSET_MIN * 60_000);
-};
-
-const parseCsvDate = (raw) => {
-  if (isBlank(raw)) return undefined;
-  if (raw instanceof Date) {
-    if (Number.isNaN(raw.getTime())) return null;
-    // Wall-clock components are the user's IST intent; re-anchor.
-    return reinterpretAsIst(raw);
-  }
-  const s = String(raw).trim();
-
-  // ISO 8601: this is what ExcelJS-via-csv.js produces for Excel-detected
-  // date cells. We trust it as long as JS can parse it cleanly.
-  if (ISO_RE.test(s)) {
-    const d = new Date(s);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-
-  // DD-MM-YYYY HH:mm:ss (24h) — the explicit user-typed format.
-  //
-  // The wall-clock time is interpreted in Asia/Kolkata (IST, +05:30) because
-  // every customer running the platform today is in India and types their
-  // CSVs in local time. Previously we used Date.UTC() which silently shifted
-  // every imported follow-up 5h30m forward — e.g. "17-04-2026 21:40:00"
-  // landed in the DB as 2026-04-17 21:40 UTC, then rendered to the user as
-  // 18-Apr 03:10 IST, a confusing duplicate of "next day morning".
-  //
-  // IST has no DST so the +05:30 offset is constant — no need for a full
-  // tz database, just subtract 5h30m from the local wall clock to get UTC.
-  const m = DDMMYYYY_RE.exec(s);
-  if (!m) return null;
-  const [, dd, mm, yyyy, hh, mi, ss] = m;
-  const IST_OFFSET_MIN = 330; // 5h 30m
-  const d = new Date(Date.UTC(+yyyy, +mm - 1, +dd, +hh, +mi, +ss) - IST_OFFSET_MIN * 60_000);
-  // Round-trip validation: reject mismatches like 32-01-2026 by formatting
-  // `d` back in IST and comparing to the parsed parts. Uses Intl APIs so DST
-  // edges (none in IST, but future-proof) are handled correctly.
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).formatToParts(d).reduce((acc, p) => ({ ...acc, [p.type]: p.value }), {});
-  if (
-    Number(parts.year) !== +yyyy ||
-    Number(parts.month) !== +mm ||
-    Number(parts.day) !== +dd
-  ) return null;
-  return d;
-};
 
 const validateRow = (mapped) => {
   // Row-level requirements:

@@ -197,6 +197,11 @@ export const approve = async (tenant, actor, id) => {
           // 'online' since we don't capture an exact mode on the public form.
           mode_of_payment: 'online',
           transaction_details: row.payment_utr ? `UTR ${row.payment_utr}` : null,
+          // Also land it in the dedicated, uniquely-indexed column so the
+          // same transfer can't be receipted twice (once here, once by an
+          // accounts user typing it in manually). A collision throws, and
+          // the catch below keeps approval itself from failing.
+          utr: row.payment_utr ?? null,
           receipt_kind: 'registration',
           payment_screenshot_r2_key: row.payment_proof_r2_key ?? null,
           payment_account_id: row.payment_account_id ?? null,
@@ -402,11 +407,34 @@ export const paymentAnalytics = async (tenant, q, actor) => {
   return repo.paymentAnalytics(tenant, { ...q, branchId });
 };
 
+// Postgres unique-violation. Mapping these to a field error keeps the two
+// receipt guards (one UTR per transaction, one receipt per installment slot)
+// readable in the UI instead of surfacing as a bare 500.
+const UNIQUE_VIOLATION = '23505';
+
 export const createReceipt = async (tenant, actor, admission_id, input) => {
   const adm = await repo.findById(tenant, admission_id);
   if (!adm) throw notFound('Admission not found');
   const receiptConfig = await getReceiptConfig(tenant);
-  const row = await repo.insertReceipt(tenant, admission_id, input, actor?.id, receiptConfig);
+  let row;
+  try {
+    row = await repo.insertReceipt(tenant, admission_id, input, actor?.id, receiptConfig);
+  } catch (err) {
+    if (err?.code === UNIQUE_VIOLATION && err.constraint === 'admission_receipts_utr_uq') {
+      throw validationError({
+        utr: `UTR "${input.utr}" is already recorded against another receipt. A transaction can only be receipted once.`,
+      });
+    }
+    if (err?.code === UNIQUE_VIOLATION && err.constraint === 'admission_receipts_one_per_slot_uq') {
+      throw validationError({
+        installment_no: `Installment ${input.installment_no} already has a receipt on this admission.`,
+      });
+    }
+    if (err?.code === UNIQUE_VIOLATION && err.constraint === 'admission_receipts_one_registration_uq') {
+      throw validationError({ receipt_kind: 'This admission already has a registration receipt.' });
+    }
+    throw err;
+  }
   // Build a friendly summary fragment that names what the money paid for
   // — installment N, registration, or generic — so the audit timeline
   // reads naturally.

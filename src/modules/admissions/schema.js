@@ -136,6 +136,15 @@ export const createReceiptSchema = z.object({
   amount: z.coerce.number().positive(),
   mode_of_payment: z.string().min(1),
   transaction_details: z.string().optional().nullable(),
+  // Bank/UPI reference for this specific transaction. Distinct from
+  // transaction_details (free-text notes): a UTR identifies one real
+  // transfer, so the DB holds a partial unique index on it and a repeat
+  // surfaces as a 409 rather than a second receipt for the same money.
+  // Blank string → null so an untouched form field doesn't reserve ''.
+  utr: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? null : v),
+    z.string().max(64).nullable().optional(),
+  ),
   is_old_collection: z.coerce.boolean().optional(),
   receipt_kind: z.enum(['installment', 'registration', 'misc']).optional().default('misc'),
   installment_no: z.coerce.number().int().min(1).max(20).optional().nullable(),

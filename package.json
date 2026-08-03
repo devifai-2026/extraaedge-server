@@ -23,6 +23,7 @@
     "worker:sms": "node src/workers/sms-sender.js",
     "worker:notifications": "node src/workers/notification-worker.js",
     "worker:bulk-import": "node src/workers/bulk-import-worker.js",
+    "worker:bulk-admission-import": "node src/workers/bulk-admission-import-worker.js",
     "worker:bulk-export": "node src/workers/bulk-export-worker.js",
     "worker:campaigns": "node src/workers/campaign-runner.js",
     "worker:drip": "node src/workers/drip-scheduler.js",

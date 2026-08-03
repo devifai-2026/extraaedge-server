@@ -917,12 +917,16 @@ export const insertReceipt = async (tenant, admission_id, input, created_by, rec
     const { rows } = await client.query(
       `INSERT INTO admission_receipts
          (admission_id, receipt_no, receipt_date, amount, mode_of_payment,
-          transaction_details, is_old_collection, receipt_kind, installment_no,
+          transaction_details, utr, is_old_collection, receipt_kind, installment_no,
           share_token, payment_screenshot_r2_key, payment_account_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING *`,
       [admission_id, receipt_no, input.receipt_date, input.amount, input.mode_of_payment,
-       input.transaction_details ?? null, input.is_old_collection ?? false,
+       input.transaction_details ?? null,
+       // Empty string would reserve '' in the unique index and block every
+       // later blank-UTR receipt, so normalise it to NULL here too.
+       (input.utr ?? '').toString().trim() || null,
+       input.is_old_collection ?? false,
        input.receipt_kind ?? 'misc',
        input.receipt_kind === 'installment' ? (input.installment_no ?? null) : null,
        share_token,

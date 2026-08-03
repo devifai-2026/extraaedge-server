@@ -5,6 +5,7 @@ import './sms-sender.js';
 //  runs in the separate `npm run gateway` process via whatsapp-web.js.)
 import './notification-worker.js';
 import './bulk-import-worker.js';
+import './bulk-admission-import-worker.js';
 import './bulk-export-worker.js';
 import './campaign-runner.js';
 import './drip-scheduler.js';

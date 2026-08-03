@@ -10,6 +10,14 @@ import { teamHierarchy } from '../users/repo.js';
 import { forbidden } from '../../lib/errors.js';
 
 const router = express.Router();
+// NOTE ON `i.kind = 'leads'`, repeated on every join below.
+// bulk_import_failures / bulk_import_duplicates are shared with the Accounts
+// historical-admission importer (modules/bulk-admissions). Without this
+// predicate, an admission import's failed rows would surface on the
+// counsellors' Failed Leads page — where none of the columns or fix-up
+// actions make sense for them. Accounts reads the same two tables through
+// its own kind='admissions' endpoints.
+//
 // All three tenant roles can view the failed-leads page; counsellors see it
 // to fix their own bulk uploads and managers/admins see it for everyone's.
 router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
@@ -36,7 +44,7 @@ const assertCanActOn = async (req, importIdSql, idValue) => {
   if (allowed === null) return; // super_admin: anything goes
   const { rows } = await tenantQuery(
     req.tenant,
-    `SELECT i.user_id FROM bulk_imports i WHERE i.id = ${importIdSql}`,
+    `SELECT i.user_id FROM bulk_imports i WHERE i.id = ${importIdSql} AND i.kind = 'leads'`,
     [idValue],
   );
   if (!rows[0]) throw forbidden('Row not found or not yours');
@@ -82,7 +90,7 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
       req.tenant,
       `SELECT f.*, i.created_at AS import_created_at
          FROM bulk_import_failures f
-         JOIN bulk_imports i ON i.id = f.import_id
+         JOIN bulk_imports i ON i.id = f.import_id AND i.kind = 'leads'
          ${where}
          ORDER BY f.id DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -135,7 +143,7 @@ router.post('/bulk-delete', validate({ body: bulkDeleteSchema }), async (req, re
       req.tenant,
       `DELETE FROM bulk_import_failures f
         USING bulk_imports i
-        WHERE f.import_id = i.id AND ${where}
+        WHERE f.import_id = i.id AND i.kind = 'leads' AND ${where}
         RETURNING f.id`,
       params,
     );
@@ -164,7 +172,7 @@ router.get('/duplicates', validate({ query: listQuery }), async (req, res, next)
       `SELECT d.*, i.created_at AS import_created_at,
               l.name AS matched_lead_name, l.email AS matched_lead_email, l.phone AS matched_lead_phone
          FROM bulk_import_duplicates d
-         JOIN bulk_imports i ON i.id = d.import_id
+         JOIN bulk_imports i ON i.id = d.import_id AND i.kind = 'leads'
          LEFT JOIN leads l ON l.id = d.matched_lead_id
          ${where}
          ORDER BY d.created_at DESC
@@ -195,7 +203,7 @@ router.post('/duplicates/bulk-delete', validate({ body: bulkDeleteSchema }), asy
       req.tenant,
       `DELETE FROM bulk_import_duplicates d
         USING bulk_imports i
-        WHERE d.import_id = i.id AND ${where}
+        WHERE d.import_id = i.id AND i.kind = 'leads' AND ${where}
         RETURNING d.id`,
       params,
     );
@@ -220,7 +228,7 @@ router.get('/summary', validate({ query: summaryQuery }), async (req, res, next)
         req.tenant,
         `SELECT count(*)::int AS n
            FROM bulk_import_failures x
-           JOIN bulk_imports i ON i.id = x.import_id
+           JOIN bulk_imports i ON i.id = x.import_id AND i.kind = 'leads'
            ${where}`,
         params,
       ),
@@ -228,7 +236,7 @@ router.get('/summary', validate({ query: summaryQuery }), async (req, res, next)
         req.tenant,
         `SELECT count(*)::int AS n
            FROM bulk_import_duplicates x
-           JOIN bulk_imports i ON i.id = x.import_id
+           JOIN bulk_imports i ON i.id = x.import_id AND i.kind = 'leads'
            ${where}`,
         params,
       ),

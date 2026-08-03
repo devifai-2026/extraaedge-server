@@ -19,6 +19,10 @@ const loadInprocessWorkers = async () => {
   try {
     await import('./workers/rule-processor.js');
     await import('./workers/bulk-import-worker.js');
+    // Accounts historical-admission importer. Separate queue from the lead
+    // importer above (see QUEUE_NAMES.BULK_ADMISSION_IMPORT for why), so it
+    // needs its own import here or /bulk/admissions/commit hangs at Queued.
+    await import('./workers/bulk-admission-import-worker.js');
     // Follow-up + notifications stack:
     //   notification-worker translates queued event types into
     //     notifications rows + websocket pushes.

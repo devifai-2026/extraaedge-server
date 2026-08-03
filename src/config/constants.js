@@ -155,6 +155,11 @@ export const QUEUE_NAMES = Object.freeze({
   // WHATSAPP queue removed — automated WhatsApp is disabled; per-user manual
   // chat runs in the whatsapp-web.js gateway, not via a job queue.
   BULK_IMPORT: 'bulk-import',
+  // Historical-admission import. Deliberately its OWN queue rather than a
+  // second job name on BULK_IMPORT: in-process mode (QUEUE_DRIVER != bullmq)
+  // registers handlers with jobName '*', so a second registerWorker on the
+  // same queue would hand every lead job to the admissions worker too.
+  BULK_ADMISSION_IMPORT: 'bulk-admission-import',
   BULK_EXPORT: 'bulk-export',
   CAMPAIGN: 'campaign-run',
   DRIP: 'drip-step',
@@ -227,6 +232,11 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'accounts.report',
   'accounts.pay_schedule',
   'accounts.collection_receipt_wise',
+  // Accounts-side importer for historical admissions migrated off a previous
+  // CRM. One spreadsheet row fans out into lead + fee offer + admission +
+  // EMI schedule + old-collection receipts, so it's gated separately from
+  // the counsellor lead upload (which only ever creates leads).
+  'accounts.bulk_import',
   // Tenant-wide admission pipeline view for admins. Lives in the main
   // sidebar (not the Accounts module) so super_admins can see every
   // converted lead's admission status without leaving their normal

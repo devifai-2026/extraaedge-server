@@ -21,7 +21,7 @@ sudo systemctl enable --now extraaedge-api.service
 
 # Start workers individually (one systemd unit per worker via the template):
 for w in email-sender sms-sender whatsapp-sender notification-worker \
-         bulk-import-worker bulk-export-worker campaign-runner \
+         bulk-import-worker bulk-admission-import-worker bulk-export-worker campaign-runner \
          drip-scheduler scheduled-send-runner workflow-executor \
          rule-processor outbound-webhook-dispatcher pdf-report-worker \
          duplicate-scanner followup-reminder-scheduler missed-followup-scanner \
