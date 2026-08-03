@@ -15,7 +15,7 @@
 // for the full history behind that decision.
 import ExcelJS from 'exceljs';
 import {
-  HEADERS, EXAMPLE_ROW, EMI_SLOTS, EDU_SLOTS, OFFER_MAX_INSTALLMENTS,
+  HEADERS, EXAMPLE_ROW, EMI_SLOTS, EDU_SLOTS,
   TRAINING_MODES, ADMISSION_STATUSES, PAYMENT_MODES, COLLECTION_MODES,
   GRADE_UNITS, GENDERS,
 } from './columns.js';
@@ -118,7 +118,7 @@ const buildInstructionsSheet = (wb) => {
   blank();
   para('Fill rows on the "Admissions" sheet only. Do not edit, reorder or rename the header row.');
   para('ONE ROW PER STUDENT. If your old system exported one row per pending installment, merge those rows: the student appears once, and each installment goes into its own emi_N_* column group.');
-  para(`Up to ${EMI_SLOTS} installments and ${EDU_SLOTS} qualifications per student.`);
+  para(`Up to ${EMI_SLOTS} installments and ${EDU_SLOTS} qualifications per student — the same ${EMI_SLOTS} installments a fee plan supports everywhere else in the system.`);
   para('Every row creates: the lead (at your Enrolled stage), the admission, its EMI schedule, and a receipt for each amount already collected. Collected amounts are tagged as "old collection" so they are separated from money taken inside this system.');
   para('A student who is NOT in your CRM yet is created from scratch — you do not need to add them as a lead first. They are created already enrolled, owned by whoever you put in lead_owner_email, and are NOT sent to your auto-assignment rule (this is history, not a new enquiry).');
   para('See the "Allowed Values" sheet for counsellor emails, courses, centers and the fixed dropdown values.');
@@ -150,7 +150,6 @@ const buildInstructionsSheet = (wb) => {
   heading('Installment slots must be contiguous', 13);
   blank();
   para('Fill emi_1 before emi_2, emi_2 before emi_3, and so on. A gap (emi_3 filled while emi_2 is blank) fails the row with EMI_GAP — it almost always means a column got shifted.');
-  para(`Note: rows with more than ${OFFER_MAX_INSTALLMENTS} installments still import completely (admission, schedule and receipts are all created), but no "fee offer" card is attached to the lead — that card only holds ${OFFER_MAX_INSTALLMENTS} slots.`);
   blank();
 
   heading('UTR / transaction reference', 13);

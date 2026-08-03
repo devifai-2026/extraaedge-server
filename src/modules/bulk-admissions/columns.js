@@ -7,16 +7,26 @@
 // by a worker that fans one row into five tables, so the contract is worth
 // hoisting out.)
 
-// How many installment slots the sheet exposes. admission_fee_schedule
-// allows 1..20, but 8 covers every real historical plan we've seen and
-// keeps the sheet under ~90 columns. Bumping this number is all that's
-// needed to widen the template — builder and worker both read it.
-export const EMI_SLOTS = 8;
+// How many installment slots the sheet exposes.
+//
+// Four, because that's what the rest of the product supports: a fee plan is
+// sold as at most four installments, lead_fee_offers.fee_installments is
+// capped at 4 by its zod schema, and the Configure Fee Offer modal renders
+// exactly four rows. A wider sheet would only invite operators to fill in a
+// fifth that nothing downstream could show them.
+//
+// (admission_fee_schedule itself allows 1..20, so this is a product limit,
+// not a storage one. If the business ever sells five, raise BOTH this and
+// OFFER_MAX_INSTALLMENTS — and widen the Configure Fee Offer modal to match,
+// or the extra installment becomes invisible there and is dropped on the
+// next save. The test suite asserts these two stay in step.)
+export const EMI_SLOTS = 4;
 
-// Above this count we skip the lead_fee_offers row (see OFFER_MAX_INSTALLMENTS
-// use in the worker). lead_fee_offers.fee_installments is capped at 4 by zod
-// and the Configure Fee Offer modal renders exactly 4 slots, so writing a
-// 5th would be invisible in that UI and silently dropped on the next save.
+// The most installments lead_fee_offers can hold. Kept as its own constant
+// rather than folded into EMI_SLOTS because it's a limit imposed by a
+// different module — the worker still checks it before writing an offer, so
+// raising EMI_SLOTS alone degrades gracefully instead of corrupting the
+// offer UI.
 export const OFFER_MAX_INSTALLMENTS = 4;
 
 export const TRAINING_MODES = ['Online', 'Offline', 'Hybrid'];
@@ -129,6 +139,12 @@ export const ATTACHMENT_COLUMNS = [
 // One example row so users see the expected shape (and date format) inline.
 // Built positionally against HEADERS via a lookup so re-ordering HEADERS
 // can't silently shift the example into the wrong columns.
+//
+// The image columns show a LINK rather than a file name on purpose. Whatever
+// the example does is what gets copied down the sheet, and a bare file name
+// teaches the one route that doesn't work on its own — it silently depends on
+// remembering to attach that exact file on the upload screen. A link stands
+// by itself.
 const EXAMPLE = {
   first_name: 'Payal', middle_name: 'Rajkumar', last_name: 'Khatri',
   email: 'payal.khatri275@example.com',
@@ -147,7 +163,8 @@ const EXAMPLE = {
   payment_account: 'HDFC Current',
   registration_amount: 2000, registration_paid_amount: 2000,
   registration_paid_date: '20-07-2026',
-  registration_utr: '412345678901', registration_proof: 'payal-reg.jpg',
+  registration_utr: '412345678901',
+  registration_proof: 'https://example.com/proofs/payal-registration.jpg',
   emi_1_due_date: '25-07-2026', emi_1_amount: 8000, emi_1_paid_amount: 0,
   emi_1_paid_date: '', emi_1_utr: '', emi_1_proof: '',
   emi_2_due_date: '25-08-2026', emi_2_amount: 15000, emi_2_paid_amount: 0,

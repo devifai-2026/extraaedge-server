@@ -4,7 +4,7 @@ import ExcelJS from 'exceljs';
 import { buildTemplateXlsx } from '../../src/modules/bulk-admissions/template-builder.js';
 import {
   HEADERS, EMI_SLOTS, EDU_SLOTS, UTR_COLUMNS, ATTACHMENT_COLUMNS,
-  DATE_COLUMNS, NUMERIC_COLUMNS, EXAMPLE_ROW,
+  DATE_COLUMNS, NUMERIC_COLUMNS, EXAMPLE_ROW, OFFER_MAX_INSTALLMENTS,
 } from '../../src/modules/bulk-admissions/columns.js';
 
 const LOOKUPS = {
@@ -52,6 +52,17 @@ test('columns: every EMI and education slot is fully represented', () => {
   }
 });
 
+test('columns: the sheet never offers more installments than a fee offer holds', () => {
+  // If these drift apart, operators can fill in an installment that
+  // lead_fee_offers can't store and the Configure Fee Offer modal (four fixed
+  // rows) can't show — it would look saved, then vanish on the next edit.
+  // Raising EMI_SLOTS means raising the offer cap AND widening that modal.
+  assert.ok(
+    EMI_SLOTS <= OFFER_MAX_INSTALLMENTS,
+    `EMI_SLOTS (${EMI_SLOTS}) exceeds OFFER_MAX_INSTALLMENTS (${OFFER_MAX_INSTALLMENTS}) — see the comment in columns.js`,
+  );
+});
+
 test('columns: the example row lines up with HEADERS', () => {
   assert.equal(EXAMPLE_ROW.length, HEADERS.length);
   // Sanity-check a couple of positions so a reordering of HEADERS that
@@ -59,6 +70,13 @@ test('columns: the example row lines up with HEADERS', () => {
   assert.equal(EXAMPLE_ROW[HEADERS.indexOf('course')], 'Data Analytics');
   assert.equal(EXAMPLE_ROW[HEADERS.indexOf('course_fees')], 25000);
   assert.equal(EXAMPLE_ROW[HEADERS.indexOf('status')], 'attending');
+  // Image cells show a LINK. Whatever the example does gets copied down the
+  // sheet, and a bare file name teaches the one route that silently depends
+  // on also attaching that exact file on the upload screen.
+  for (const col of ['photo', 'registration_proof']) {
+    const v = String(EXAMPLE_ROW[HEADERS.indexOf(col)]);
+    assert.match(v, /^https:\/\//u, `${col} example should be a link, got "${v}"`);
+  }
 });
 
 test('columns: the example row balances under the fee-math rule', () => {
