@@ -17,6 +17,12 @@ export const UPLOAD_SIZE_LIMITS = {
   ticket_attachment: 25 * MB,
   template_asset: 25 * MB,
   csv_import: 25 * MB,
+  // The historical-admission import sheet. Far larger than csv_import because
+  // students' photos and payment screenshots can be pasted straight into the
+  // cells, and image bytes are already compressed — so unlike the XML bloat
+  // csv_import guards against, size here scales with real content rather than
+  // template junk.
+  admission_import: 150 * MB,
   export_result: 200 * MB,
   recording: 500 * MB,
   pdf_report: 50 * MB,
@@ -32,7 +38,7 @@ export const UPLOAD_SIZE_LIMITS = {
 const DEFAULT_UPLOAD_SIZE_LIMIT = 1024 * MB; // 1 GB fallback
 
 export const presignSchema = z.object({
-  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr', 'tenant_logo', 'material', 'capstone_file', 'company_logo', 'job_poster']),
+  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'admission_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr', 'tenant_logo', 'material', 'capstone_file', 'company_logo', 'job_poster']),
   content_type: z.string().min(1),
   size_bytes: z.coerce.number().int().positive().max(1024 * 1024 * 1024), // up to 1 GB signed
   ref_entity_type: z.string().optional(),
@@ -53,7 +59,7 @@ export const confirmSchema = z.object({
   r2_key: z.string().min(1),
   size_bytes: z.coerce.number().int().positive().optional(),
   checksum_sha256: z.string().optional(),
-  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr', 'tenant_logo', 'material', 'capstone_file', 'company_logo', 'job_poster']),
+  purpose: z.enum(['avatar', 'brochure', 'note_attachment', 'ticket_attachment', 'template_asset', 'csv_import', 'admission_import', 'export_result', 'recording', 'pdf_report', 'admission_photo', 'receipt_screenshot', 'payment_qr', 'tenant_logo', 'material', 'capstone_file', 'company_logo', 'job_poster']),
   ref_entity_type: z.string().optional(),
   ref_entity_id: z.string().uuid().optional(),
   visibility: z.enum(['private', 'tenant', 'public_signed', 'public']).default('private'),

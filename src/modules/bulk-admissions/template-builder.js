@@ -120,6 +120,7 @@ const buildInstructionsSheet = (wb) => {
   para('ONE ROW PER STUDENT. If your old system exported one row per pending installment, merge those rows: the student appears once, and each installment goes into its own emi_N_* column group.');
   para(`Up to ${EMI_SLOTS} installments and ${EDU_SLOTS} qualifications per student.`);
   para('Every row creates: the lead (at your Enrolled stage), the admission, its EMI schedule, and a receipt for each amount already collected. Collected amounts are tagged as "old collection" so they are separated from money taken inside this system.');
+  para('A student who is NOT in your CRM yet is created from scratch — you do not need to add them as a lead first. They are created already enrolled, owned by whoever you put in lead_owner_email, and are NOT sent to your auto-assignment rule (this is history, not a new enquiry).');
   para('See the "Allowed Values" sheet for counsellor emails, courses, centers and the fixed dropdown values.');
   para('Maximum 30,000 rows per upload.');
   blank();
@@ -165,12 +166,19 @@ const buildInstructionsSheet = (wb) => {
 
   heading('Photos and payment proofs', 13);
   blank();
-  para('Optional, and all handled the same way: put the image file name in the column, then attach those image files in the picker on the upload screen. Names are matched case-insensitively.');
-  para('  • photo_file_name — the student\'s photo, shown on the admission.');
-  para('  • registration_proof_file_name — the screenshot / slip for the registration payment.');
-  para('  • emi_N_proof_file_name — the screenshot / slip for that installment\'s payment.');
-  para('A file name with no matching attached file fails the row with PHOTO_NOT_FOUND or PROOF_NOT_FOUND, so a typo is never silently ignored.');
-  para('You can also skip all of these and attach images later from the admission screen.');
+  para('Three image columns, all optional:');
+  para('  • photo — the student\'s photo, shown on the admission.');
+  para('  • registration_proof — the screenshot / slip for the registration payment.');
+  para('  • emi_N_proof — the screenshot / slip for that installment\'s payment.');
+  blank();
+  para('Each one accepts whichever of these three suits you — mix them freely, even within one sheet:');
+  para('  1. PASTE THE IMAGE straight into the cell (Insert → Picture → Place in cell). Nothing to name, nothing to keep in sync. Best for a small batch.');
+  para('  2. PASTE A LINK to the image (https://…). We download a copy into your CRM, so the record survives the original link later being deleted or made private. Google Drive and Dropbox share links work — just make sure the file is set to "anyone with the link can view".');
+  para('  3. TYPE THE FILE NAME (e.g. payal-khatri.jpg) and attach those image files in the picker on the upload screen. Names are matched ignoring case. Best for hundreds of images, where pasting them all in would make this workbook too heavy to open.');
+  blank();
+  para('If a cell has both a pasted image and a link/name, the pasted image wins.');
+  para('A cell we cannot resolve fails the row with PHOTO_NOT_FOUND or PROOF_NOT_FOUND and says why — a typo, a dead link or a private file is never silently ignored.');
+  para('You can also leave all of them blank and attach images later from the admission screen.');
   blank();
 
   heading('Column reference', 13);
@@ -215,7 +223,7 @@ const buildInstructionsSheet = (wb) => {
   addRule('edu_1_grade',             'No',         'Number',                  '0–100 when grade unit is percent, 0–10 when cgpa.');
   addRule('edu_1_grade_unit',        'No',         'Allowed value',           'percent (default) or cgpa.');
   addRule('edu_2_*',                 'No',         'Same as edu_1_*',         'Second qualification. Same seven columns.');
-  addRule('photo_file_name',         'No',         'File name',               'Matches a file attached in the "Student photos" picker on the upload screen.');
+  addRule('photo',                   'No',         'Image',                   'The student\'s photo. Paste the image into the cell, give an https link to it, or type the name of a file attached on the upload screen. See "Photos and payment proofs" above.');
   addRule('course_fees',             'Yes',        'Number',                  'Total agreed fee. Lands on the admission and drives the Pending Fees figure in reports.');
   addRule('mode_of_payment',         'Yes',        'Allowed value (strict)',  'Installment or Full.');
   addRule('collection_mode',         'No',         'Allowed value',           `How the already-collected money was taken (${COLLECTION_MODES.join(' / ')}). Applies to every receipt this row creates. Defaults to cash.`);
@@ -224,13 +232,13 @@ const buildInstructionsSheet = (wb) => {
   addRule('registration_paid_amount', 'No',        'Number',                  'How much of the registration has actually been collected. Creates one registration receipt when above 0. Must not exceed registration_amount.');
   addRule('registration_paid_date',  'No',         'Date (DD-MM-YYYY)',       'Receipt date. Falls back to admission_date when blank.');
   addRule('registration_utr',        'No',         'Text, unique',            'Bank / UPI reference for the registration payment. Must be unique across this file AND against every receipt already in the system. Leave blank for cash.');
-  addRule('registration_proof_file_name', 'No',    'File name',               'Screenshot / slip for the registration payment. Matches a file attached on the upload screen.');
+  addRule('registration_proof', 'No',        'Image',                   'Screenshot / slip for the registration payment. Same three options as photo.');
   addRule('emi_1_due_date',          'No',         'Date (DD-MM-YYYY)',       'When installment 1 is due. Required whenever emi_1_amount is filled.');
   addRule('emi_1_amount',            'No',         'Number',                  'What is owed on that date. Required whenever emi_1_due_date is filled.');
   addRule('emi_1_paid_amount',       'No',         'Number',                  'Collected against installment 1. Creates one installment receipt when above 0. Must not exceed emi_1_amount. Blank or 0 = still due.');
   addRule('emi_1_paid_date',         'No',         'Date (DD-MM-YYYY)',       'Receipt date for that collection. Falls back to the due date when blank.');
   addRule('emi_1_utr',               'No',         'Text, unique',            'Bank / UPI reference for that collection. Same uniqueness rule as registration_utr. Leave blank for cash.');
-  addRule('emi_1_proof_file_name',   'No',         'File name',               'Screenshot / slip for that collection.');
+  addRule('emi_1_proof',             'No',         'Image',                   'Screenshot / slip for that collection. Same three options as photo.');
   addRule(`emi_2_* … emi_${EMI_SLOTS}_*`, 'No',    'Same as emi_1_*',         'Further installments — the same six columns each. Fill them in order — no gaps.');
   addRule('paid_till_date',          'No',         'Number',                  'Optional cross-check. Must equal every paid amount on the row added together. Leave blank to skip.');
 

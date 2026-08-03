@@ -41,7 +41,7 @@ test('columns: every declared special column exists in HEADERS', () => {
 
 test('columns: every EMI and education slot is fully represented', () => {
   for (let n = 1; n <= EMI_SLOTS; n += 1) {
-    for (const suffix of ['due_date', 'amount', 'paid_amount', 'paid_date', 'utr', 'proof_file_name']) {
+    for (const suffix of ['due_date', 'amount', 'paid_amount', 'paid_date', 'utr', 'proof']) {
       assert.ok(HEADERS.includes(`emi_${n}_${suffix}`), `missing emi_${n}_${suffix}`);
     }
   }

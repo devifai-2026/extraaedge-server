@@ -20,7 +20,7 @@ import { registerWorker } from '../lib/queue.js';
 import { QUEUE_NAMES } from '../config/constants.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { getDownloadSignedUrl } from '../lib/r2.js';
-import { parseSpreadsheetBuffer } from '../lib/csv.js';
+import { parseXlsxWithImages } from '../lib/csv.js';
 import { findDuplicates, insertLead } from '../modules/leads/repo.js';
 import * as admissionsRepo from '../modules/admissions/repo.js';
 import * as feeOffersRepo from '../modules/lead-fee-offers/repo.js';
@@ -31,11 +31,18 @@ import { createOwnerCache, resolveOwner } from '../modules/bulk-admissions/owner
 // The per-row rules live in the module, not here, so they can be tested
 // without a tenant / queue / spreadsheet. This file is the orchestration.
 import { parseRow, utrsOf, attachmentsOf } from '../modules/bulk-admissions/row-parser.js';
-import { OFFER_MAX_INSTALLMENTS } from '../modules/bulk-admissions/columns.js';
+import { OFFER_MAX_INSTALLMENTS, ATTACHMENT_COLUMNS } from '../modules/bulk-admissions/columns.js';
+import { fetchRemoteImage, looksLikeUrl, RemoteImageError } from '../lib/remote-image.js';
 import { notifyUser } from '../lib/socket.js';
 import { logger } from '../lib/logger.js';
 
 const fail = (code, message) => ({ ok: false, error: { code, message } });
+
+// Ceiling for the uploaded workbook. Well above the lead importer's 25 MB
+// because images pasted into cells live inside the .xlsx — and image bytes
+// are already compressed, so unlike the XML bloat that cap guards against,
+// the size here tracks real content. Matches UPLOAD_SIZE_LIMITS.admission_import.
+const MAX_IMPORT_BYTES = 150 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Progress + download plumbing (mirrors bulk-import-worker.js)
@@ -104,16 +111,129 @@ const checkUtrs = async (tenant, row, seen) => {
   return { ok: true };
 };
 
-const resolveAttachments = (row, attachments) => {
-  const resolved = {};
+// Preview-time image check. For a URL, downloads it to confirm it's reachable,
+// public and actually an image — then throws the bytes away. For a typed file
+// name, confirms something with that name was attached.
+//
+// Downloading twice is deliberate: a link is only truly verified by fetching
+// it (HEAD often lies, and Drive serves an HTML interstitial with a 200), and
+// the alternative is discovering a dead link halfway through a commit that has
+// already created students. Returns a fail() shape or null.
+const checkImages = async (row, attachmentNames) => {
   for (const { column, value, code } of attachmentsOf(row)) {
+    if (looksLikeUrl(value)) {
+      try {
+        await fetchRemoteImage(value);
+      } catch (err) {
+        if (err instanceof RemoteImageError) return fail(code, `${column}: ${err.message} (${value})`);
+        throw err;
+      }
+      continue;
+    }
+    // A typed file name. We can't tell here whether the cell ALSO has an
+    // image pasted over it (that's resolved at commit, where the workbook's
+    // image anchors are read) — so only flag a name that matches nothing,
+    // which is unambiguously wrong either way.
+    if (!attachmentNames.has(String(value).trim().toLowerCase())) {
+      return fail(code, `${column} "${value}" doesn't match any attached file — attach it on the upload screen, paste the image into the cell, or use an https link`);
+    }
+  }
+  return null;
+};
+
+// Store one image buffer and return its key. Shared by the embedded-image and
+// URL paths so both land in the same place with the same naming.
+const storeImage = async (tenant, { buffer, extension, contentType }, importId) => {
+  const { putObject, buildKey } = await import('../lib/r2.js');
+  const { nanoid } = await import('nanoid');
+  const key = buildKey({
+    tenantSlug: tenant.slug, purpose: 'admission_photo', id: nanoid(24), ext: extension,
+  });
+  await putObject({
+    key,
+    body: buffer,
+    contentType: contentType || `image/${extension === 'jpg' ? 'jpeg' : extension}`,
+    metadata: { source: 'admission_import', import_id: String(importId) },
+  });
+  return key;
+};
+
+// Work out the storage key for each image this row needs.
+//
+// Three accepted forms per cell, checked in this order:
+//   1. an image pasted into the cell — matched on (sheet row, column), so
+//      nothing has to be named and nothing can drift
+//   2. an https link — fetched server-side and copied into our own storage,
+//      so the record survives the source link later being deleted or made
+//      private. See lib/remote-image.js for the SSRF guards on that fetch.
+//   3. a file name matched against files attached on the upload screen —
+//      the workable path for hundreds of images, where embedding them all
+//      would make the workbook itself unopenable
+//
+// A cell with a value we can't resolve fails the row. A blank cell with no
+// embedded image just means "no image for this one".
+const resolveAttachments = async (tenant, row, sheetRow, attachments, embedded, importId, urlCache) => {
+  const resolved = {};
+
+  // Embedded images can satisfy a column whose cell is empty, so walk the
+  // embedded set directly rather than only the columns attachmentsOf() found.
+  for (const [column, key] of embedded.get(sheetRow) ?? []) {
+    resolved[column] = key;
+  }
+
+  for (const { column, value, code } of attachmentsOf(row)) {
+    if (resolved[column]) continue; // an embedded image on this cell wins
+
+    if (looksLikeUrl(value)) {
+      // Cached by URL: the same hosted photo often appears on several rows
+      // (a shared placeholder, or a re-run of a corrected file), and there's
+      // no reason to re-download and re-store it each time.
+      const cacheKey = value.trim();
+      if (urlCache.has(cacheKey)) { resolved[column] = urlCache.get(cacheKey); continue; }
+      try {
+        const image = await fetchRemoteImage(value);
+        const key = await storeImage(tenant, image, importId);
+        urlCache.set(cacheKey, key);
+        resolved[column] = key;
+      } catch (err) {
+        if (err instanceof RemoteImageError) {
+          return fail(code, `${column}: ${err.message} (${value})`);
+        }
+        throw err;
+      }
+      continue;
+    }
+
     const key = attachments.get(value.trim().toLowerCase());
     if (!key) {
-      return fail(code, `${column} "${value}" doesn't match any image attached on the upload screen`);
+      return fail(code, `${column} "${value}" couldn't be resolved — paste the image into that cell, give an https link to it, or attach a file with this exact name on the upload screen`);
     }
     resolved[column] = key;
   }
   return { ok: true, resolved };
+};
+
+// Pull every image embedded in the sheet into storage once, up front, and
+// index them as sheetRow -> [[column, r2_key]].
+//
+// Done as a batch before the row loop because the same workbook parse yields
+// them all, and a row that fails validation shouldn't leave a half-uploaded
+// image behind mid-loop. Only columns that actually take an image are kept —
+// a logo pasted in the corner of the sheet is silently ignored rather than
+// attached to a student.
+const stageEmbeddedImages = async (tenant, images, importId) => {
+  const byRow = new Map();
+  if (!images.length) return byRow;
+  let staged = 0;
+  for (const img of images) {
+    if (!ATTACHMENT_COLUMNS.includes(img.column)) continue;
+    const key = await storeImage(tenant, img, importId);
+    if (!byRow.has(img.sheetRow)) byRow.set(img.sheetRow, []);
+    byRow.get(img.sheetRow).push([img.column, key]);
+    staged += 1;
+  }
+  logger.info({ import_id: importId, staged, found: images.length }, 'admission import: staged embedded images');
+  return byRow;
 };
 
 // ---------------------------------------------------------------------------
@@ -222,7 +342,7 @@ const writeRow = async (tenant, ctx, row, resolved, owner, attachmentKeys) => {
       total_fees: row.course_fees,
       mode_of_payment: row.mode_of_payment,
       status: row.status,
-      photo_r2_key: attachmentKeys.photo_file_name ?? null,
+      photo_r2_key: attachmentKeys.photo ?? null,
       guided_by_counsellor_id: owner?.id ?? null,
       guided_by_manager_id: owner?.manager_id ?? null,
       source: row.source,
@@ -274,7 +394,7 @@ const writeRow = async (tenant, ctx, row, resolved, owner, attachmentKeys) => {
         mode_of_payment: row.collection_mode,
         receipt_kind: 'registration',
         utr: row.registration.utr,
-        payment_screenshot_r2_key: attachmentKeys.registration_proof_file_name ?? null,
+        payment_screenshot_r2_key: attachmentKeys.registration_proof ?? null,
         transaction_details: 'Imported from previous system',
       });
     }
@@ -287,7 +407,7 @@ const writeRow = async (tenant, ctx, row, resolved, owner, attachmentKeys) => {
         receipt_kind: 'installment',
         installment_no: inst.installment_no,
         utr: inst.utr,
-        payment_screenshot_r2_key: attachmentKeys[`emi_${inst.installment_no}_proof_file_name`] ?? null,
+        payment_screenshot_r2_key: attachmentKeys[`emi_${inst.installment_no}_proof`] ?? null,
         transaction_details: 'Imported from previous system',
       });
     }
@@ -456,15 +576,23 @@ registerWorker(QUEUE_NAMES.BULK_ADMISSION_IMPORT, async ({ name, data }) => {
     try {
       const { rows: [preview] } = await tenantQuery(tenant, `SELECT * FROM bulk_import_previews WHERE id = $1`, [data.preview_id]);
       if (!preview) return;
-      const sheet = await parseSpreadsheetBuffer(await fetchByKey(preview.file_r2_key), preview.file_r2_key);
+      const { rows: sheet } = await parseXlsxWithImages(await fetchByKey(preview.file_r2_key), { maxBytes: MAX_IMPORT_BYTES });
 
       let valid = 0; let invalid = 0; let duplicates = 0;
       const errorSamples = [];
       const dupSamples = [];
       const utrSeen = new Map();
+      // Names of the files attached on the upload screen, so a typo'd file
+      // name is caught HERE rather than after the operator has committed.
+      const attachmentNames = new Set(
+        Object.keys(preview.defaults_json?.attachments ?? {}).map((n) => n.trim().toLowerCase()),
+      );
 
       for (const [i, raw] of sheet.entries()) {
-        const rowNumber = i + 2; // +1 for the header, +1 for 1-based rows
+        // The real sheet row, not the array index — blank rows in the middle
+        // of a file compact the array, and an operator needs the line number
+        // they can actually go and look at.
+        const rowNumber = raw.__sheetRow ?? i + 2;
         const parsed = parseRow(raw);
         if (!parsed.ok) {
           invalid += 1;
@@ -478,6 +606,18 @@ registerWorker(QUEUE_NAMES.BULK_ADMISSION_IMPORT, async ({ name, data }) => {
           continue;
         }
         for (const { value } of utrsOf(parsed.row)) utrSeen.set(value.toUpperCase(), rowNumber);
+
+        // Check image links now, while nothing has been written. A dead or
+        // private link is by far the most likely thing to be wrong about a
+        // URL, and finding out mid-import — after 30 students already
+        // landed — is the worst time to hear it. Shape only: HEAD-equivalent
+        // reachability, no download, no storage.
+        const badLink = await checkImages(parsed.row, attachmentNames);
+        if (badLink) {
+          invalid += 1;
+          if (errorSamples.length < 50) errorSamples.push({ row_number: rowNumber, ...badLink.error });
+          continue;
+        }
 
         valid += 1;
         const match = await findLeadMatch(tenant, parsed.row);
@@ -529,7 +669,7 @@ registerWorker(QUEUE_NAMES.BULK_ADMISSION_IMPORT, async ({ name, data }) => {
   const state = { total: 0, processed: 0, success: 0, failed: 0, duplicates: 0, phase: 'importing' };
 
   try {
-    const sheet = await parseSpreadsheetBuffer(await fetchByKey(imp.file_r2_key), imp.file_r2_key);
+    const { rows: sheet, images } = await parseXlsxWithImages(await fetchByKey(imp.file_r2_key), { maxBytes: MAX_IMPORT_BYTES });
     state.total = sheet.length;
     emitProgress(state, { force: true });
 
@@ -549,6 +689,11 @@ registerWorker(QUEUE_NAMES.BULK_ADMISSION_IMPORT, async ({ name, data }) => {
       Object.entries(imp.defaults_json?.attachments ?? {})
         .map(([fileName, key]) => [String(fileName).trim().toLowerCase(), key]),
     );
+    // Images pasted into the sheet, copied into storage up front and indexed
+    // by (sheet row -> [column, key]).
+    const embedded = await stageEmbeddedImages(tenant, images, imp.id);
+    // Downloaded-URL keys, so a link repeated across rows is fetched once.
+    const urlCache = new Map();
 
     const ctx = {
       actorId: imp.user_id,
@@ -564,7 +709,7 @@ registerWorker(QUEUE_NAMES.BULK_ADMISSION_IMPORT, async ({ name, data }) => {
     let feeOffersSkipped = 0;
 
     for (const [i, raw] of sheet.entries()) {
-      const rowNumber = i + 2;
+      const rowNumber = raw.__sheetRow ?? i + 2;
       state.processed += 1;
 
       try {
@@ -601,7 +746,7 @@ registerWorker(QUEUE_NAMES.BULK_ADMISSION_IMPORT, async ({ name, data }) => {
           continue;
         }
 
-        const attach = resolveAttachments(row, attachments);
+        const attach = await resolveAttachments(tenant, row, rowNumber, attachments, embedded, imp.id, urlCache);
         if (!attach.ok) {
           state.failed += 1;
           await batch.addFailure(imp.id, rowNumber, raw, attach.error.code, attach.error.message);

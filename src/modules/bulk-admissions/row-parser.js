@@ -129,7 +129,7 @@ export const parseRow = (raw) => {
     });
   }
 
-  row.photo_file_name = trim(raw.photo_file_name);
+  row.photo = trim(raw.photo);
 
   // ---- Money: headline ----
   const courseFees = parseSheetNumber(raw.course_fees);
@@ -170,7 +170,7 @@ export const parseRow = (raw) => {
     // student's own timeline rather than dating it to the import run.
     paid_date: regDate ?? row.admission_date,
     utr: trim(raw.registration_utr),
-    proof_file_name: trim(raw.registration_proof_file_name),
+    proof_file_name: trim(raw.registration_proof),
   };
   if (row.registration.paid_amount < 0) {
     return fail('INVALID_NUMBER', 'registration_paid_amount cannot be negative');
@@ -219,7 +219,7 @@ export const parseRow = (raw) => {
       // honest approximation of when the money arrived.
       paid_date: paidDate ?? dueDate,
       utr: trim(raw[`emi_${n}_utr`]),
-      proof_file_name: trim(raw[`emi_${n}_proof_file_name`]),
+      proof_file_name: trim(raw[`emi_${n}_proof`]),
     });
   }
 
@@ -273,14 +273,14 @@ export const utrsOf = (row) => {
 // Every attachment file name the row references.
 export const attachmentsOf = (row) => {
   const out = [];
-  if (row.photo_file_name) out.push({ column: 'photo_file_name', value: row.photo_file_name, code: 'PHOTO_NOT_FOUND' });
+  if (row.photo) out.push({ column: 'photo', value: row.photo, code: 'PHOTO_NOT_FOUND' });
   if (row.registration.proof_file_name && row.registration.paid_amount > 0) {
-    out.push({ column: 'registration_proof_file_name', value: row.registration.proof_file_name, code: 'PROOF_NOT_FOUND' });
+    out.push({ column: 'registration_proof', value: row.registration.proof_file_name, code: 'PROOF_NOT_FOUND' });
   }
   for (const inst of row.installments) {
     if (inst.proof_file_name && inst.paid_amount > 0) {
       out.push({
-        column: `emi_${inst.installment_no}_proof_file_name`,
+        column: `emi_${inst.installment_no}_proof`,
         value: inst.proof_file_name,
         code: 'PROOF_NOT_FOUND',
       });

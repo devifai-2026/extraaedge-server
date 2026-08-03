@@ -212,11 +212,11 @@ test('utrsOf only reports UTRs attached to money actually collected', () => {
 
 test('attachmentsOf reports the photo plus proofs for collected payments', () => {
   const row = ok({
-    photo_file_name: 'payal.jpg',
-    registration_proof_file_name: 'reg.jpg',
+    photo: 'payal.jpg',
+    registration_proof: 'reg.jpg',
     emi_1_paid_amount: 8000,
-    emi_1_proof_file_name: 'emi1.jpg',
-    emi_2_proof_file_name: 'emi2.jpg', // emi_2 is unpaid → no receipt → not required
+    emi_1_proof: 'emi1.jpg',
+    emi_2_proof: 'emi2.jpg', // emi_2 is unpaid → no receipt → not required
   });
   assert.deepEqual(attachmentsOf(row).map((a) => a.value), ['payal.jpg', 'reg.jpg', 'emi1.jpg']);
   assert.equal(attachmentsOf(row)[0].code, 'PHOTO_NOT_FOUND');

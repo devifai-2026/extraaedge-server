@@ -50,11 +50,11 @@ const eduCols = (n) => [
 
 // Six columns per installment: what's owed, what was collected, and the two
 // pieces of evidence for that collection. utr goes into the uniquely-indexed
-// admission_receipts.utr; proof_file_name is matched against the images
-// attached on the upload screen, same mechanism as the student photo.
+// admission_receipts.utr; proof takes an image the same three ways the
+// student photo does (see ATTACHMENT_COLUMNS).
 const emiCols = (n) => [
   `emi_${n}_due_date`, `emi_${n}_amount`, `emi_${n}_paid_amount`, `emi_${n}_paid_date`,
-  `emi_${n}_utr`, `emi_${n}_proof_file_name`,
+  `emi_${n}_utr`, `emi_${n}_proof`,
 ];
 
 export const range = (n) => Array.from({ length: n }, (_, i) => i + 1);
@@ -72,11 +72,11 @@ export const HEADERS = [
   // ---- Education ----------------------------------------------------
   ...range(EDU_SLOTS).flatMap(eduCols),
   // ---- Photo --------------------------------------------------------
-  'photo_file_name',
+  'photo',
   // ---- Money: headline ----------------------------------------------
   'course_fees', 'mode_of_payment', 'collection_mode', 'payment_account',
   'registration_amount', 'registration_paid_amount', 'registration_paid_date',
-  'registration_utr', 'registration_proof_file_name',
+  'registration_utr', 'registration_proof',
   // ---- Money: EMI plan ----------------------------------------------
   ...range(EMI_SLOTS).flatMap(emiCols),
   // ---- Reconciliation (optional) ------------------------------------
@@ -106,13 +106,24 @@ export const UTR_COLUMNS = [
   ...range(EMI_SLOTS).map((n) => `emi_${n}_utr`),
 ];
 
-// Columns holding the file name of an image attached on the upload screen.
-// photo_file_name lands on admissions.photo_r2_key; the rest land on the
-// matching receipt's payment_screenshot_r2_key.
+// Columns that carry an image. Each accepts THREE forms, checked in this
+// order, because operators arrive with whichever one their old system gave
+// them and none of the three covers every case:
+//
+//   1. an image pasted directly into the cell — nothing to name, nothing to
+//      keep in sync, and what people reach for on a small batch
+//   2. an https link — what you get from Drive/Dropbox/any hosted store, and
+//      the only option when the images live somewhere else entirely
+//   3. a file name matched against files attached on the upload screen — the
+//      workable path for hundreds of images, where embedding them all would
+//      make the workbook itself unopenable
+//
+// `photo` lands on admissions.photo_r2_key; the rest on the matching
+// receipt's payment_screenshot_r2_key.
 export const ATTACHMENT_COLUMNS = [
-  'photo_file_name',
-  'registration_proof_file_name',
-  ...range(EMI_SLOTS).map((n) => `emi_${n}_proof_file_name`),
+  'photo',
+  'registration_proof',
+  ...range(EMI_SLOTS).map((n) => `emi_${n}_proof`),
 ];
 
 // One example row so users see the expected shape (and date format) inline.
@@ -131,16 +142,16 @@ const EXAMPLE = {
   edu_1_examination: 'B.E.', edu_1_stream: 'Computer', edu_1_college: 'SKN COE',
   edu_1_board_university: 'SPPU', edu_1_year: 2024, edu_1_grade: 72,
   edu_1_grade_unit: 'percent',
-  photo_file_name: 'payal-khatri.jpg',
+  photo: 'https://example.com/photos/payal-khatri.jpg',
   course_fees: 25000, mode_of_payment: 'Installment', collection_mode: 'upi',
   payment_account: 'HDFC Current',
   registration_amount: 2000, registration_paid_amount: 2000,
   registration_paid_date: '20-07-2026',
-  registration_utr: '412345678901', registration_proof_file_name: 'payal-reg.jpg',
+  registration_utr: '412345678901', registration_proof: 'payal-reg.jpg',
   emi_1_due_date: '25-07-2026', emi_1_amount: 8000, emi_1_paid_amount: 0,
-  emi_1_paid_date: '', emi_1_utr: '', emi_1_proof_file_name: '',
+  emi_1_paid_date: '', emi_1_utr: '', emi_1_proof: '',
   emi_2_due_date: '25-08-2026', emi_2_amount: 15000, emi_2_paid_amount: 0,
-  emi_2_paid_date: '', emi_2_utr: '', emi_2_proof_file_name: '',
+  emi_2_paid_date: '', emi_2_utr: '', emi_2_proof: '',
   paid_till_date: 2000,
 };
 

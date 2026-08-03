@@ -62,23 +62,24 @@ const MAX_XLSX_BYTES = 25 * 1024 * 1024;
 // load() yields real Date objects — which parseCsvDate() in the import worker
 // depends on for IST-correct date handling. To keep load() memory-safe we cap
 // the input size up front (MAX_XLSX_BYTES) and trim empty trailing rows below.
-export const parseXlsxBuffer = async (buffer) => {
-  if (buffer && buffer.length > MAX_XLSX_BYTES) {
-    const err = new Error(`Spreadsheet too large to parse (${(buffer.length / (1024 * 1024)).toFixed(1)} MB; max ${Math.round(MAX_XLSX_BYTES / (1024 * 1024))} MB). Re-save it as a fresh .xlsx to drop embedded dropdown data.`);
+const loadWorksheet = async (buffer, maxBytes) => {
+  if (buffer && buffer.length > maxBytes) {
+    const err = new Error(`Spreadsheet too large to parse (${(buffer.length / (1024 * 1024)).toFixed(1)} MB; max ${Math.round(maxBytes / (1024 * 1024))} MB). Re-save it as a fresh .xlsx to drop embedded dropdown data.`);
     err.code = 'XLSX_TOO_LARGE';
     throw err;
   }
-
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer);
   const ws = wb.worksheets[0];
-  if (!ws) return [];
-
+  if (!ws) return { wb: null, ws: null, headers: [] };
   const headers = [];
   ws.getRow(1).eachCell({ includeEmpty: true }, (cell, colNumber) => {
     headers[colNumber - 1] = String(cell.value ?? '').trim();
   });
+  return { wb, ws, headers };
+};
 
+const extractRows = (ws, headers) => {
   const rows = [];
   for (let r = 2; r <= ws.rowCount; r += 1) {
     const row = ws.getRow(r);
@@ -97,14 +98,65 @@ export const parseXlsxBuffer = async (buffer) => {
     });
     // Trim empty trailing rows: templates often carry thousands of blank
     // pre-formatted rows. A row with no real values is dropped.
-    if (hasValue) rows.push(obj);
+    if (!hasValue) continue;
+    // The TRUE spreadsheet row number, kept non-enumerable so it never shows
+    // up in Object.entries / spread / JSON.stringify — existing callers that
+    // copy every key of a row (bulk-import-worker's applyMapping, the
+    // raw_row_json audit blob) stay exactly as they were.
+    //
+    // It matters because this array is compacted: a blank row in the middle
+    // of a sheet shifts every later index, so "row N" in an error message
+    // would point at the wrong line, and an embedded image's anchor (which
+    // is a real sheet row) could not be matched to its record at all.
+    Object.defineProperty(obj, '__sheetRow', { value: r, enumerable: false });
+    rows.push(obj);
   }
   return rows;
 };
 
+export const parseXlsxBuffer = async (buffer, { maxBytes = MAX_XLSX_BYTES } = {}) => {
+  const { ws, headers } = await loadWorksheet(buffer, maxBytes);
+  if (!ws) return [];
+  return extractRows(ws, headers);
+};
+
+// Same as parseXlsxBuffer, plus any images embedded in the sheet, each mapped
+// back to the row and column it sits on.
+//
+// Why this exists: telling someone to name a file in a cell AND attach that
+// file separately is two ways of saying one thing, and the two drift the
+// moment a file is renamed. Pasting the screenshot into the cell is what
+// people actually do, so we read it from there.
+//
+// Anchoring: ExcelJS gives each image a top-left anchor in 0-based
+// (nativeRow, nativeCol). Row 1 is the header, so anything anchored above
+// row 2, or in a column with no header, isn't part of the table and is
+// dropped rather than guessed at.
+export const parseXlsxWithImages = async (buffer, { maxBytes = MAX_XLSX_BYTES } = {}) => {
+  const { wb, ws, headers } = await loadWorksheet(buffer, maxBytes);
+  if (!ws) return { rows: [], images: [] };
+  const rows = extractRows(ws, headers);
+
+  const images = [];
+  for (const img of (typeof ws.getImages === 'function' ? ws.getImages() : [])) {
+    const media = wb.getImage(Number(img.imageId));
+    if (!media?.buffer) continue;
+    const sheetRow = (img.range?.tl?.nativeRow ?? 0) + 1;
+    const column = headers[img.range?.tl?.nativeCol ?? 0];
+    if (!column || sheetRow < 2) continue;
+    images.push({
+      sheetRow,
+      column,
+      buffer: media.buffer,
+      extension: (media.extension || 'png').replace(/^\./u, ''),
+    });
+  }
+  return { rows, images };
+};
+
 // Pick a parser by file extension. Workers and routes can call this without
 // knowing whether the upload is CSV or XLSX.
-export const parseSpreadsheetBuffer = async (buffer, filenameOrKey) => {
+export const parseSpreadsheetBuffer = async (buffer, filenameOrKey, opts) => {
   const isXlsx = /\.xlsx$/i.test(filenameOrKey ?? '');
-  return isXlsx ? parseXlsxBuffer(buffer) : parseCsvBuffer(buffer);
+  return isXlsx ? parseXlsxBuffer(buffer, opts) : parseCsvBuffer(buffer);
 };
