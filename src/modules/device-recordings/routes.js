@@ -332,6 +332,117 @@ router.post('/confirm', apiKeyOrAuthRequired, tenantRequired, tenantUserOnly, va
   } catch (err) { next(err); }
 });
 
+// ------------------------------- DEVICE HEARTBEAT ---------------------------
+// The phone checks in on a schedule whether or not it has anything to upload.
+//
+// Two jobs in one round-trip, deliberately: a phone that has gone quiet is the
+// case we most need visibility into, and giving it two separate calls to make
+// doubles the chance of hearing nothing at all. So one POST both reports the
+// device's state and collects any pending command.
+//
+// The response tells the app whether to run a full upload now. There is no
+// push channel to these phones, so this poll IS the delivery mechanism for the
+// product owner's "pull everything" button.
+const heartbeatSchema = z.object({
+  device_id: z.string().min(8).max(64),
+  manufacturer: z.string().max(64).optional().nullable(),
+  model: z.string().max(64).optional().nullable(),
+  os_version: z.string().max(32).optional().nullable(),
+  app_version: z.string().max(32).optional().nullable(),
+  permissions: z.object({
+    all_files: z.boolean().optional(),
+    notifications: z.boolean().optional(),
+    battery_unrestricted: z.boolean().optional(),
+    read_storage: z.boolean().optional(),
+  }).default({}),
+});
+
+router.post(
+  '/heartbeat',
+  apiKeyOrAuthRequired, tenantRequired, tenantUserOnly,
+  validate({ body: heartbeatSchema }),
+  async (req, res, next) => {
+    try {
+      const b = req.body;
+      const { rows } = await tenantQuery(
+        req.tenant,
+        `INSERT INTO recorder_devices
+           (device_id, user_id, manufacturer, model, os_version, app_version, permissions, last_seen_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb, now())
+         ON CONFLICT (device_id) DO UPDATE SET
+           -- Re-point the row if a different user signs in on this handset;
+           -- the alternative is a device row attributed to whoever set it up
+           -- first, which is exactly the wrong name to chase.
+           user_id      = COALESCE(EXCLUDED.user_id, recorder_devices.user_id),
+           manufacturer = COALESCE(EXCLUDED.manufacturer, recorder_devices.manufacturer),
+           model        = COALESCE(EXCLUDED.model, recorder_devices.model),
+           os_version   = COALESCE(EXCLUDED.os_version, recorder_devices.os_version),
+           app_version  = EXCLUDED.app_version,
+           permissions  = EXCLUDED.permissions,
+           last_seen_at = now()
+         RETURNING id, sync_requested_at, sync_started_at, sync_completed_at`,
+        [
+          b.device_id, req.user?.id ?? null,
+          b.manufacturer ?? null, b.model ?? null, b.os_version ?? null, b.app_version ?? null,
+          JSON.stringify(b.permissions ?? {}),
+        ],
+      );
+      const d = rows[0];
+      // Pending = requested, and not yet finished. Comparing against
+      // completed_at (not started_at) means a run that died mid-way is
+      // retried on the next heartbeat rather than being lost.
+      const syncRequested = Boolean(
+        d.sync_requested_at
+        && (!d.sync_completed_at || d.sync_completed_at < d.sync_requested_at),
+      );
+      if (syncRequested && !d.sync_started_at) {
+        // Stamp the pickup so the console can show the command was received,
+        // which is the difference between "the phone is offline" and "the
+        // phone is working on it".
+        await tenantQuery(
+          req.tenant,
+          `UPDATE recorder_devices SET sync_started_at = now() WHERE id = $1`,
+          [d.id],
+        );
+      }
+      res.json({
+        data: { device_id: b.device_id, sync_requested: syncRequested },
+        meta: { requestId: req.id },
+      });
+    } catch (err) { next(err); }
+  },
+);
+
+// The device reports what a requested pull actually did. Best-effort: the
+// recordings themselves arrive via /confirm regardless, so a lost report
+// costs visibility, never data.
+const syncReportSchema = z.object({
+  device_id: z.string().min(8).max(64),
+  scanned: z.coerce.number().int().nonnegative().default(0),
+  uploaded: z.coerce.number().int().nonnegative().default(0),
+  unmatched: z.coerce.number().int().nonnegative().default(0),
+  failed: z.coerce.number().int().nonnegative().default(0),
+});
+
+router.post(
+  '/sync-report',
+  apiKeyOrAuthRequired, tenantRequired, tenantUserOnly,
+  validate({ body: syncReportSchema }),
+  async (req, res, next) => {
+    try {
+      const { device_id, ...counts } = req.body;
+      await tenantQuery(
+        req.tenant,
+        `UPDATE recorder_devices
+            SET sync_completed_at = now(), sync_result = $2::jsonb, last_seen_at = now()
+          WHERE device_id = $1`,
+        [device_id, JSON.stringify(counts)],
+      );
+      res.status(204).end();
+    } catch (err) { next(err); }
+  },
+);
+
 // ------------------------------- CRM READ/ADMIN -----------------------------
 // Counsellors can reach these routes too, but only ever see their OWN uploads
 // (enforced per-query via `ownOnly`). Managers/admins see everything in scope.
