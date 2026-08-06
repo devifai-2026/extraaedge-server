@@ -323,7 +323,8 @@ export const userActivitySummary = async (tenant, userId, { days = 30 } = {}) =>
 export const userLoginEvents = async (tenant, userId, { days = 30 } = {}) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT created_at, kind, ip, user_agent, session_id, lat, lng, geo_city, geo_country, location_source
+    `SELECT created_at, kind, ip, user_agent, session_id,
+            lat::float8 AS lat, lng::float8 AS lng, geo_city, geo_country, location_source
        FROM user_login_events
       WHERE user_id = $1 AND created_at > now() - ($2::int * interval '1 day')
       ORDER BY created_at DESC
