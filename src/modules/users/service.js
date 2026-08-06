@@ -422,16 +422,16 @@ export const userLeads = async (tenant, userId, { status, limit }) => {
   return repo.userLeads(tenant, userId, { status, limit });
 };
 
-export const userWorkSessions = async (tenant, userId, { days }) => {
-  return repo.userWorkSessions(tenant, userId, { days });
+export const userWorkSessions = async (tenant, userId, { hours }) => {
+  return repo.userWorkSessions(tenant, userId, { hours });
 };
 
-export const userActivitySummary = async (tenant, userId, { days }) => {
-  return repo.userActivitySummary(tenant, userId, { days });
+export const userActivitySummary = async (tenant, userId, { hours }) => {
+  return repo.userActivitySummary(tenant, userId, { hours });
 };
 
-export const userLoginEvents = async (tenant, userId, { days }) => {
-  return repo.userLoginEvents(tenant, userId, { days });
+export const userLoginEvents = async (tenant, userId, { hours }) => {
+  return repo.userLoginEvents(tenant, userId, { hours });
 };
 
 export const updatedAtLoader = (tenant) => async (req) => repo.getUpdatedAt(tenant, req.params.id);

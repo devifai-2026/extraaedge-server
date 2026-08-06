@@ -82,26 +82,27 @@ export const userLeads = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// Cap at ~10 years so the FE's "lifetime" filter option can just send a big
+// number rather than the backend needing a separate no-filter code path.
+const parseHours = (req) => Math.min(Math.max(parseInt(req.query.hours || '720', 10), 1), 87600);
+
 export const userWorkSessions = async (req, res, next) => {
   try {
-    const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 180);
-    const data = await service.userWorkSessions(req.tenant, req.params.id, { days });
+    const data = await service.userWorkSessions(req.tenant, req.params.id, { hours: parseHours(req) });
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
 export const userActivitySummary = async (req, res, next) => {
   try {
-    const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 180);
-    const data = await service.userActivitySummary(req.tenant, req.params.id, { days });
+    const data = await service.userActivitySummary(req.tenant, req.params.id, { hours: parseHours(req) });
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
 export const userLoginEvents = async (req, res, next) => {
   try {
-    const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 180);
-    const data = await service.userLoginEvents(req.tenant, req.params.id, { days });
+    const data = await service.userLoginEvents(req.tenant, req.params.id, { hours: parseHours(req) });
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

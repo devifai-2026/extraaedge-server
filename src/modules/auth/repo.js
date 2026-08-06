@@ -1,5 +1,6 @@
-import geoip from 'geoip-lite';
 import { tenantQuery } from '../../db/tenant.js';
+import { resolveIpGeo } from '../../lib/ipGeo.js';
+import { logger } from '../../lib/logger.js';
 
 const USER_COLS = `
   u.id, u.email, u.phone, u.name, u.avatar_r2_key, u.password_hash, u.role, u.role_id,
@@ -52,42 +53,40 @@ export const touchLogin = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE users SET last_login_at = now() WHERE id = $1`, [id]);
 };
 
-// Resolved once at write-time (not on every read) so historical rows keep
-// showing the location that was true when the login happened, even if the
-// geoip-lite database is later updated. City-level accuracy, offline, free —
-// good enough for "which office/city did this come from", not a compliance
-// tool. Loopback/private IPs (dev, VPN, LAN) resolve to null — geoip-lite
-// has no data for them, and that's correct, not a bug.
-const resolveIpGeo = (ip) => {
-  if (!ip) return null;
-  try {
-    const hit = geoip.lookup(ip);
-    if (!hit) return null;
-    const [lat, lng] = hit.ll || [];
-    return { lat: lat ?? null, lng: lng ?? null, city: hit.city || null, country: hit.country || null };
-  } catch {
-    return null;
-  }
-};
-
-// Audit a login / logout / expired event so admins can chart per-day login counts.
+// Audit a login / logout / expired event so admins can chart per-day login
+// counts. The row is inserted immediately with no geo data so the login
+// response is never held up by an outbound HTTP call (see lib/ipGeo.js —
+// ip-api.com, not geoip-lite, so most lookups are a real network hop even
+// though a short cache absorbs repeat IPs). Geo/ISP resolve in the
+// background and UPDATE the row once ready — a login is never blocked or
+// left without an audit row over the geo lookup being slow or down.
 export const logLoginEvent = async (tenant, { user_id, kind, session_id, ip, user_agent }) => {
+  let rowId;
   try {
-    const geo = resolveIpGeo(ip);
-    await tenantQuery(
+    const { rows } = await tenantQuery(
       tenant,
-      `INSERT INTO user_login_events (user_id, kind, session_id, ip, user_agent, lat, lng, geo_city, geo_country, location_source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [
-        user_id, kind, session_id ?? null, ip ?? null, user_agent ?? null,
-        geo?.lat ?? null, geo?.lng ?? null, geo?.city ?? null, geo?.country ?? null,
-        geo ? 'ip' : null,
-      ],
+      `INSERT INTO user_login_events (user_id, kind, session_id, ip, user_agent)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [user_id, kind, session_id ?? null, ip ?? null, user_agent ?? null],
     );
+    rowId = rows[0]?.id;
   } catch (err) {
     // Audit table is best-effort — never fail the login flow over it.
-    // (Intentional swallow.)
+    return;
   }
+  if (!rowId || !ip) return;
+  resolveIpGeo(ip)
+    .then((geo) => {
+      if (!geo) return;
+      return tenantQuery(
+        tenant,
+        `UPDATE user_login_events
+            SET lat = $2, lng = $3, geo_city = $4, geo_country = $5, geo_isp = $6, location_source = 'ip'
+          WHERE id = $1`,
+        [rowId, geo.lat ?? null, geo.lng ?? null, geo.city ?? null, geo.country ?? null, geo.isp ?? null],
+      );
+    })
+    .catch((err) => logger.error({ err: err.message, rowId }, 'logLoginEvent: background geo resolve failed'));
 };
 
 // Refines the most recent login event with a precise browser-reported fix —

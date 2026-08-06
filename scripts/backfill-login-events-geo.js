@@ -1,27 +1,25 @@
-// One-off backfill: resolve lat/lng/city/country for existing
-// user_login_events rows that predate the geo columns (migration
-// 1700000121000_login_events_geo). New rows resolve this at insert time
-// (see modules/auth/repo.js logLoginEvent) — this script only needs to run
-// once, after that migration lands, across every active tenant.
+// One-off backfill: resolve lat/lng/city/country/isp for existing
+// user_login_events rows that predate the geo columns, or that were
+// resolved via the old geoip-lite lookup before the switch to ip-api.com
+// (see lib/ipGeo.js for why — geoip-lite's free offline data was flat wrong
+// for some reassigned ISP ranges). New rows resolve this at insert time
+// (modules/auth/repo.js logLoginEvent) — this script re-resolves anything
+// still missing an ISP, which covers both "never resolved" and "resolved
+// by the old geoip-lite path".
 //
 //   node scripts/backfill-login-events-geo.js
+//
+// Rate-limited to ip-api.com's free-tier 45 req/min — resolves per DISTINCT
+// ip (not per row) and applies the result to every row sharing that IP in
+// one UPDATE, since office/home IPs repeat heavily across login history.
 import 'dotenv/config';
-import geoip from 'geoip-lite';
 import { sysQuery, closeSystemPool } from '../src/db/system.js';
 import { tenantQuery, closeAllTenantPools } from '../src/db/tenant.js';
+import { resolveIpGeo } from '../src/lib/ipGeo.js';
 import { logger } from '../src/lib/logger.js';
 
-const resolveIpGeo = (ip) => {
-  if (!ip) return null;
-  try {
-    const hit = geoip.lookup(ip);
-    if (!hit) return null;
-    const [lat, lng] = hit.ll || [];
-    return { lat: lat ?? null, lng: lng ?? null, city: hit.city || null, country: hit.country || null };
-  } catch {
-    return null;
-  }
-};
+const REQUEST_SPACING_MS = 1400; // ~43/min, under the 45/min free-tier cap
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const main = async () => {
   const { rows: tenants } = await sysQuery(
@@ -31,39 +29,40 @@ const main = async () => {
       ORDER BY created_at`,
   );
 
-  let scanned = 0;
-  let updated = 0;
+  let distinctIps = 0;
+  let rowsUpdated = 0;
   let noHit = 0;
 
   for (const tenant of tenants) {
-    let rows;
+    let ips;
     try {
       const r = await tenantQuery(
         tenant,
-        `SELECT id, ip FROM user_login_events WHERE lat IS NULL AND ip IS NOT NULL AND ip <> ''`,
+        `SELECT DISTINCT ip FROM user_login_events WHERE geo_isp IS NULL AND ip IS NOT NULL AND ip <> ''`,
       );
-      rows = r.rows;
+      ips = r.rows.map((row) => row.ip);
     } catch (err) {
       logger.error({ slug: tenant.slug, err: err.message }, 'geo backfill: could not read tenant login events');
       continue;
     }
 
-    for (const row of rows) {
-      scanned += 1;
-      const geo = resolveIpGeo(row.ip);
+    for (const ip of ips) {
+      distinctIps += 1;
+      const geo = await resolveIpGeo(ip);
       if (!geo) { noHit += 1; continue; }
-      await tenantQuery(
+      const { rowCount } = await tenantQuery(
         tenant,
         `UPDATE user_login_events
-            SET lat = $2, lng = $3, geo_city = $4, geo_country = $5, location_source = 'ip'
-          WHERE id = $1`,
-        [row.id, geo.lat, geo.lng, geo.city, geo.country],
+            SET lat = $2, lng = $3, geo_city = $4, geo_country = $5, geo_isp = $6, location_source = 'ip'
+          WHERE ip = $1 AND geo_isp IS NULL`,
+        [ip, geo.lat, geo.lng, geo.city, geo.country, geo.isp],
       );
-      updated += 1;
+      rowsUpdated += rowCount ?? 0;
+      await sleep(REQUEST_SPACING_MS);
     }
   }
 
-  logger.info({ tenants: tenants.length, scanned, updated, noHit }, 'backfill-login-events-geo: done');
+  logger.info({ tenants: tenants.length, distinctIps, rowsUpdated, noHit }, 'backfill-login-events-geo: done');
 
   await closeAllTenantPools();
   await closeSystemPool();
