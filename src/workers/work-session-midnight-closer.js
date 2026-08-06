@@ -40,8 +40,16 @@ const closeSession = (tenant, row, midnightMs) => {
 
 const tick = async () => {
   try {
+    // Full row, not just id/timezone — tenantQuery's getTenantPool needs
+    // status + the db connection fields, or it always throws "suspended"
+    // (an incomplete tenant object's .status is undefined, which fails the
+    // `!== 'active'` check) even though the WHERE clause already filters to
+    // real active tenants. This silently broke every tick since the worker
+    // shipped — caught per-tenant so it never crashed, which is exactly why
+    // it went unnoticed instead of erroring loudly.
     const { rows: tenants } = await sysQuery(
-      `SELECT id, timezone FROM tenants WHERE status = 'active' AND deleted_at IS NULL`,
+      `SELECT id, slug, status, db_name, db_user, db_password_encrypted, timezone
+         FROM tenants WHERE status = 'active' AND deleted_at IS NULL`,
     );
     for (const tenant of tenants) {
       try {
