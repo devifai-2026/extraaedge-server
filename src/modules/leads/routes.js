@@ -1,6 +1,8 @@
 import express from 'express';
 import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
+import { workTracker } from '../../middleware/workTracker.js';
+import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { requireRole } from '../../middleware/rbac.js';
@@ -12,7 +14,7 @@ import * as service from './service.js';
 import { leadCreateSchema, leadUpdateSchema, listQuery, idParam, stageChangeSchema, bulkAssignSchema, bulkDeleteSchema } from './schema.js';
 
 const router = express.Router();
-router.use(authRequired, tenantRequired);
+router.use(authRequired, tenantRequired, workTracker, requireClockIn);
 
 // Once a lead has been converted (stage flagged is_success → converted_at set)
 // the row is effectively closed. Only super_admin can keep editing it; everyone
@@ -79,6 +81,7 @@ router.post(
   controller.bulkDelete,
 );
 router.get('/:id', validate({ params: idParam }), controller.get);
+router.post('/:id/reveal-phone', validate({ params: idParam }), controller.revealPhone);
 router.get('/:id/timeline', validate({ params: idParam }), controller.timeline);
 
 router.post('/', validate({ body: leadCreateSchema }), controller.create);

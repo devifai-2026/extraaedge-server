@@ -70,6 +70,12 @@ const projectTenantBranding = (tenant) => ({
   timezone: tenant.timezone,
   currency: tenant.currency,
   default_language: tenant.default_language,
+  // Piloted per-tenant — lets the FE ClockInGate stay silent for tenants
+  // where the hard clock-in block isn't enabled yet, matching requireClockIn
+  // on the backend (see middleware/requireClockIn.js).
+  clock_in_enforced: tenant.clock_in_enforced ?? false,
+  // Same pilot pattern for the hard browser-location gate (LocationGate.jsx).
+  location_enforced: tenant.location_enforced ?? false,
   // Organisation contact block (shown on the fee-receipt header + editable on
   // the admin settings page).
   phone: tenant.phone ?? null,
@@ -804,6 +810,15 @@ export const heartbeat = async ({ user }) => {
   }
   await platformSvc.touchSession(user.sessionId);
   return { idle_timeout_minutes: env.IDLE_TIMEOUT_MINUTES, last_activity_at: new Date().toISOString() };
+};
+
+// Precise browser fix from LocationGate.jsx, refining the IP-derived location
+// already on the user's most recent login event. Platform users have no
+// tenant DB / login-events table, so this is a no-op for them.
+export const updateLocation = async ({ user, lat, lng }) => {
+  if (!user.tenantSlug) return;
+  const tenant = await resolveTenantBySlug(user.tenantSlug);
+  await repo.updateLatestLoginLocation(tenant, user.id, { lat, lng });
 };
 
 // ---------- change password ----------

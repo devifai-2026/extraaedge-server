@@ -18,6 +18,8 @@ import './duplicate-scanner.js';
 import './followup-reminder-scheduler.js';
 import './missed-followup-scanner.js';
 import './sla-scanner.js';
+import './work-session-midnight-closer.js';
+import './security-digest-mailer.js';
 import './referral-crediter.js';
 import './attribution-snapshotter.js';
 import './touch-recorder.js';

@@ -286,7 +286,7 @@ export const userWorkSessions = async (tenant, userId, { days = 30 } = {}) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id, status, started_at, ended_at, paused_seconds, active_minutes,
-            restart_of_day, last_paused_at
+            restart_of_day, last_paused_at, auto_closed, closed_reason
        FROM work_sessions
       WHERE user_id = $1 AND started_at > now() - ($2::int * interval '1 day')
       ORDER BY started_at DESC`,
@@ -305,10 +305,25 @@ export const userWorkSessions = async (tenant, userId, { days = 30 } = {}) => {
 };
 
 
+// Real-vs-api activity split for the super_admin activity report — how much
+// of this user's tracked time was backed by an actual mouse/keyboard pattern
+// (see requireClockIn/useGenuineActivity) vs just an API call happening.
+export const userActivitySummary = async (tenant, userId, { days = 30 } = {}) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT count(*)::int AS active_minutes,
+            count(*) FILTER (WHERE source = 'genuine')::int AS genuine_minutes
+       FROM work_activity_minutes
+      WHERE user_id = $1 AND minute_bucket > now() - ($2::int * interval '1 day')`,
+    [userId, days],
+  );
+  return rows[0];
+};
+
 export const userLoginEvents = async (tenant, userId, { days = 30 } = {}) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT created_at, kind, ip, user_agent, session_id
+    `SELECT created_at, kind, ip, user_agent, session_id, lat, lng, geo_city, geo_country, location_source
        FROM user_login_events
       WHERE user_id = $1 AND created_at > now() - ($2::int * interval '1 day')
       ORDER BY created_at DESC

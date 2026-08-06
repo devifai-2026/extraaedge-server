@@ -90,6 +90,14 @@ export const userWorkSessions = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const userActivitySummary = async (req, res, next) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 180);
+    const data = await service.userActivitySummary(req.tenant, req.params.id, { days });
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const userLoginEvents = async (req, res, next) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 180);

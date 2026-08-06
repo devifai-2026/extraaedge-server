@@ -77,6 +77,13 @@ export const heartbeat = async (req, res, next) => {
   catch (err) { next(err); }
 };
 
+export const updateLocation = async (req, res, next) => {
+  try {
+    await service.updateLocation({ user: req.user, lat: req.body.lat, lng: req.body.lng });
+    res.status(204).end();
+  } catch (err) { next(err); }
+};
+
 export const changePassword = async (req, res, next) => {
   try {
     await service.changePassword({

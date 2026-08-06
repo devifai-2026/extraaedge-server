@@ -6,6 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { teamHierarchy } from '../users/repo.js';
+import { findOpenSession, stoppedTodayAlready, computeActiveSeconds, computePausedSeconds } from './repo.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { conflict, forbidden } from '../../lib/errors.js';
 
@@ -28,78 +29,6 @@ const requireTimedRole = (req, _res, next) => {
     return next(forbidden('super_admin does not track work time'));
   }
   return next();
-};
-
-const findOpenSession = async (tenant, userId) => {
-  const { rows } = await tenantQuery(
-    tenant,
-    `SELECT * FROM work_sessions WHERE user_id = $1 AND status IN ('active','paused') LIMIT 1`,
-    [userId],
-  );
-  return rows[0] ?? null;
-};
-
-const stoppedTodayAlready = async (tenant, userId) => {
-  const { rows } = await tenantQuery(
-    tenant,
-    `SELECT 1 FROM work_sessions
-       WHERE user_id = $1 AND status = 'stopped'
-         AND started_at >= date_trunc('day', now())
-       LIMIT 1`,
-    [userId],
-  );
-  return rows.length > 0;
-};
-
-// How long after the last heartbeat we still trust the session is alive.
-// Client heartbeats every 60s — 90s grace covers one missed beat + retry.
-// Beyond this we treat the session as effectively dead and stop accruing
-// active time, which prevents the "paused-overnight = 128h active" bug.
-const STALE_GRACE_MS = 90 * 1000;
-
-// Effective "now" for accounting purposes: clamped to ended_at (if stopped)
-// or last_heartbeat_at + grace (if the client has gone silent).
-const effectiveNow = (row) => {
-  const wall = Date.now();
-  if (row.ended_at) return new Date(row.ended_at).getTime();
-  if (row.last_heartbeat_at) {
-    const hbCap = new Date(row.last_heartbeat_at).getTime() + STALE_GRACE_MS;
-    return Math.min(wall, hbCap);
-  }
-  return wall;
-};
-
-// Live "active seconds" = elapsed - paused, with every component clamped so
-// a corrupt DB row (paused > elapsed, or wildly stale heartbeat) cannot
-// produce nonsense like 128h or negative time.
-const computeActiveSeconds = (row) => {
-  if (!row) return 0;
-  const start = new Date(row.started_at).getTime();
-  const ref = effectiveNow(row);
-  const elapsedMs = Math.max(0, ref - start);
-  let pausedMs = Math.max(0, (row.paused_seconds || 0) * 1000);
-  if (row.status === 'paused' && row.last_paused_at) {
-    const pauseStart = new Date(row.last_paused_at).getTime();
-    pausedMs += Math.max(0, ref - pauseStart);
-  }
-  // Hard invariant: paused can never exceed elapsed.
-  pausedMs = Math.min(pausedMs, elapsedMs);
-  return Math.floor((elapsedMs - pausedMs) / 1000);
-};
-
-// Same clamping logic but returns the paused-seconds value to persist.
-const computePausedSeconds = (row) => {
-  if (!row) return 0;
-  const start = new Date(row.started_at).getTime();
-  const ref = effectiveNow(row);
-  const elapsedMs = Math.max(0, ref - start);
-  let pausedMs = Math.max(0, (row.paused_seconds || 0) * 1000);
-  if (row.status === 'paused' && row.last_paused_at) {
-    const pauseStart = new Date(row.last_paused_at).getTime();
-    pausedMs += Math.max(0, ref - pauseStart);
-  }
-  pausedMs = Math.min(pausedMs, elapsedMs);
-  return Math.floor(pausedMs / 1000);
 };
 
 router.post('/start', requireTimedRole, async (req, res, next) => {
@@ -204,6 +133,21 @@ router.post('/heartbeat', requireTimedRole, async (req, res, next) => {
     const open = await findOpenSession(req.tenant, req.user.id);
     if (!open) return res.json({ data: { state: 'no_session' }, meta: { requestId: req.id } });
     await tenantQuery(req.tenant, `UPDATE work_sessions SET last_heartbeat_at=now() WHERE id=$1`, [open.id]);
+    // The client reports whether it saw a real mouse/keyboard pattern (not
+    // just "a fetch happened") since the last heartbeat — see
+    // useGenuineActivity on the frontend. Upgrades this minute's bucket from
+    // the api-derived default to genuine; never downgrades one that's
+    // already genuine.
+    if (req.body?.genuine === true) {
+      await tenantQuery(
+        req.tenant,
+        `INSERT INTO work_activity_minutes (user_id, minute_bucket, source)
+           VALUES ($1, date_trunc('minute', now()), 'genuine')
+           ON CONFLICT (user_id, minute_bucket) DO UPDATE SET source = 'genuine'
+           WHERE work_activity_minutes.source <> 'genuine'`,
+        [req.user.id],
+      );
+    }
     res.json({ data: { ...open, active_seconds: computeActiveSeconds(open) }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
@@ -243,10 +187,18 @@ router.get('/me/today', async (req, res, next) => {
   try {
     const { rows: bucketsRows } = await tenantQuery(
       req.tenant,
-      `SELECT count(*)::int AS active_minutes FROM work_activity_minutes WHERE user_id = $1 AND minute_bucket >= date_trunc('day', now())`,
+      `SELECT count(*)::int AS active_minutes,
+              count(*) FILTER (WHERE source = 'genuine')::int AS genuine_minutes
+         FROM work_activity_minutes WHERE user_id = $1 AND minute_bucket >= date_trunc('day', now())`,
       [req.user.id],
     );
-    res.json({ data: { active_minutes_today: bucketsRows[0].active_minutes }, meta: { requestId: req.id } });
+    res.json({
+      data: {
+        active_minutes_today: bucketsRows[0].active_minutes,
+        genuine_minutes_today: bucketsRows[0].genuine_minutes,
+      },
+      meta: { requestId: req.id },
+    });
   } catch (err) { next(err); }
 });
 

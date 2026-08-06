@@ -37,6 +37,15 @@ const loadInprocessWorkers = async () => {
     await import('./workers/followup-reminder-scheduler.js');
     await import('./workers/missed-followup-scanner.js');
     await import('./workers/lms-class-reminder.js');
+    // Force-closes work_sessions still open past the tenant's local midnight
+    // (the "forgot to clock out" case) — see requireClockIn/ClockInGate.
+    await import('./workers/work-session-midnight-closer.js');
+    // Pre-existing gap found while wiring the above: /sla-policies has a full
+    // CRUD API but its scanner never actually ran in production — nothing
+    // imported it on either boot path, so configured SLA alerts silently
+    // never fired. Fixing alongside, not related to this feature otherwise.
+    await import('./workers/sla-scanner.js');
+    await import('./workers/security-digest-mailer.js');
     logger.info('in-process workers loaded');
   } catch (err) {
     logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');

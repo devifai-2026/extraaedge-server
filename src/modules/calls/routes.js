@@ -2,6 +2,8 @@ import express from 'express';
 import { z } from 'zod';
 import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired, tenantOptional } from '../../middleware/tenant.js';
+import { workTracker } from '../../middleware/workTracker.js';
+import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
@@ -64,7 +66,7 @@ router.post('/webhooks/exotel',
   },
 );
 
-router.use(authRequired, tenantRequired);
+router.use(authRequired, tenantRequired, workTracker, requireClockIn);
 
 const dispositionSchema = z.object({
   code: z.string().min(1),

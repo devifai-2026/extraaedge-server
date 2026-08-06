@@ -1,3 +1,4 @@
+import geoip from 'geoip-lite';
 import { tenantQuery } from '../../db/tenant.js';
 
 const USER_COLS = `
@@ -51,19 +52,58 @@ export const touchLogin = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE users SET last_login_at = now() WHERE id = $1`, [id]);
 };
 
+// Resolved once at write-time (not on every read) so historical rows keep
+// showing the location that was true when the login happened, even if the
+// geoip-lite database is later updated. City-level accuracy, offline, free —
+// good enough for "which office/city did this come from", not a compliance
+// tool. Loopback/private IPs (dev, VPN, LAN) resolve to null — geoip-lite
+// has no data for them, and that's correct, not a bug.
+const resolveIpGeo = (ip) => {
+  if (!ip) return null;
+  try {
+    const hit = geoip.lookup(ip);
+    if (!hit) return null;
+    const [lat, lng] = hit.ll || [];
+    return { lat: lat ?? null, lng: lng ?? null, city: hit.city || null, country: hit.country || null };
+  } catch {
+    return null;
+  }
+};
+
 // Audit a login / logout / expired event so admins can chart per-day login counts.
 export const logLoginEvent = async (tenant, { user_id, kind, session_id, ip, user_agent }) => {
   try {
+    const geo = resolveIpGeo(ip);
     await tenantQuery(
       tenant,
-      `INSERT INTO user_login_events (user_id, kind, session_id, ip, user_agent)
-         VALUES ($1, $2, $3, $4, $5)`,
-      [user_id, kind, session_id ?? null, ip ?? null, user_agent ?? null],
+      `INSERT INTO user_login_events (user_id, kind, session_id, ip, user_agent, lat, lng, geo_city, geo_country, location_source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        user_id, kind, session_id ?? null, ip ?? null, user_agent ?? null,
+        geo?.lat ?? null, geo?.lng ?? null, geo?.city ?? null, geo?.country ?? null,
+        geo ? 'ip' : null,
+      ],
     );
   } catch (err) {
     // Audit table is best-effort — never fail the login flow over it.
     // (Intentional swallow.)
   }
+};
+
+// Refines the most recent login event with a precise browser-reported fix —
+// see modules/auth/service.js updateLocation / LocationGate.jsx on the FE.
+export const updateLatestLoginLocation = async (tenant, userId, { lat, lng }) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE user_login_events
+        SET lat = $2, lng = $3, location_source = 'gps'
+      WHERE id = (
+        SELECT id FROM user_login_events
+         WHERE user_id = $1 AND kind = 'login'
+         ORDER BY created_at DESC LIMIT 1
+      )`,
+    [userId, lat, lng],
+  );
 };
 
 export const updatePasswordHash = async (tenant, id, password_hash) => {

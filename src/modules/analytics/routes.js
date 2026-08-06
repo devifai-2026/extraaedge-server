@@ -9,14 +9,17 @@ import express from 'express';
 import { z } from 'zod';
 import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
+import { workTracker } from '../../middleware/workTracker.js';
+import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
+import { computeSecurityAnomalies } from '../../lib/securityAnomalies.js';
 
 const router = express.Router();
-router.use(authRequired, tenantRequired);
+router.use(authRequired, tenantRequired, workTracker, requireClockIn);
 
 const rangeQuery = z.object({
   date_from: z.coerce.date().optional(),
@@ -254,16 +257,21 @@ router.get('/lead-origin', validate({ query: originQuery }), async (req, res, ne
     const WA = `first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp'`;
     const FB = `first_touch_source ILIKE '%facebook%' OR first_touch_channel ILIKE '%facebook%'`;
     const JD = `first_touch_source ILIKE '%justdial%' OR first_touch_channel ILIKE '%justdial%'`;
-    const [{ rows: countRows }, { rows: waTrend }, { rows: fbTrend }, { rows: jdTrend }] = await Promise.all([
+    // Website leads — e.g. speedupinfotech.com's Free Demo form, see
+    // modules/public-leads/service.js which sets first_touch_channel='Website'.
+    const WEB = `first_touch_channel ILIKE 'website'`;
+    const [{ rows: countRows }, { rows: waTrend }, { rows: fbTrend }, { rows: jdTrend }, { rows: webTrend }] = await Promise.all([
       tenantQuery(
         req.tenant,
         `SELECT
            count(*) FILTER (WHERE ${WA})::int AS whatsapp,
            count(*) FILTER (WHERE ${FB})::int AS facebook,
            count(*) FILTER (WHERE ${JD})::int AS justdial,
+           count(*) FILTER (WHERE ${WEB})::int AS website,
            count(*) FILTER (WHERE (${WA}) AND converted_at IS NOT NULL)::int AS whatsapp_converted,
            count(*) FILTER (WHERE (${FB}) AND converted_at IS NOT NULL)::int AS facebook_converted,
            count(*) FILTER (WHERE (${JD}) AND converted_at IS NOT NULL)::int AS justdial_converted,
+           count(*) FILTER (WHERE (${WEB}) AND converted_at IS NOT NULL)::int AS website_converted,
            count(*)::int AS total
          FROM leads WHERE ${where}`,
         params,
@@ -271,8 +279,15 @@ router.get('/lead-origin', validate({ query: originQuery }), async (req, res, ne
       trendQuery(WA),
       trendQuery(FB),
       trendQuery(JD),
+      trendQuery(WEB),
     ]);
-    res.json({ data: { counts: countRows[0], whatsapp_trend: waTrend, facebook_trend: fbTrend, justdial_trend: jdTrend }, meta: { requestId: req.id } });
+    res.json({
+      data: {
+        counts: countRows[0],
+        whatsapp_trend: waTrend, facebook_trend: fbTrend, justdial_trend: jdTrend, website_trend: webTrend,
+      },
+      meta: { requestId: req.id },
+    });
   } catch (err) { next(err); }
 });
 
@@ -430,6 +445,16 @@ router.get('/login-events', async (req, res, next) => {
       params,
     );
     res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// Security anomalies — see lib/securityAnomalies.js (shared with the weekly
+// digest worker) for what each of the three checks means.
+router.get('/security-anomalies', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), async (req, res, next) => {
+  try {
+    const data = await computeSecurityAnomalies(req.tenant);
+    res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

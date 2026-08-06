@@ -32,7 +32,7 @@ export const resolveTenantBySlug = async (slug) => {
             address_line1, address_line2, city, state, pincode,
             receipt_terms, receipt_signatory_label, receipt_thankyou, receipt_no_prefix, receipt_no_start, receipt_no_pad,
             recorder_folder_path, recorder_sync_hour,
-            timezone, currency
+            timezone, currency, clock_in_enforced, location_enforced
        FROM tenants
       WHERE slug = $1
         AND deleted_at IS NULL
@@ -52,7 +52,7 @@ export const resolveTenantById = async (id) => {
             address_line1, address_line2, city, state, pincode,
             receipt_terms, receipt_signatory_label, receipt_thankyou, receipt_no_prefix, receipt_no_start, receipt_no_pad,
             recorder_folder_path, recorder_sync_hour,
-            timezone, currency
+            timezone, currency, clock_in_enforced, location_enforced
        FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
     [id],
   );

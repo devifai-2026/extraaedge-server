@@ -223,6 +223,16 @@ if (isDirectRun) {
         await import('./workers/followup-reminder-scheduler.js');
         await import('./workers/missed-followup-scanner.js');
         await import('./workers/lms-class-reminder.js');
+        // Force-closes work_sessions still open past the tenant's local
+        // midnight (the "forgot to clock out" case) — this is the box that
+        // actually runs in production (Hostinger), so it must be here, not
+        // just in run-all.js (dev-only) — see requireClockIn/ClockInGate.
+        await import('./workers/work-session-midnight-closer.js');
+        // Pre-existing gap: /sla-policies has a full CRUD API but its
+        // scanner never actually ran on this (production) boot path either —
+        // configured SLA alerts silently never fired. Fixing alongside.
+        await import('./workers/sla-scanner.js');
+        await import('./workers/security-digest-mailer.js');
         // ── Marketing / campaign engine ──
         // These consume the EMAIL/SMS/CAMPAIGN/DRIP/SCHEDULED_SEND/WORKFLOW
         // queues (email-sender/sms-sender) and run the polling schedulers

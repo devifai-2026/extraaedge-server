@@ -7,6 +7,7 @@ import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
+import { writeAuditLog } from '../../lib/auditLog.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -78,6 +79,20 @@ router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT
 router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `UPDATE campaigns_drip SET active = NOT active WHERE id = $1 AND deleted_at IS NULL RETURNING *`, [req.params.id]);
+    // Only the "turned on" transition matters for audit — an ongoing drip is
+    // a standing bulk-send trigger, same exfiltration shape as a one-shot
+    // campaigns-bulk launch (see that module's /launch audit log).
+    if (rows[0]?.active) {
+      await writeAuditLog(req.tenant, {
+        userId: req.user.id,
+        action: 'campaign.drip_activated',
+        entityType: 'campaign_drip',
+        entityId: rows[0].id,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+        afterJson: { channel: rows[0].channel, audience_filter: rows[0].audience_filter_json },
+      });
+    }
     res.json({ data: rows[0], meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });

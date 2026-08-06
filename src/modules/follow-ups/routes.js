@@ -2,6 +2,8 @@ import express from 'express';
 import { z } from 'zod';
 import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
+import { workTracker } from '../../middleware/workTracker.js';
+import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
@@ -13,7 +15,7 @@ import { teamHierarchy } from '../users/repo.js';
 import { notifyChain } from '../../lib/socket.js';
 
 const router = express.Router();
-router.use(authRequired, tenantRequired);
+router.use(authRequired, tenantRequired, workTracker, requireClockIn);
 
 const createSchema = z.object({
   lead_id: z.string().uuid(),

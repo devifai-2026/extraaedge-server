@@ -9,6 +9,7 @@ import { SYSTEM_TENANT_ROLES, QUEUE_NAMES, EVENT_TYPES } from '../../config/cons
 import { notFound, forbidden } from '../../lib/errors.js';
 import { publish } from '../../lib/queue.js';
 import { countAudience } from '../../lib/audience.js';
+import { writeAuditLog } from '../../lib/auditLog.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -118,6 +119,19 @@ router.post('/:id/launch', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
       [req.params.id],
     );
     if (!rows[0]) throw forbidden('Campaign cannot be launched in its current state');
+    // Escalation ask: a bulk blast to a filtered lead audience is a quiet way
+    // to exfiltrate contact data (e.g. targeting "all leads" then routing the
+    // send through a channel/address the sender controls) — log who launched
+    // what, to which channel, against which audience filter.
+    await writeAuditLog(req.tenant, {
+      userId: req.user.id,
+      action: 'campaign.bulk_launched',
+      entityType: 'campaign',
+      entityId: rows[0].id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      afterJson: { channel: rows[0].channel, audience_filter: rows[0].audience_filter_json },
+    });
     await publish(QUEUE_NAMES.CAMPAIGN, 'run', { tenantId: req.tenant.id, campaign_id: req.params.id });
     await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.CAMPAIGN_LAUNCHED, {
       type: EVENT_TYPES.CAMPAIGN_LAUNCHED, tenantId: req.tenant.id, occurredAt: new Date().toISOString(),

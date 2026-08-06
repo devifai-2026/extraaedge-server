@@ -1,10 +1,14 @@
 import * as service from './service.js';
 import { rowsToCsv } from '../../lib/csv.js';
+import { maskLeadRow, maskLeadRows } from '../../lib/leadMasking.js';
+import { writeAuditLog } from '../../lib/auditLog.js';
+import { tenantQuery } from '../../db/tenant.js';
+import { logger } from '../../lib/logger.js';
 
 export const list = async (req, res, next) => {
   try {
     const { rows, total } = await service.listLeads(req.tenant, req.user, req.query);
-    res.json({ data: rows, meta: { requestId: req.id, page: req.query.page, limit: req.query.limit, total } });
+    res.json({ data: maskLeadRows(rows, req.user), meta: { requestId: req.id, page: req.query.page, limit: req.query.limit, total } });
   } catch (err) { next(err); }
 };
 
@@ -56,6 +60,16 @@ const toCsvValue = (v) => {
 export const exportCsv = async (req, res, next) => {
   try {
     const rows = await service.exportLeads(req.tenant, req.user, req.query);
+    // Log-then-stream: the row count is already known here, so the download
+    // is recorded even if the client's connection drops mid-stream. This is
+    // the real backing data for the admin "Data Download" audit tab, which
+    // used to show hardcoded mock rows.
+    tenantQuery(
+      req.tenant,
+      `INSERT INTO bulk_exports (user_id, filter_json, columns, status, row_count, completed_at)
+         VALUES ($1, $2, $3, 'completed', $4, now())`,
+      [req.user.id, JSON.stringify(req.query || {}), EXPORT_COLUMNS.map((c) => c.header), rows.length],
+    ).catch((err) => logger.error({ err: err.message }, 'bulk_exports log failed for leads CSV export'));
     const records = rows.map((row) => {
       const out = {};
       for (const col of EXPORT_COLUMNS) out[col.header] = toCsvValue(row[col.key]);
@@ -92,8 +106,30 @@ export const bulkAssign = async (req, res, next) => {
 };
 
 export const get = async (req, res, next) => {
-  try { res.json({ data: await service.getLead(req.tenant, req.user, req.params.id), meta: { requestId: req.id } }); }
-  catch (err) { next(err); }
+  try {
+    const lead = await service.getLead(req.tenant, req.user, req.params.id);
+    res.json({ data: maskLeadRow(lead, req.user), meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// Full number only after an explicit click, logged every time — the audit
+// trail super_admin reviews for excessive-reveal-rate flagging.
+export const revealPhone = async (req, res, next) => {
+  try {
+    const lead = await service.getLead(req.tenant, req.user, req.params.id);
+    await writeAuditLog(req.tenant, {
+      userId: req.user.id,
+      action: 'lead.phone_revealed',
+      entityType: 'lead',
+      entityId: lead.id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({
+      data: { phone: lead.phone, whatsapp_number: lead.whatsapp_number, alternate_contact: lead.alternate_contact },
+      meta: { requestId: req.id },
+    });
+  } catch (err) { next(err); }
 };
 
 export const create = async (req, res, next) => {

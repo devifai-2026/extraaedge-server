@@ -426,6 +426,10 @@ export const userWorkSessions = async (tenant, userId, { days }) => {
   return repo.userWorkSessions(tenant, userId, { days });
 };
 
+export const userActivitySummary = async (tenant, userId, { days }) => {
+  return repo.userActivitySummary(tenant, userId, { days });
+};
+
 export const userLoginEvents = async (tenant, userId, { days }) => {
   return repo.userLoginEvents(tenant, userId, { days });
 };

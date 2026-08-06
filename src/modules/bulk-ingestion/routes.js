@@ -349,6 +349,23 @@ router.get('/exports', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Super_admin-wide download audit — every user's lead exports, not just the
+// caller's own. Backs the admin "Data Download" tab, which used to render
+// hardcoded mock rows (see BulkUploadList.jsx dataDownloadData).
+router.get('/exports/all', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), async (req, res, next) => {
+  try {
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT be.*, u.name AS user_name, u.email AS user_email
+         FROM bulk_exports be
+         LEFT JOIN users u ON u.id = be.user_id
+        ORDER BY be.created_at DESC
+        LIMIT 500`,
+    );
+    res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
 router.get('/exports/:id/file', validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `SELECT * FROM bulk_exports WHERE id = $1`, [req.params.id]);

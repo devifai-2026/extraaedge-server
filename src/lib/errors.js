@@ -67,6 +67,13 @@ export const sessionIdle = () =>
     message: 'Session idle timeout exceeded — please log in again',
   });
 
+export const clockInRequired = () =>
+  appError({
+    status: 403,
+    code: RESPONSE_CODES.CLOCK_IN_REQUIRED,
+    message: 'Start your work timer before continuing',
+  });
+
 export const tenantSuspended = () =>
   appError({
     status: 403,

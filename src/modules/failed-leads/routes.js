@@ -8,6 +8,7 @@ import { tenantQuery } from '../../db/tenant.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
 import { forbidden } from '../../lib/errors.js';
+import { maskFailedLeadRows } from '../../lib/leadMasking.js';
 
 const router = express.Router();
 // NOTE ON `i.kind = 'leads'`, repeated on every join below.
@@ -96,7 +97,7 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
-    res.json({ data: rows, meta: { requestId: req.id, page: req.query.page, limit: req.query.limit } });
+    res.json({ data: maskFailedLeadRows(rows, req.user), meta: { requestId: req.id, page: req.query.page, limit: req.query.limit } });
   } catch (err) { next(err); }
 });
 
@@ -179,7 +180,10 @@ router.get('/duplicates', validate({ query: listQuery }), async (req, res, next)
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
-    res.json({ data: rows, meta: { requestId: req.id, page: req.query.page, limit: req.query.limit } });
+    res.json({
+      data: maskFailedLeadRows(rows, req.user, ['matched_lead_phone']),
+      meta: { requestId: req.id, page: req.query.page, limit: req.query.limit },
+    });
   } catch (err) { next(err); }
 });
 

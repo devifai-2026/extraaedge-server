@@ -54,3 +54,11 @@ export const changePasswordSchema = z.object({
   current_password: z.string().min(1),
   new_password: z.string().min(10),
 });
+
+// Precise browser geolocation, reported once the LocationGate gets a fix —
+// refines the IP-derived (city-level) location already stored on the user's
+// most recent login event.
+export const updateLocationSchema = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+});

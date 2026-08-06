@@ -16,7 +16,7 @@ import { z } from 'zod';
 // separate principal created via Accounts course-confirm, never as a staff user.
 const roleBucket = z.enum([
   'super_admin', 'branch_manager', 'sales_manager', 'counsellor', 'account_manager',
-  'head_trainer', 'trainer', 'hr', 'placement',
+  'head_trainer', 'trainer', 'hr', 'placement', 'qa',
 ]);
 
 // A phone/whatsapp must be digits only (7–15). Optional/blank is allowed; a

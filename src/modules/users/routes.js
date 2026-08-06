@@ -77,6 +77,7 @@ router.get('/:id/work-sessions', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SY
 
 // Per-user login/logout audit (driven by user_login_events, last 30 days).
 router.get('/:id/login-events', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), controller.userLoginEvents);
+router.get('/:id/activity-summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), controller.userActivitySummary);
 
 // User CRUD is open to branch managers too, but the service layer scopes
 // WHICH users they may touch to their own branch (their team subtree) and
