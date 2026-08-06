@@ -79,6 +79,7 @@ import admissionsRouter from './modules/admissions/routes.js';
 import publicAdmissionsRouter from './modules/public-admissions/routes.js';
 import publicReceiptsRouter from './modules/public-receipts/routes.js';
 import publicBrandingRouter from './modules/public-branding/routes.js';
+import publicLeadsRouter from './modules/public-leads/routes.js';
 import studentAuthRouter from './modules/student-auth/routes.js';
 import studentBillingRouter from './modules/student-billing/routes.js';
 import coursesRouter from './modules/courses/routes.js';
@@ -151,6 +152,12 @@ export const mountRoutes = (app) => {
   api.use('/search', searchRouter);
 
   // Tenant — leads + related
+  //
+  // workTracker + requireClockIn gate the actual "doing work" surfaces
+  // (leads, lead-pool, follow-ups, calls, analytics) — mounted inside each
+  // of those routers' own files, right after their authRequired/tenantRequired
+  // chain (req.user/req.tenant don't exist yet at this outer api.use() point,
+  // so mounting them here would silently no-op). See each router's routes.js.
   api.use('/leads', leadsRouter);
   // Tenant-wide, READ-ONLY Lead Pool. Any counsellor (and up) can look up ANY
   // lead in the tenant by name or phone — bypasses the owner/team/branch scope
@@ -278,6 +285,9 @@ export const mountRoutes = (app) => {
   // roles) can render it as <img src> without a public bucket or a short-lived
   // signed URL. URL in the tenant's logo_url column points here.
   api.use('/public/branding', publicBrandingRouter);
+  // speedupinfotech.com's "Free Demo" form POSTs here directly — the tenant
+  // is fixed to speedup-infotech in service.js, not resolved from the request.
+  api.use('/public/leads', publicLeadsRouter);
 
   // Student authentication (LMS). Separate principal (type:'student' JWT),
   // tenant-scoped via the x-tenant-slug header. NOT behind the staff auth chain.
