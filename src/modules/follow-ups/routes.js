@@ -445,35 +445,63 @@ router.post(
   },
 );
 
-router.post('/:id/reschedule', validate({ params: idParam, body: z.object({ next_action_datetime: z.coerce.date() }) }), async (req, res, next) => {
+router.post(
+  '/:id/reschedule',
+  validate({
+    params: idParam,
+    body: z.object({ next_action_datetime: z.coerce.date(), reschedule_reason: z.string().max(1000).optional() }),
+  }),
+  async (req, res, next) => {
   try {
-    // Reset BOTH reminder flags + overdue flag so the new due time gets
-    // a fresh T-15 + T-5 + overdue cycle. Status flips back to planned
-    // even if the row was 'missed' — the counsellor is taking action again.
-    const { rows } = await tenantQuery(
-      req.tenant,
-      `UPDATE lead_followups
-          SET next_action_datetime = $2,
-              status = 'planned',
-              reminder_sent_at = NULL,
-              reminder_5min_sent_at = NULL,
-              overdue_notified_at = NULL,
-              completed_at = NULL,
-              completed_by = NULL
-        WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
-      [req.params.id, req.body.next_action_datetime],
-    );
-    if (!rows[0]) throw notFound('Follow-up not found');
-    // Audit row so the timeline shows the reschedule.
-    await tenantQuery(
-      req.tenant,
-      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-       VALUES ($1, $2, 'follow_up_rescheduled', 'Follow-up rescheduled', $3::jsonb)`,
-      [rows[0].lead_id, req.user.id, JSON.stringify({ follow_up_id: rows[0].id, new_due: req.body.next_action_datetime })],
-    );
-    res.json({ data: rows[0], meta: { requestId: req.id } });
+    const rescheduleReason = req.body.reschedule_reason?.trim() || null;
+    const result = await tenantTx(req.tenant, async (client) => {
+      // Grab the current due date before it's overwritten — lets the
+      // timeline show "moved from X to Y", not just the new date.
+      const { rows: prevRows } = await client.query(
+        `SELECT next_action_datetime FROM lead_followups WHERE id = $1 AND deleted_at IS NULL`,
+        [req.params.id],
+      );
+      if (!prevRows[0]) throw notFound('Follow-up not found');
+      const previousDue = prevRows[0].next_action_datetime;
+
+      // Reset BOTH reminder flags + overdue flag so the new due time gets
+      // a fresh T-15 + T-5 + overdue cycle. Status flips back to planned
+      // even if the row was 'missed' — the counsellor is taking action again.
+      const { rows } = await client.query(
+        `UPDATE lead_followups
+            SET next_action_datetime = $2,
+                status = 'planned',
+                reminder_sent_at = NULL,
+                reminder_5min_sent_at = NULL,
+                overdue_notified_at = NULL,
+                completed_at = NULL,
+                completed_by = NULL,
+                reschedule_reason = $3
+          WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+        [req.params.id, req.body.next_action_datetime, rescheduleReason],
+      );
+      // Audit row so the timeline shows the reschedule — one row per
+      // reschedule, so unlike the single reschedule_reason column on the
+      // follow-up row itself, this is genuine multi-reschedule history.
+      const summary = rescheduleReason
+        ? `Follow-up rescheduled — ${rescheduleReason}`
+        : 'Follow-up rescheduled';
+      await client.query(
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+         VALUES ($1, $2, 'follow_up_rescheduled', $3, $4::jsonb)`,
+        [rows[0].lead_id, req.user.id, summary, JSON.stringify({
+          follow_up_id: rows[0].id,
+          previous_due: previousDue,
+          new_due: req.body.next_action_datetime,
+          reschedule_reason: rescheduleReason,
+        })],
+      );
+      return rows[0];
+    });
+    res.json({ data: result, meta: { requestId: req.id } });
   } catch (err) { next(err); }
-});
+  },
+);
 
 // Explicit cancel — open to all 3 tenant roles. Sets status='cancelled'
 // but keeps the row alive (deleted_at = NULL) so list / calendar queries

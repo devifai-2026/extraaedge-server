@@ -449,7 +449,7 @@ export const findByIdWithRelations = async (tenant, id) => {
     //     (slot_index NULL) we still want most-recent first.
     tenantQuery(tenant, `
       SELECT id, next_action_datetime, comment, status, completed_at,
-             completion_reason, slot_index, stage_id, sub_stage_id,
+             completion_reason, reschedule_reason, slot_index, stage_id, sub_stage_id,
              created_at, updated_at
         FROM lead_followups
        WHERE lead_id = $1 AND deleted_at IS NULL
