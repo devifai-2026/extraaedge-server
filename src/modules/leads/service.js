@@ -1,6 +1,6 @@
 import * as repo from './repo.js';
 import * as usersRepo from '../users/repo.js';
-import { duplicateDetected, notFound, forbidden } from '../../lib/errors.js';
+import { duplicateDetected, notFound, forbidden, validationError } from '../../lib/errors.js';
 import { publish } from '../../lib/queue.js';
 import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { notifyLeadChange, notifyAdmins } from '../../lib/socket.js';
@@ -238,6 +238,14 @@ const assignByCreator = async (tenant, actor, lead) => {
 };
 
 export const createLead = async (tenant, actor, input, { on_duplicate = 'block', force = false, skip_auto_assign = false } = {}) => {
+  // Same masked-value guard as updateLead — there's no "existing value" to
+  // fall back to on a create, so this rejects outright rather than silently
+  // creating a lead with a placeholder string as its phone number.
+  for (const field of ['phone', 'whatsapp_number', 'alternate_contact']) {
+    if (typeof input[field] === 'string' && input[field].includes('•')) {
+      throw validationError([{ path: [field], message: 'Masked value — reveal the real number before submitting' }]);
+    }
+  }
   if (!force) {
     const dups = await repo.findDuplicates(tenant, {
       phone: input.phone,
@@ -335,6 +343,17 @@ export const updateLead = async (tenant, actor, id, updates) => {
   // through replaceFollowupsForStage so each (lead, stage) group is
   // upserted/soft-deleted atomically.
   const { followups, ...scalarUpdates } = updates ?? {};
+  // Safety net: an edit form that opened with a MASKED phone value (see
+  // lib/leadMasking.js) and got saved without the field being touched would
+  // otherwise overwrite the real number with the literal masked placeholder
+  // ("••••••1234") — permanent data loss. Any masked-looking value here
+  // means the caller never actually saw/changed the real number, so drop
+  // the field from this update rather than trust it.
+  for (const field of ['phone', 'whatsapp_number', 'alternate_contact']) {
+    if (typeof scalarUpdates[field] === 'string' && scalarUpdates[field].includes('•')) {
+      delete scalarUpdates[field];
+    }
+  }
   // Pass the actor through so the new stage_changed audit row in
   // repo.updateLead is attributed correctly.
   const lead = await repo.updateLead(tenant, id, scalarUpdates, actor?.id ?? null);
