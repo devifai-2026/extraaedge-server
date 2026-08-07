@@ -18,12 +18,15 @@ router.use(authRequired, tenantRequired);
 // Writes are admin-only. Reads are available to everyone who can open the
 // Configure Fee Offer modal / share an admission link and thus needs to pick
 // the account a student pays into: account managers, counsellors (their own
-// converted students — see lead-fee-offers), and branch managers. They can
-// read but not create/edit accounts (that stays super_admin).
+// converted students — see lead-fee-offers), and branch/sales managers. They
+// can read but not create/edit accounts (that stays super_admin). This is a
+// shared tenant-wide resource (not lead-owned), so no per-branch/team scoping
+// applies — everyone with read access sees the same account list.
 const adminOnly = requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN);
 const readRoles = requireRole(
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.SALES_MANAGER,
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.COUNSELLOR,
 );

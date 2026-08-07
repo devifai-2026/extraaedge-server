@@ -1,15 +1,30 @@
 import * as repo from './repo.js';
 import * as discountRepo from '../lead-discounts/repo.js';
+import * as usersRepo from '../users/repo.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, forbidden } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 
-// A counsellor may only touch the fee offer for a lead they own. account_manager
-// / super_admin are unrestricted. Throws forbidden otherwise.
+// A counsellor may only touch the fee offer for a lead they own.
+// branch_manager / sales_manager are scoped to their branch / team subtree —
+// same convention as admissions/service.assertAdmissionInScope. account_manager
+// / super_admin are unrestricted. Throws forbidden otherwise. `lead` must
+// carry branch_id + assigned_to for the manager checks to work.
+const NO_BRANCH = '00000000-0000-0000-0000-000000000000';
 const assertLeadOwnership = async (tenant, lead, actor) => {
-  if (actor?.role !== SYSTEM_TENANT_ROLES.COUNSELLOR) return;
-  if (lead.assigned_to !== actor.id) {
-    throw forbidden('This lead is not assigned to you');
+  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    if (lead.assigned_to !== actor.id) throw forbidden('This lead is not assigned to you');
+    return;
+  }
+  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    const me = await usersRepo.findById(tenant, actor.id);
+    const branchId = me?.branch_id ?? NO_BRANCH;
+    if (lead.branch_id !== branchId) throw forbidden('This lead is outside your branch');
+    return;
+  }
+  if (actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    const team = await usersRepo.teamHierarchy(tenant, actor.id);
+    if (!team.includes(lead.assigned_to)) throw forbidden('This lead is outside your team');
   }
 };
 
@@ -20,7 +35,7 @@ export const getForLead = async (tenant, lead_id, actor) => {
   const { rows: leadRows } = await tenantQuery(
     tenant,
     `SELECT id, name, first_name, last_name, email, whatsapp_number,
-            converted_at, program_id, assigned_to
+            converted_at, program_id, assigned_to, branch_id
        FROM leads WHERE id = $1 AND deleted_at IS NULL`,
     [lead_id],
   );
@@ -63,7 +78,7 @@ export const getForLead = async (tenant, lead_id, actor) => {
 export const saveOffer = async (tenant, actor, lead_id, body) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT id, converted_at, assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`,
+    `SELECT id, converted_at, assigned_to, branch_id FROM leads WHERE id = $1 AND deleted_at IS NULL`,
     [lead_id],
   );
   if (!rows[0]) throw notFound('Lead not found');

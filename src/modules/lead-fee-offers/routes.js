@@ -14,10 +14,15 @@ router.use(authRequired, tenantRequired);
 // also configure the offer — but ONLY for their own leads (enforced in the
 // service by checking leads.assigned_to === actor.id), so they can complete
 // the "configure + send admission link" flow for students they converted.
+// branch_manager / sales_manager get the same workflow parity as the rest of
+// the Admissions/Accounts module, scoped to their branch/team subtree
+// (service.assertLeadOwnership).
 router.use(requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.COUNSELLOR,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.SALES_MANAGER,
 ));
 
 router.get('/:leadId', validate({ params: leadIdParam }), controller.get);
