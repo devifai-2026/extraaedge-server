@@ -233,6 +233,12 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'accounts.report',
   'accounts.pay_schedule',
   'accounts.collection_receipt_wise',
+  // Admin Payment Details ledger. NOTE: this key was missing here for a long
+  // time even though the Sidebar item + route both gate on it — meaning only
+  // wildcard-tab roles (super_admin, branch_manager) could ever see the page.
+  // Added + backfilled (migration 1700000124000) to account_manager and
+  // sales_manager too, who should obviously have their own ledger.
+  'accounts.payment_details',
   // Accounts-side importer for historical admissions migrated off a previous
   // CRM. One spreadsheet row fans out into lead + fee offer + admission +
   // EMI schedule + old-collection receipts, so it's gated separately from

@@ -128,6 +128,12 @@ export const list = async (tenant, q = {}) => {
     params.push(`%${q.q}%`);
     conds.push(`(a.first_name ILIKE $${params.length} OR a.last_name ILIKE $${params.length} OR a.email ILIKE $${params.length} OR a.whatsapp_number ILIKE $${params.length})`);
   }
+  // branch_manager / sales_manager scope: the admission's lead must be in
+  // their branch / team subtree. Requires a join since branch_id/assigned_to
+  // live on leads, not admissions. Mutually exclusive (only one is ever set).
+  let scopeJoin = '';
+  if (q.branchId) { params.push(q.branchId); conds.push(`l.branch_id = $${params.length}`); scopeJoin = 'JOIN leads l ON l.id = a.lead_id'; }
+  else if (q.teamIds) { params.push(q.teamIds); conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`); scopeJoin = 'JOIN leads l ON l.id = a.lead_id'; }
   const where = `WHERE ${conds.join(' AND ')}`;
   const page = q.page || 1;
   const limit = q.limit || 50;
@@ -137,13 +143,13 @@ export const list = async (tenant, q = {}) => {
     tenantQuery(
       tenant,
       `SELECT ${ADMISSION_COLS}, ${ADMISSION_NAMED_COLS}
-         FROM admissions a ${ADMISSION_JOINS}
+         FROM admissions a ${ADMISSION_JOINS} ${scopeJoin}
          ${where}
          ORDER BY a.admission_date DESC, a.created_at DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     ),
-    tenantQuery(tenant, `SELECT count(*)::int AS total FROM admissions a ${where}`, params.slice(0, -2)),
+    tenantQuery(tenant, `SELECT count(*)::int AS total FROM admissions a ${scopeJoin} ${where}`, params.slice(0, -2)),
   ]);
   return { rows, total: countRows[0].total };
 };
@@ -155,6 +161,36 @@ export const findById = async (tenant, id) => {
        FROM admissions a ${ADMISSION_JOINS}
       WHERE a.id = $1 AND a.deleted_at IS NULL`,
     [id],
+  );
+  return rows[0] || null;
+};
+
+// The underlying lead's branch_id + assigned_to for a given admission —
+// used by service.assertAdmissionInScope to check a branch_manager /
+// sales_manager actor is allowed to act on this admission before an
+// approve/reject/drop/receipt mutation.
+export const findLeadScopeByAdmission = async (tenant, admissionId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.branch_id, l.assigned_to
+       FROM admissions a
+       LEFT JOIN leads l ON l.id = a.lead_id
+      WHERE a.id = $1 AND a.deleted_at IS NULL`,
+    [admissionId],
+  );
+  return rows[0] || null;
+};
+
+// Same lookup, but from a receipt id (one hop further: receipt → admission → lead).
+export const findLeadScopeByReceipt = async (tenant, receiptId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.branch_id, l.assigned_to, r.admission_id
+       FROM admission_receipts r
+       JOIN admissions a ON a.id = r.admission_id
+       LEFT JOIN leads l ON l.id = a.lead_id
+      WHERE r.id = $1 AND r.deleted_at IS NULL`,
+    [receiptId],
   );
   return rows[0] || null;
 };
@@ -503,6 +539,8 @@ export const listReceipts = async (tenant, q = {}) => {
     params.push(q.program_id);
     conds.push(`a.program_id = $${params.length}`);
   }
+  if (q.branchId) { params.push(q.branchId); conds.push(`l.branch_id = $${params.length}`); }
+  else if (q.teamIds) { params.push(q.teamIds); conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`); }
   const where = `WHERE ${conds.join(' AND ')}`;
   const { rows } = await tenantQuery(
     tenant,
@@ -511,6 +549,7 @@ export const listReceipts = async (tenant, q = {}) => {
        FROM admission_receipts r
        JOIN admissions a ON a.id = r.admission_id
        LEFT JOIN programs p ON p.id = a.program_id
+       LEFT JOIN leads l ON l.id = a.lead_id
        ${where}
        ORDER BY r.receipt_date DESC, r.created_at DESC`,
     params,
@@ -561,6 +600,9 @@ export const listPaymentDetails = async (tenant, q = {}) => {
   // Branch scope (branch_manager / super_admin-picked-branch): the receipt's
   // admission's lead must be in this branch. NO_BRANCH sentinel → matches none.
   if (q.branchId) add('l.branch_id = $$', q.branchId);
+  // Team scope (sales_manager): the lead must be assigned to someone in
+  // their team subtree. Mutually exclusive with branchId.
+  else if (q.teamIds) add('l.assigned_to = ANY($$::uuid[])', q.teamIds);
 
   // Free-text search across receipt no / admission code / payer name /
   // phone / email / UTR-ish transaction details.
@@ -683,6 +725,7 @@ const fetchPendingVerificationPayments = async (tenant, q = {}, { page, limit })
   if (q.admission_id) add('a.id = $$', q.admission_id);
   if (q.lead_id) add('a.lead_id = $$', q.lead_id);
   if (q.branchId) add('l.branch_id = $$', q.branchId);
+  else if (q.teamIds) add('l.assigned_to = ANY($$::uuid[])', q.teamIds);
   if (q.amount_min != null) add('a.payment_amount >= $$', q.amount_min);
   if (q.amount_max != null) add('a.payment_amount <= $$', q.amount_max);
   // Date range applies to when the student submitted (admission created).
@@ -780,14 +823,28 @@ const fetchPendingVerificationPayments = async (tenant, q = {}, { page, limit })
 //                   installment/misc)
 //   • totals      — overall collected amount + count in the window
 const PAYMENT_ANALYTICS_DAYS = 30;
-export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS, branchId = null } = {}) => {
+export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS, branchId = null, teamIds = null } = {}) => {
   const tz = tenant.timezone || 'Asia/Kolkata';
   const since = `now() - ($1 || ' days')::interval`;
-  // Branch scope: link each receipt to its admission's lead's branch. When set,
-  // the branch id is $2 and a join is added; totals-style queries that use the
-  // `admission_receipts` table alias unqualified get the alias `r`.
-  const p = branchId ? [days, branchId] : [days];
-  const bJoin = branchId ? 'JOIN admissions a2 ON a2.id = r.admission_id JOIN leads l ON l.id = a2.lead_id AND l.branch_id = $2' : '';
+  // Branch/team scope: link each receipt to its admission's lead's branch (or
+  // its assignee's team subtree). When set, the scope value is $2 and a join
+  // is added; totals-style queries that use the `admission_receipts` table
+  // alias unqualified get the alias `r`. Mutually exclusive — at most one of
+  // branchId/teamIds is ever set.
+  const scopeVal = branchId || teamIds || null;
+  const p = scopeVal ? [days, scopeVal] : [days];
+  const bJoin = branchId
+    ? 'JOIN admissions a2 ON a2.id = r.admission_id JOIN leads l ON l.id = a2.lead_id AND l.branch_id = $2'
+    : teamIds
+      ? 'JOIN admissions a2 ON a2.id = r.admission_id JOIN leads l ON l.id = a2.lead_id AND l.assigned_to = ANY($2::uuid[])'
+      : '';
+  // Same scope, but for the by-account query below, which already joins
+  // `admissions a` itself (unaliased a2), so only the leads hop is needed.
+  const byAccountScopeJoin = branchId
+    ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2'
+    : teamIds
+      ? 'JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($2::uuid[])'
+      : '';
   const [trend, byMode, byKind, byAccount, totals] = await Promise.all([
     tenantQuery(
       tenant,
@@ -831,7 +888,7 @@ export const paymentAnalytics = async (tenant, { days = PAYMENT_ANALYTICS_DAYS, 
          FROM admission_receipts r
          JOIN admissions a ON a.id = r.admission_id
          LEFT JOIN payment_accounts pa ON pa.id = a.payment_account_id
-         ${branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : ''}
+         ${byAccountScopeJoin}
         WHERE r.deleted_at IS NULL AND r.receipt_date >= (${since})::date
         GROUP BY 1 ORDER BY amount DESC`,
       p,
@@ -956,6 +1013,9 @@ export const paySchedule = async (tenant, q = {}) => {
   if (q.date_from) { params.push(q.date_from); conds.push(`a.admission_date >= $${params.length}`); }
   if (q.date_to)   { params.push(q.date_to);   conds.push(`a.admission_date <= $${params.length}`); }
   if (q.program_id) { params.push(q.program_id); conds.push(`a.program_id = $${params.length}`); }
+  let scopeJoin = '';
+  if (q.branchId) { params.push(q.branchId); conds.push(`l.branch_id = $${params.length}`); scopeJoin = 'LEFT JOIN leads l ON l.id = a.lead_id'; }
+  else if (q.teamIds) { params.push(q.teamIds); conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`); scopeJoin = 'LEFT JOIN leads l ON l.id = a.lead_id'; }
   const where = `WHERE ${conds.join(' AND ')}`;
   const { rows } = await tenantQuery(
     tenant,
@@ -992,6 +1052,7 @@ export const paySchedule = async (tenant, q = {}) => {
        LEFT JOIN paid         ON paid.admission_id = a.id
        LEFT JOIN next_due nd  ON nd.admission_id   = a.id
        LEFT JOIN this_month tm ON tm.admission_id  = a.id
+       ${scopeJoin}
        ${where}
        ORDER BY a.admission_date DESC`,
     params,
@@ -1019,6 +1080,9 @@ export const collectionReceiptWise = async (tenant, q = {}) => {
     params.push(q.program_id);
     conds.push(`a.program_id = $${params.length}`);
   }
+  let scopeJoin = '';
+  if (q.branchId) { params.push(q.branchId); conds.push(`l.branch_id = $${params.length}`); scopeJoin = 'LEFT JOIN leads l ON l.id = a.lead_id'; }
+  else if (q.teamIds) { params.push(q.teamIds); conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`); scopeJoin = 'LEFT JOIN leads l ON l.id = a.lead_id'; }
   const where = `WHERE ${conds.join(' AND ')}`;
   const { rows } = await tenantQuery(
     tenant,
@@ -1029,6 +1093,7 @@ export const collectionReceiptWise = async (tenant, q = {}) => {
        FROM admission_receipts r
        JOIN admissions a ON a.id = r.admission_id
        LEFT JOIN programs p ON p.id = a.program_id
+       ${scopeJoin}
        ${where}
        ORDER BY r.receipt_date DESC, r.created_at DESC`,
     params,
@@ -1122,7 +1187,7 @@ export const myStudents = async (tenant, counsellorId) => {
 //   state         → 'lead' (no admission form) | 'pending_approval' | 'on_break'
 //   from / to     → inclusive date range on event_at (converted/created/break)
 export const pendingAdmissions = async (tenant, filters = {}) => {
-  const { search, programId, ownerId, leadOwnerId, state, from, to } = filters;
+  const { search, programId, ownerId, leadOwnerId, state, from, to, branchId, teamIds } = filters;
   const params = [];
   const conds = [];
   const p = (v) => { params.push(v); return `$${params.length}`; };
@@ -1139,6 +1204,10 @@ export const pendingAdmissions = async (tenant, filters = {}) => {
   else if (state === 'on_break') conds.push(`admission_status = 'on_break'`);
   if (from) conds.push(`event_at >= ${p(from)}`);
   if (to) conds.push(`event_at <= ${p(to)}`);
+  // branch_manager / sales_manager scope, applied against the underlying
+  // lead's branch_id / assigned_to — both exposed on the unified CTE below.
+  if (branchId) conds.push(`branch_id = ${p(branchId)}`);
+  else if (teamIds) conds.push(`lead_owner_id = ANY(${p(teamIds)}::uuid[])`);
 
   const whereOuter = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
@@ -1168,7 +1237,8 @@ export const pendingAdmissions = async (tenant, filters = {}) => {
            SELECT 1 FROM lead_fee_offers o WHERE o.lead_id = l.id
          )                   AS has_fee_offer,
          NULL::text          AS admission_status,
-         NULL::text          AS break_reason
+         NULL::text          AS break_reason,
+         l.branch_id         AS branch_id
        FROM leads l
        LEFT JOIN programs p ON p.id = l.program_id
        LEFT JOIN users u    ON u.id = l.assigned_to
@@ -1212,7 +1282,8 @@ export const pendingAdmissions = async (tenant, filters = {}) => {
          -- FE doesn't gate the row buttons.
          true                AS has_fee_offer,
          a.status            AS admission_status,
-         a.break_reason      AS break_reason
+         a.break_reason      AS break_reason,
+         l.branch_id         AS branch_id
        FROM admissions a
        LEFT JOIN programs p ON p.id = a.program_id
        LEFT JOIN users u    ON u.id = a.guided_by_counsellor_id
@@ -1239,8 +1310,12 @@ export const pendingAdmissions = async (tenant, filters = {}) => {
 //
 // We join receipts with a LATERAL filter so "paid for this slot" is a
 // boolean per fee_schedule row (not just any receipt on the admission).
-export const emiDigest = async (tenant, upcomingDays = 7, branchId = null) => {
-  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : '';
+export const emiDigest = async (tenant, upcomingDays = 7, branchId = null, teamIds = null) => {
+  const bJoin = branchId
+    ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2'
+    : teamIds
+      ? 'JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($2::uuid[])'
+      : '';
   const { rows } = await tenantQuery(
     tenant,
     `
@@ -1279,7 +1354,7 @@ export const emiDigest = async (tenant, upcomingDays = 7, branchId = null) => {
       )
     ORDER BY fs.due_date ASC
     `,
-    branchId ? [upcomingDays, branchId] : [upcomingDays],
+    branchId ? [upcomingDays, branchId] : teamIds ? [upcomingDays, teamIds] : [upcomingDays],
   );
   // Drop already-paid rows in the result set so the FE doesn't have to.
   return rows.filter((r) => !r.is_paid);
@@ -1287,18 +1362,28 @@ export const emiDigest = async (tenant, upcomingDays = 7, branchId = null) => {
 
 // Lightweight count query for the sidebar badge — same WHERE shape as
 // pendingAdmissions() but skips the JOINs / column projection.
-export const pendingAdmissionsCount = async (tenant) => {
+export const pendingAdmissionsCount = async (tenant, branchId = null, teamIds = null) => {
+  const scopeVal = branchId || teamIds || null;
+  const leadCond = branchId ? 'AND l.branch_id = $1' : teamIds ? 'AND l.assigned_to = ANY($1::uuid[])' : '';
+  const admCond = branchId
+    ? 'AND EXISTS (SELECT 1 FROM leads l2 WHERE l2.id = a.lead_id AND l2.branch_id = $1)'
+    : teamIds
+      ? 'AND EXISTS (SELECT 1 FROM leads l2 WHERE l2.id = a.lead_id AND l2.assigned_to = ANY($1::uuid[]))'
+      : '';
   const { rows } = await tenantQuery(
     tenant,
     `SELECT
        (SELECT count(*)::int FROM leads l
          WHERE l.converted_at IS NOT NULL
            AND l.deleted_at IS NULL
+           ${leadCond}
            AND NOT EXISTS (SELECT 1 FROM admissions a WHERE a.lead_id = l.id AND a.deleted_at IS NULL))
        +
        (SELECT count(*)::int FROM admissions a
-         WHERE a.deleted_at IS NULL AND a.status = 'pending_approval')
+         WHERE a.deleted_at IS NULL AND a.status = 'pending_approval'
+           ${admCond})
        AS pending`,
+    scopeVal ? [scopeVal] : [],
   );
   return rows[0]?.pending || 0;
 };
@@ -1306,9 +1391,13 @@ export const pendingAdmissionsCount = async (tenant) => {
 // ---------- Charts ----------
 // Daily admissions count over the last `days` days. Returns
 // [{ day: 'YYYY-MM-DD', count: int }] padded so missing days show 0.
-export const admissionsTrend = async (tenant, days = 30, branchId = null) => {
-  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : '';
-  const params = branchId ? [days, branchId] : [days];
+export const admissionsTrend = async (tenant, days = 30, branchId = null, teamIds = null) => {
+  const bJoin = branchId
+    ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2'
+    : teamIds
+      ? 'JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($2::uuid[])'
+      : '';
+  const params = branchId ? [days, branchId] : teamIds ? [days, teamIds] : [days];
   const { rows } = await tenantQuery(
     tenant,
     `WITH range AS (
@@ -1333,9 +1422,13 @@ export const admissionsTrend = async (tenant, days = 30, branchId = null) => {
 };
 
 // Daily collection (sum of admission_receipts.amount) over the last N days.
-export const collectionTrend = async (tenant, days = 30, branchId = null) => {
-  const bJoin = branchId ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2' : '';
-  const params = branchId ? [days, branchId] : [days];
+export const collectionTrend = async (tenant, days = 30, branchId = null, teamIds = null) => {
+  const bJoin = branchId
+    ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.branch_id = $2'
+    : teamIds
+      ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($2::uuid[])'
+      : '';
+  const params = branchId ? [days, branchId] : teamIds ? [days, teamIds] : [days];
   const { rows } = await tenantQuery(
     tenant,
     `WITH range AS (
@@ -1360,8 +1453,12 @@ export const collectionTrend = async (tenant, days = 30, branchId = null) => {
 };
 
 // Pie / donut: count by status (excludes soft-deleted).
-export const statusBreakdown = async (tenant, branchId = null) => {
-  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
+export const statusBreakdown = async (tenant, branchId = null, teamIds = null) => {
+  const bJoin = branchId
+    ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1'
+    : teamIds
+      ? 'JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($1::uuid[])'
+      : '';
   const { rows } = await tenantQuery(
     tenant,
     `SELECT a.status, count(*)::int AS n
@@ -1369,14 +1466,18 @@ export const statusBreakdown = async (tenant, branchId = null) => {
       WHERE a.deleted_at IS NULL
       GROUP BY a.status
       ORDER BY a.status`,
-    branchId ? [branchId] : [],
+    branchId ? [branchId] : teamIds ? [teamIds] : [],
   );
   return rows;
 };
 
 // Bar: this month's admissions per program. Top 10 to keep the chart legible.
-export const courseBreakdown = async (tenant, branchId = null) => {
-  const bJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
+export const courseBreakdown = async (tenant, branchId = null, teamIds = null) => {
+  const bJoin = branchId
+    ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1'
+    : teamIds
+      ? 'JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($1::uuid[])'
+      : '';
   const { rows } = await tenantQuery(
     tenant,
     `SELECT COALESCE(p.name, 'Unassigned') AS course, count(*)::int AS n
@@ -1389,18 +1490,27 @@ export const courseBreakdown = async (tenant, branchId = null) => {
       GROUP BY p.name
       ORDER BY n DESC
       LIMIT 10`,
-    branchId ? [branchId] : [],
+    branchId ? [branchId] : teamIds ? [teamIds] : [],
   );
   return rows;
 };
 
-export const dashboard = async (tenant, branchId = null) => {
-  // Optional branch scope (branch_manager / super_admin-picked-branch): filter
-  // admissions by their lead's branch, and receipts by their admission's lead's
-  // branch. branchId null → tenant-wide (unchanged).
-  const aBranchJoin = branchId ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
-  const rBranchJoin = branchId ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1' : '';
-  const p = branchId ? [branchId] : [];
+export const dashboard = async (tenant, branchId = null, teamIds = null) => {
+  // Optional branch/team scope (branch_manager → branch, sales_manager →
+  // team subtree, super_admin-picked-branch): filter admissions by their
+  // lead's branch/assignee, and receipts by their admission's lead's
+  // branch/assignee. Neither set → tenant-wide (unchanged).
+  const aBranchJoin = branchId
+    ? 'JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1'
+    : teamIds
+      ? 'JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($1::uuid[])'
+      : '';
+  const rBranchJoin = branchId
+    ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.branch_id = $1'
+    : teamIds
+      ? 'JOIN admissions a ON a.id = ar.admission_id JOIN leads l ON l.id = a.lead_id AND l.assigned_to = ANY($1::uuid[])'
+      : '';
+  const p = branchId ? [branchId] : teamIds ? [teamIds] : [];
   const [counts, monthCounts, monthMoney] = await Promise.all([
     tenantQuery(
       tenant,

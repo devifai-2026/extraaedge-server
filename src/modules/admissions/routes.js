@@ -15,17 +15,25 @@ const router = express.Router();
 router.use(authRequired, tenantRequired);
 
 // Accounts-owned actions (approve/reject/drop/dashboard/reports/receipts/…):
-// account_manager + super_admin only.
+// account_manager + super_admin, plus branch_manager (scoped to their branch)
+// and sales_manager (scoped to their team subtree) — full workflow parity,
+// enforced server-side via admissions/service.assertAdmissionInScope +
+// resolveAdmissionScope so neither can act on/see admissions outside their
+// own branch/team.
 const acctRole = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
-// Read-only dashboard/analytics that a branch_manager may also view (scoped to
-// their branch server-side). NOT the accounts workflow (approve/receipts/etc.).
+// Read-only dashboard/analytics — same audience as acctRole. Kept as a
+// separate gate (identical today) so a future narrowing of one doesn't
+// silently narrow the other.
 const acctOrBranch = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
 // Counsellor-facing subset (their own converted students): counsellors may
 // VIEW their admissions and configure+send the admission link, but not run the
@@ -36,6 +44,18 @@ const acctOrCounsellor = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.COUNSELLOR,
+);
+// List + single-admission read, shared by the Accounts "This/Total
+// Admissions" tables AND the counsellor's own-students subset — so it needs
+// every role from both buckets. Scoped server-side per role: counsellor to
+// their own guided students, branch_manager/sales_manager to their branch/
+// team (service.list's scopeForActor, service.get's assertAdmissionInScope).
+const acctOrCounsellorOrBranch = requireRole(
+  SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.COUNSELLOR,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
 // NOTE: gating is now PER-ROUTE (no blanket router.use) so counsellors can
 // reach only the scoped subset below.
@@ -58,10 +78,12 @@ router.get('/my-students', acctOrCounsellor, controller.myStudents);
 
 // Per-lead timeline lookup for the lead drawer's Admission Timeline tab.
 // The drawer only has lead.id; this hop resolves the admission internally.
-// Counsellors can view the timeline of THEIR own converted lead's admission.
+// Counsellors can view the timeline of THEIR own converted lead's admission;
+// branch_manager/sales_manager theirs (branch/team subtree, checked in
+// service.timelineByLead).
 router.get(
   '/by-lead/:leadId/timeline',
-  acctOrCounsellor,
+  acctOrCounsellorOrBranch,
   validate({ params: z.object({ leadId: z.string().uuid() }) }),
   controller.timelineByLead,
 );
@@ -100,12 +122,14 @@ router.put('/centers/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
 router.delete('/centers/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), controller.deleteCenter);
 
 // Admissions CRUD. List + get are counsellor-accessible but SCOPED in the
-// service to the actor's own converted students (guided_by_counsellor_id).
-router.get('/', acctOrCounsellor, validate({ query: listQuery }), controller.list);
-router.get('/:id', acctOrCounsellor, validate({ params: idParam }), controller.get);
+// service to the actor's own converted students (guided_by_counsellor_id) —
+// and to branch_manager/sales_manager's own branch/team subtree.
+router.get('/', acctOrCounsellorOrBranch, validate({ query: listQuery }), controller.list);
+router.get('/:id', acctOrCounsellorOrBranch, validate({ params: idParam }), controller.get);
 
-// Append-only event log for one admission. Counsellors may view their own.
-router.get('/:id/timeline', acctOrCounsellor, validate({ params: idParam }), controller.timeline);
+// Append-only event log for one admission. Counsellors may view their own;
+// branch_manager/sales_manager theirs (same scope as GET /:id above).
+router.get('/:id/timeline', acctOrCounsellorOrBranch, validate({ params: idParam }), controller.timeline);
 router.post('/', acctRole, validate({ body: createAdmissionSchema }), controller.create);
 router.put('/:id', acctRole, validate({ params: idParam, body: updateAdmissionSchema }), controller.update);
 router.delete('/:id', acctRole, validate({ params: idParam }), controller.remove);

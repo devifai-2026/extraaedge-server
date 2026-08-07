@@ -80,7 +80,7 @@ export const leadStatusSnapshot = async (req, res, next) => {
 };
 
 export const remove = async (req, res, next) => {
-  try { await service.remove(req.tenant, req.params.id); res.status(204).end(); }
+  try { await service.remove(req.tenant, req.params.id, req.user); res.status(204).end(); }
   catch (err) { next(err); }
 };
 
@@ -138,7 +138,7 @@ export const drop = async (req, res, next) => {
 // ---------- Receipts ----------
 export const listReceipts = async (req, res, next) => {
   try {
-    const rows = await service.listReceipts(req.tenant, req.query);
+    const rows = await service.listReceipts(req.tenant, req.query, req.user);
     res.json({ data: rows, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -167,21 +167,21 @@ export const createReceipt = async (req, res, next) => {
 };
 
 export const deleteReceipt = async (req, res, next) => {
-  try { await service.deleteReceipt(req.tenant, req.params.id); res.status(204).end(); }
+  try { await service.deleteReceipt(req.tenant, req.params.id, req.user); res.status(204).end(); }
   catch (err) { next(err); }
 };
 
 // ---------- Reports ----------
 export const paySchedule = async (req, res, next) => {
   try {
-    const data = await service.paySchedule(req.tenant, req.query);
+    const data = await service.paySchedule(req.tenant, req.query, req.user);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
 export const collectionReceiptWise = async (req, res, next) => {
   try {
-    const data = await service.collectionReceiptWise(req.tenant, req.query);
+    const data = await service.collectionReceiptWise(req.tenant, req.query, req.user);
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
@@ -208,7 +208,7 @@ export const pendingAdmissions = async (req, res, next) => {
       from: clean(q.from),   // ISO date/datetime, inclusive lower bound on event_at
       to: clean(q.to),       // ISO date/datetime, inclusive upper bound on event_at
     };
-    const rows = await service.pendingAdmissions(req.tenant, filters);
+    const rows = await service.pendingAdmissions(req.tenant, filters, req.user);
     res.json({
       data: rows,
       meta: { requestId: req.id, total: rows.length },
@@ -218,7 +218,7 @@ export const pendingAdmissions = async (req, res, next) => {
 
 export const pendingAdmissionsCount = async (req, res, next) => {
   try {
-    const pending = await service.pendingAdmissionsCount(req.tenant);
+    const pending = await service.pendingAdmissionsCount(req.tenant, req.user);
     res.json({ data: { pending }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };

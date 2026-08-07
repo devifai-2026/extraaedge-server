@@ -7,21 +7,61 @@ import * as usersRepo from '../users/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 
-// The branch an actor's admissions/revenue views should be scoped to (via
-// admissions→leads.branch_id). super_admin → their picked branch (?branch_id)
-// or null (all). branch_manager → their own branch (null branch = sees nothing,
-// avoiding a tenant-wide leak). account_manager → null (tenant-wide, unchanged).
-// Returns: a branch uuid to scope to, null for tenant-wide (no filter), or the
-// all-zero uuid as a "match nothing" sentinel for a branch_manager with no
-// branch assigned yet (so they see an empty—not tenant-wide—dashboard).
+// The branch/team an actor's admissions/revenue views (AND workflow actions)
+// should be scoped to. super_admin → their picked branch (?branch_id) or null
+// (all). branch_manager → their own branch (no branch assigned yet = the
+// NO_BRANCH sentinel, so they see an empty—not tenant-wide—dashboard, never a
+// leak). sales_manager → their team subtree (usersRepo.teamHierarchy), same
+// scoping leads/discounts already use for this role. account_manager → null
+// (tenant-wide, unchanged — they're the dedicated Accounts team).
+// Returns { branchId, teamIds } — at most one of the two is ever non-null.
 const NO_BRANCH = '00000000-0000-0000-0000-000000000000';
-const resolveAdmissionBranch = async (tenant, actor, branchId) => {
-  if (actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return branchId || null;
+const resolveAdmissionScope = async (tenant, actor, branchId) => {
+  if (actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    return { branchId: branchId || null, teamIds: null };
+  }
   if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
     const me = await usersRepo.findById(tenant, actor.id);
-    return me?.branch_id ?? NO_BRANCH;
+    return { branchId: me?.branch_id ?? NO_BRANCH, teamIds: null };
   }
-  return null;
+  if (actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    const teamIds = await usersRepo.teamHierarchy(tenant, actor.id);
+    return { branchId: null, teamIds };
+  }
+  return { branchId: null, teamIds: null };
+};
+
+// Write-side guard: does this actor have branch/team authority over the
+// admission being mutated (approve/reject/drop/edit/receipt)? Read-side
+// scoping (resolveAdmissionScope + the *_admissions listings above) already
+// keeps branch_manager/sales_manager from SEEING admissions outside their
+// scope, but without this check they could still act on one by ID if they
+// somehow learned it (e.g. a stale deep-link) — this closes that gap.
+// super_admin / account_manager are unrestricted, matching their existing
+// tenant-wide route access.
+const assertAdmissionInScope = async (tenant, actor, admissionId) => {
+  if (!actor || actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) return;
+  if (actor.role !== SYSTEM_TENANT_ROLES.BRANCH_MANAGER && actor.role !== SYSTEM_TENANT_ROLES.SALES_MANAGER) return;
+  const leadScope = await repo.findLeadScopeByAdmission(tenant, admissionId);
+  const scope = await resolveAdmissionScope(tenant, actor, null);
+  if (scope.branchId) {
+    if (!leadScope || leadScope.branch_id !== scope.branchId) throw forbidden('This admission is outside your branch');
+  } else if (scope.teamIds) {
+    if (!leadScope || !scope.teamIds.includes(leadScope.assigned_to)) throw forbidden('This admission is outside your team');
+  }
+};
+
+// Same check, but starting from a receipt id (one hop further out).
+const assertReceiptInScope = async (tenant, actor, receiptId) => {
+  if (!actor || actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor.role === SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER) return;
+  if (actor.role !== SYSTEM_TENANT_ROLES.BRANCH_MANAGER && actor.role !== SYSTEM_TENANT_ROLES.SALES_MANAGER) return;
+  const leadScope = await repo.findLeadScopeByReceipt(tenant, receiptId);
+  const scope = await resolveAdmissionScope(tenant, actor, null);
+  if (scope.branchId) {
+    if (!leadScope || leadScope.branch_id !== scope.branchId) throw forbidden('This receipt is outside your branch');
+  } else if (scope.teamIds) {
+    if (!leadScope || !scope.teamIds.includes(leadScope.assigned_to)) throw forbidden('This receipt is outside your team');
+  }
 };
 import { tenantQuery } from '../../db/tenant.js';
 import { notifyUser } from '../../lib/socket.js';
@@ -77,16 +117,21 @@ export const deleteCenter = (tenant, id) => repo.softDeleteCenter(tenant, id);
 
 // A counsellor only ever sees admissions for leads THEY own/converted
 // (admissions.guided_by_counsellor_id = lead.assigned_to at conversion time).
+// branch_manager / sales_manager are scoped to their branch / team subtree.
 // account_manager / super_admin see all. Enforced by forcing the filter here
-// so a counsellor can't widen it via query params.
-const scopeForActor = (q, actor) => {
+// so nobody can widen it via query params.
+const scopeForActor = async (tenant, q, actor) => {
   if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
     return { ...q, guided_by_counsellor_id: actor.id };
+  }
+  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER || actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, null);
+    return { ...q, branchId, teamIds };
   }
   return q;
 };
 
-export const list = (tenant, q, actor) => repo.list(tenant, scopeForActor(q, actor));
+export const list = async (tenant, q, actor) => repo.list(tenant, await scopeForActor(tenant, q, actor));
 
 export const get = async (tenant, id, actor) => {
   const row = await repo.findByIdWithRelations(tenant, id);
@@ -95,6 +140,8 @@ export const get = async (tenant, id, actor) => {
   if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR && row.guided_by_counsellor_id !== actor.id) {
     throw forbidden('This admission is not in your scope');
   }
+  // branch_manager / sales_manager: theirs branch/team only.
+  await assertAdmissionInScope(tenant, actor, id);
   return row;
 };
 
@@ -126,6 +173,7 @@ const FEE_OWNED_FIELDS = ['total_fees', 'mode_of_payment'];
 export const update = async (tenant, id, patch, actor) => {
   const existing = await repo.findById(tenant, id);
   if (!existing) throw notFound('Admission not found');
+  await assertAdmissionInScope(tenant, actor, id);
   if (actor?.role === 'account_manager') {
     for (const k of FEE_OWNED_FIELDS) {
       if (k in patch) delete patch[k];
@@ -159,13 +207,15 @@ export const update = async (tenant, id, patch, actor) => {
   return row;
 };
 
-export const remove = async (tenant, id) => {
+export const remove = async (tenant, id, actor) => {
   const existing = await repo.findById(tenant, id);
   if (!existing) throw notFound('Admission not found');
+  await assertAdmissionInScope(tenant, actor, id);
   await repo.softDelete(tenant, id);
 };
 
 export const approve = async (tenant, actor, id) => {
+  await assertAdmissionInScope(tenant, actor, id);
   const existing = await repo.findById(tenant, id);
   const row = await repo.approve(tenant, id, actor?.id);
   if (!row) throw notFound('Admission not found or already approved');
@@ -240,6 +290,7 @@ export const approve = async (tenant, actor, id) => {
 // the head_trainer places them into a batch. Idempotent: a re-confirm reissues
 // a fresh temp password so Accounts can re-share it.
 export const confirmCourse = async (tenant, actor, id) => {
+  await assertAdmissionInScope(tenant, actor, id);
   const adm = await repo.findById(tenant, id);
   if (!adm) throw notFound('Admission not found');
   // Must be an approved/enrolled admission (approve() sets status 'attending').
@@ -316,6 +367,7 @@ export const confirmCourse = async (tenant, actor, id) => {
 // if provided — lands in the audit timeline so the next accounts user
 // can see why the previous submission was bounced.
 export const reject = async (tenant, actor, id, reason) => {
+  await assertAdmissionInScope(tenant, actor, id);
   const existing = await repo.findById(tenant, id);
   const row = await repo.reject(tenant, id, actor?.id);
   if (!row) throw notFound('Admission not found or not pending');
@@ -340,6 +392,7 @@ export const reject = async (tenant, actor, id, reason) => {
 // stays converted (it genuinely enrolled once); "dropped" is an accounts-side
 // outcome, surfaced in the Drop Candidates tab.
 export const drop = async (tenant, actor, id, reason) => {
+  await assertAdmissionInScope(tenant, actor, id);
   const existing = await repo.findById(tenant, id);
   const row = await repo.drop(tenant, id, actor?.id, reason);
   if (!row) throw notFound('Admission not found or already dropped');
@@ -377,6 +430,7 @@ export const drop = async (tenant, actor, id, reason) => {
 };
 
 export const setStatus = async (tenant, id, status, extra, actor) => {
+  await assertAdmissionInScope(tenant, actor, id);
   const existing = await repo.findById(tenant, id);
   const row = await repo.setStatus(tenant, id, status, extra);
   if (!row) throw notFound('Admission not found');
@@ -393,18 +447,21 @@ export const setStatus = async (tenant, id, status, extra, actor) => {
   return row;
 };
 
-export const listReceipts = (tenant, q) => repo.listReceipts(tenant, q);
+export const listReceipts = async (tenant, q, actor) => {
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, null);
+  return repo.listReceipts(tenant, { ...q, branchId, teamIds });
+};
 
 // Admin Payment Details ledger (paginated/filterable/sortable/searchable).
 export const listPaymentDetails = async (tenant, q, actor) => {
-  const branchId = await resolveAdmissionBranch(tenant, actor, q?.branch_id);
-  return repo.listPaymentDetails(tenant, { ...q, branchId });
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, q?.branch_id);
+  return repo.listPaymentDetails(tenant, { ...q, branchId, teamIds });
 };
 
 // Payment analytics for the admin dashboard charts.
 export const paymentAnalytics = async (tenant, q, actor) => {
-  const branchId = await resolveAdmissionBranch(tenant, actor, q?.branch_id);
-  return repo.paymentAnalytics(tenant, { ...q, branchId });
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, q?.branch_id);
+  return repo.paymentAnalytics(tenant, { ...q, branchId, teamIds });
 };
 
 // Postgres unique-violation. Mapping these to a field error keeps the two
@@ -413,6 +470,7 @@ export const paymentAnalytics = async (tenant, q, actor) => {
 const UNIQUE_VIOLATION = '23505';
 
 export const createReceipt = async (tenant, actor, admission_id, input) => {
+  await assertAdmissionInScope(tenant, actor, admission_id);
   const adm = await repo.findById(tenant, admission_id);
   if (!adm) throw notFound('Admission not found');
   const receiptConfig = await getReceiptConfig(tenant);
@@ -465,7 +523,8 @@ export const createReceipt = async (tenant, actor, admission_id, input) => {
   return row;
 };
 
-export const deleteReceipt = async (tenant, id) => {
+export const deleteReceipt = async (tenant, id, actor) => {
+  await assertReceiptInScope(tenant, actor, id);
   // We need the admission_id BEFORE deletion to attach the event.
   const { rows } = await tenantQuery(
     tenant,
@@ -491,6 +550,7 @@ export const timeline = async (tenant, id, actor) => {
   if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR && existing.guided_by_counsellor_id !== actor.id) {
     throw forbidden('This admission is not in your scope');
   }
+  await assertAdmissionInScope(tenant, actor, id);
   return events.listByAdmission(tenant, id);
 };
 
@@ -513,6 +573,22 @@ export const timelineByLead = async (tenant, lead_id, actor) => {
       [lead_id, actor.id],
     );
     if (!own[0]) throw forbidden('This lead is not in your scope');
+  }
+  // branch_manager / sales_manager: theirs branch/team only.
+  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER || actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    const { rows: leadRows } = await tenantQuery(
+      tenant,
+      `SELECT branch_id, assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`,
+      [lead_id],
+    );
+    const leadScope = leadRows[0];
+    const scope = await resolveAdmissionScope(tenant, actor, null);
+    const inScope = scope.branchId
+      ? leadScope && leadScope.branch_id === scope.branchId
+      : scope.teamIds
+        ? leadScope && scope.teamIds.includes(leadScope.assigned_to)
+        : false;
+    if (!inScope) throw forbidden('This lead is not in your scope');
   }
   const { rows } = await tenantQuery(
     tenant,
@@ -624,11 +700,14 @@ export const timelineByLead = async (tenant, lead_id, actor) => {
 // Tenant-wide snapshot of every converted lead's admission state.
 // Powers the new "Admission Pipeline" sidebar page + the dashboard cards.
 export const leadStatusSnapshot = async (tenant, actor, branchId) => {
-  const branch = await resolveAdmissionBranch(tenant, actor, branchId);
-  // When a branch is in force, scope every part to admissions/leads in that
-  // branch (via the lead's branch_id). branch=null → tenant-wide (unchanged).
+  const scope = await resolveAdmissionScope(tenant, actor, branchId);
+  // When a branch/team is in force, scope every part to admissions/leads in
+  // it (via the lead's branch_id / assigned_to). Neither set → tenant-wide.
+  const scopeVal = scope.branchId || scope.teamIds || null;
+  const leadsCol = scope.branchId ? 'l.branch_id = ' : 'l.assigned_to = ANY(';
+  const leadsColClose = scope.branchId ? '' : '::uuid[])';
   const cP = []; let cJoin = ''; let cFilter = '';
-  if (branch) { cP.push(branch); cJoin = 'JOIN leads l ON l.id = a.lead_id'; cFilter = `AND l.branch_id = $${cP.length}`; }
+  if (scopeVal) { cP.push(scopeVal); cJoin = 'JOIN leads l ON l.id = a.lead_id'; cFilter = `AND ${leadsCol}$${cP.length}${leadsColClose}`; }
   const { rows: counts } = await tenantQuery(
     tenant,
     `SELECT a.status, COUNT(*)::int AS count
@@ -642,7 +721,7 @@ export const leadStatusSnapshot = async (tenant, actor, branchId) => {
   // render them under the "Unrouted" filter chip alongside the real
   // admissions.
   const uP = []; let uFilter = '';
-  if (branch) { uP.push(branch); uFilter = `AND l.branch_id = $${uP.length}`; }
+  if (scopeVal) { uP.push(scopeVal); uFilter = `AND ${leadsCol}$${uP.length}${leadsColClose}`; }
   const { rows: unroutedRows } = await tenantQuery(
     tenant,
     `SELECT NULL::uuid          AS admission_id,
@@ -671,7 +750,7 @@ export const leadStatusSnapshot = async (tenant, actor, branchId) => {
     uP,
   );
   const lP = []; let lFilter = '';
-  if (branch) { lP.push(branch); lFilter = `AND l.branch_id = $${lP.length}`; }
+  if (scopeVal) { lP.push(scopeVal); lFilter = `AND ${leadsCol}$${lP.length}${leadsColClose}`; }
   const { rows: list } = await tenantQuery(
     tenant,
     `SELECT a.id AS admission_id, a.status, a.admission_date, a.total_fees,
@@ -698,11 +777,17 @@ export const leadStatusSnapshot = async (tenant, actor, branchId) => {
   };
 };
 
-export const paySchedule = (tenant, q) => repo.paySchedule(tenant, q);
-export const collectionReceiptWise = (tenant, q) => repo.collectionReceiptWise(tenant, q);
+export const paySchedule = async (tenant, q, actor) => {
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, null);
+  return repo.paySchedule(tenant, { ...q, branchId, teamIds });
+};
+export const collectionReceiptWise = async (tenant, q, actor) => {
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, null);
+  return repo.collectionReceiptWise(tenant, { ...q, branchId, teamIds });
+};
 export const dashboard = async (tenant, actor, branchId) => {
-  const b = await resolveAdmissionBranch(tenant, actor, branchId);
-  return repo.dashboard(tenant, b);
+  const { branchId: b, teamIds } = await resolveAdmissionScope(tenant, actor, branchId);
+  return repo.dashboard(tenant, b, teamIds);
 };
 
 // Counsellor "My Students": their converted leads + submitted admissions,
@@ -711,23 +796,29 @@ export const dashboard = async (tenant, actor, branchId) => {
 // it only for counsellors.)
 export const myStudents = (tenant, actor) => repo.myStudents(tenant, actor?.id);
 
-export const pendingAdmissions = (tenant, filters) => repo.pendingAdmissions(tenant, filters);
-export const pendingAdmissionsCount = (tenant) => repo.pendingAdmissionsCount(tenant);
+export const pendingAdmissions = async (tenant, filters, actor) => {
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, null);
+  return repo.pendingAdmissions(tenant, { ...filters, branchId, teamIds });
+};
+export const pendingAdmissionsCount = async (tenant, actor) => {
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, null);
+  return repo.pendingAdmissionsCount(tenant, branchId, teamIds);
+};
 export const emiDigest = async (tenant, upcomingDays, actor) => {
-  const branchId = await resolveAdmissionBranch(tenant, actor, undefined);
-  return repo.emiDigest(tenant, upcomingDays, branchId);
+  const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, undefined);
+  return repo.emiDigest(tenant, upcomingDays, branchId, teamIds);
 };
 
 // Compound dashboard fetch: KPI cards (existing) + 4 chart datasets.
 // One round-trip from the FE; ~5 queries server-side run in parallel.
 export const dashboardWithCharts = async (tenant, { trend_days = 30, branch_id } = {}, actor) => {
-  const b = await resolveAdmissionBranch(tenant, actor, branch_id);
+  const { branchId: b, teamIds: t } = await resolveAdmissionScope(tenant, actor, branch_id);
   const [kpis, admTrend, colTrend, breakdown, courses] = await Promise.all([
-    repo.dashboard(tenant, b),
-    repo.admissionsTrend(tenant, trend_days, b),
-    repo.collectionTrend(tenant, trend_days, b),
-    repo.statusBreakdown(tenant, b),
-    repo.courseBreakdown(tenant, b),
+    repo.dashboard(tenant, b, t),
+    repo.admissionsTrend(tenant, trend_days, b, t),
+    repo.collectionTrend(tenant, trend_days, b, t),
+    repo.statusBreakdown(tenant, b, t),
+    repo.courseBreakdown(tenant, b, t),
   ]);
   return {
     ...kpis,

@@ -4,7 +4,7 @@ import * as leadsRepo from '../leads/repo.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { DISCOUNT, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
-import { notifyManagersOf, notifyUser } from '../../lib/socket.js';
+import { notifyChain, notifyUser } from '../../lib/socket.js';
 
 const { COUNSELLOR_MAX_PERCENT, MAX_PERCENT, STATUS } = DISCOUNT;
 
@@ -87,11 +87,16 @@ export const applyDiscount = async (tenant, actor, lead_id, { discount_percent, 
     { discount_percent: pct, status: saved.status, auto_approved: autoApproved, cap: COUNSELLOR_MAX_PERCENT, holds_conversion: Boolean(pending_stage_id) && !autoApproved },
   );
 
-  // Real-time: when the discount needs sign-off, notify the requester's
-  // managers (sales/branch) + admins so it hits their bell + the Discount
-  // Approvals badge updates live.
+  // Real-time: when the discount needs sign-off, notify the FULL manager
+  // chain (sales_manager AND branch_manager AND admins), not just the
+  // requester's direct manager. listPending()/decideDiscount() scope by the
+  // whole team subtree (usersRepo.teamHierarchy), so a branch_manager sitting
+  // above a sales_manager is entitled to approve a counsellor's request —
+  // but notifyManagersOf only pings 1 level up, so that branch_manager never
+  // got the live bell/badge ping and only ever saw the request if they
+  // happened to open the Discount Approvals page directly.
   if (!autoApproved && actor?.id) {
-    notifyManagersOf(tenant, actor.id, 'discount.requested', {
+    notifyChain(tenant, actor.id, 'discount.requested', {
       lead_id,
       lead_name: leadName,
       discount_percent: pct,
