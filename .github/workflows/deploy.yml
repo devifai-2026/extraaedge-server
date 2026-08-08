@@ -5,9 +5,18 @@ name: Deploy to Hostinger
 #
 # Two directories matter and confusing them is the classic failure here:
 #   ~/domains/admissioncrm.live/nodejs                 the git checkout
-#   ~/domains/.builds/current/nodejs                   what Passenger runs
-# So the job pulls into the checkout, syncs src/ into the live build, and
-# touches the build's own tmp/restart.txt (the configured PassengerRestartDir).
+#   <whatever PassengerAppRoot in .htaccess says>      what Passenger runs
+# The second one is NOT a fixed path — on 2026-08-08 Hostinger silently
+# migrated it from .builds/current/nodejs to hbuilds/current/nodejs (its own
+# native Node-app deploy mechanism repointed .htaccess, apparently triggered
+# by opening the Node.js panel in hPanel), and every deploy in between kept
+# "succeeding" while writing into a dead directory nobody was serving from —
+# the smoke test below only checks HTTP responses, it can't detect that the
+# path it's writing to isn't the path being served. So we resolve the live
+# root from .htaccess's PassengerAppRoot line at deploy time instead of
+# hardcoding it, and the job pulls into the checkout, syncs src/ into
+# whatever that resolves to, and touches its tmp/restart.txt
+# (PassengerRestartDir) — never a path we guessed ourselves.
 on:
   push:
     branches: [main]
@@ -46,7 +55,14 @@ jobs:
 
           D="$HOME/domains/admissioncrm.live"
           SRC="$D/nodejs"
-          LIVE="$D/.builds/current/nodejs"
+
+          # Resolve the live app root from the authoritative source — Passenger's
+          # own config — instead of a hardcoded guess. See the comment at the
+          # top of this file for why: a hardcoded path silently rotted once
+          # already when Hostinger repointed this from under us.
+          LIVE="$(grep -m1 '^PassengerAppRoot' "$D/public_html/.htaccess" | awk '{print $2}')"
+          [ -n "$LIVE" ] || { echo "::error::could not resolve PassengerAppRoot from .htaccess"; exit 1; }
+          echo "== live app root (from .htaccess): $LIVE"
 
           [ -d "$SRC/.git" ] || { echo "::error::git checkout missing at $SRC"; exit 1; }
           [ -d "$LIVE/src" ] || { echo "::error::live build missing at $LIVE"; exit 1; }
