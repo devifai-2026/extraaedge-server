@@ -89,6 +89,11 @@ const queueQuery = z.object({
   status: z.enum(['pending', 'reviewed', 'all']).default('pending'),
   branch_id: z.string().uuid().optional(),
   counsellor_id: z.string().uuid().optional(),
+  // Filters on the call's own uploaded_at (when it was recorded/uploaded),
+  // not on when it was reviewed — that's what a QA manager means by "calls
+  // from last week", regardless of review status.
+  date_from: z.string().optional(),
+  date_to: z.string().optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
@@ -103,6 +108,8 @@ router.get('/queue', requireRole(...REVIEWER_ROLES), validate({ query: queueQuer
     if (req.query.counsellor_id) { params.push(req.query.counsellor_id); conds.push(`dr.uploaded_by = $${params.length}`); }
     if (req.query.status === 'pending') conds.push(`qr.id IS NULL`);
     if (req.query.status === 'reviewed') conds.push(`qr.id IS NOT NULL`);
+    if (req.query.date_from) { params.push(req.query.date_from); conds.push(`dr.uploaded_at >= $${params.length}::timestamptz`); }
+    if (req.query.date_to) { params.push(req.query.date_to); conds.push(`dr.uploaded_at <= $${params.length}::timestamptz`); }
 
     const offset = (req.query.page - 1) * req.query.limit;
     params.push(req.query.limit, offset);

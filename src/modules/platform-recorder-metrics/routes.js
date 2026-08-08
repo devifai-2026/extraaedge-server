@@ -78,16 +78,26 @@ const tenantMetrics = async (tenant) => {
         GROUP BY 1, 2
         ORDER BY rows_inserted DESC`,
     ),
+    // Per-day / per-counsellor / per-device breakdown — the granularity the
+    // PO console's trend chart + "who's actually uploading, and did it
+    // match" drill-down need. rows_inserted stays for back-compat with
+    // anything still reading the old shape; matched/unmatched/multi is the
+    // split the daily chart stacks.
     tenantQuery(
       tenant,
       `SELECT date_trunc('day', dr.uploaded_at)::date AS day,
               ${UPLOADER_KEY} AS uploader_phone,
-              count(*)::int AS rows_inserted
+              u.name AS user_name,
+              dr.device_id,
+              count(*)::int AS rows_inserted,
+              count(*) FILTER (WHERE dr.match_status = 'matched')::int AS matched,
+              count(*) FILTER (WHERE dr.match_status = 'unmatched')::int AS unmatched,
+              count(*) FILTER (WHERE dr.match_status = 'multi')::int AS multi
          FROM device_recordings dr
          LEFT JOIN users u ON u.id = dr.uploaded_by
         WHERE dr.deleted_at IS NULL AND dr.uploaded_at > now() - interval '14 days'
-        GROUP BY 1, 2
-        ORDER BY 1 DESC, 3 DESC`,
+        GROUP BY 1, 2, 3, 4
+        ORDER BY 1 DESC, 5 DESC`,
     ),
   ]);
   return { accounts, uploaders, daily };

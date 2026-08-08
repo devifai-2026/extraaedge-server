@@ -1022,6 +1022,8 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
     conds.push(`(l.first_touch_source ILIKE '%facebook%' OR l.first_touch_channel ILIKE '%facebook%')`);
   } else if (lead_origin === 'justdial') {
     conds.push(`(l.first_touch_source ILIKE '%justdial%' OR l.first_touch_channel ILIKE '%justdial%')`);
+  } else if (lead_origin === 'website') {
+    conds.push(`(l.first_touch_source ILIKE '%website%' OR l.first_touch_channel ILIKE '%website%')`);
   }
   if (date_from) { params.push(date_from); conds.push(`l.created_at >= $${params.length}::timestamptz`); }
   if (date_to) { params.push(date_to); conds.push(`l.created_at <= $${params.length}::timestamptz`); }

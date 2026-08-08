@@ -284,15 +284,16 @@ export const userLeads = async (tenant, userId, { status, limit = 100 }) => {
 // We compute per-row active_seconds on the way out so the FE can render it.
 // hours (not days) so the FE's 6h/24h/7d/30d/lifetime filter can express the
 // 6h option; lifetime is just a very large hours value from the caller.
-export const userWorkSessions = async (tenant, userId, { hours = 720 } = {}) => {
+export const userWorkSessions = async (tenant, userId, range = {}) => {
+  const startedAt = timeBoundClause('started_at', range);
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id, status, started_at, ended_at, paused_seconds, active_minutes,
             restart_of_day, last_paused_at, auto_closed, closed_reason
        FROM work_sessions
-      WHERE user_id = $1 AND started_at > now() - ($2::int * interval '1 hour')
+      WHERE user_id = $1 AND ${startedAt.sql}
       ORDER BY started_at DESC`,
-    [userId, hours],
+    [userId, ...startedAt.params],
   );
   return rows.map((r) => {
     const start = new Date(r.started_at).getTime();
@@ -306,26 +307,40 @@ export const userWorkSessions = async (tenant, userId, { hours = 720 } = {}) => 
   });
 };
 
+// Time-bound WHERE fragment for a column, shared by userWorkSessions /
+// userActivitySummary / userLoginEvents. An explicit {from,to} (absolute
+// calendar range, e.g. a date-picker) takes precedence over hours (relative
+// lookback from now) — they mean genuinely different things: "1 Jul to 5
+// Jul" is not "however many hours that spans, counted back from right now".
+// $1 is always the user id in every caller below, so this always starts
+// filling params from $2.
+const timeBoundClause = (col, { hours, from, to } = {}) => {
+  if (from && to) return { sql: `${col} BETWEEN $2::timestamptz AND $3::timestamptz`, params: [from, to] };
+  return { sql: `${col} > now() - ($2::int * interval '1 hour')`, params: [hours ?? 720] };
+};
+
 // Real-vs-api activity split for the super_admin activity report — how much
 // of this user's tracked time was backed by an actual mouse/keyboard pattern
 // (see requireClockIn/useGenuineActivity) vs just an API call happening —
 // plus the leads-created breakdown and lead-activity count for the same
 // window, so the Users page can show them as one time-ranged KPI strip.
-export const userActivitySummary = async (tenant, userId, { hours = 720 } = {}) => {
+export const userActivitySummary = async (tenant, userId, range = {}) => {
+  const minuteBucket = timeBoundClause('minute_bucket', range);
+  const createdAt = timeBoundClause('created_at', range);
   const [activity, leadsCreated, bulkCreated, systemAssigned, activityCount] = await Promise.all([
     tenantQuery(
       tenant,
       `SELECT count(*)::int AS active_minutes,
               count(*) FILTER (WHERE source = 'genuine')::int AS genuine_minutes
          FROM work_activity_minutes
-        WHERE user_id = $1 AND minute_bucket > now() - ($2::int * interval '1 hour')`,
-      [userId, hours],
+        WHERE user_id = $1 AND ${minuteBucket.sql}`,
+      [userId, ...minuteBucket.params],
     ),
     tenantQuery(
       tenant,
       `SELECT count(*)::int AS n FROM leads
-        WHERE created_by = $1 AND deleted_at IS NULL AND created_at > now() - ($2::int * interval '1 hour')`,
-      [userId, hours],
+        WHERE created_by = $1 AND deleted_at IS NULL AND ${createdAt.sql}`,
+      [userId, ...createdAt.params],
     ),
     // Bulk-uploaded leads don't carry their own marker on `leads` — a bulk
     // import sets created_by to the uploader same as a manual add — so this
@@ -334,16 +349,16 @@ export const userActivitySummary = async (tenant, userId, { hours = 720 } = {}) 
     tenantQuery(
       tenant,
       `SELECT COALESCE(SUM(success_rows), 0)::int AS n FROM bulk_imports
-        WHERE user_id = $1 AND kind = 'leads' AND created_at > now() - ($2::int * interval '1 hour')`,
-      [userId, hours],
+        WHERE user_id = $1 AND kind = 'leads' AND ${createdAt.sql}`,
+      [userId, ...createdAt.params],
     ),
     // Leads the round-robin/assignment-rule engine handed to this user,
     // as opposed to leads they created themselves.
     tenantQuery(
       tenant,
       `SELECT count(*)::int AS n FROM lead_assignments
-        WHERE assigned_to = $1 AND assignment_type = 'auto_assign' AND created_at > now() - ($2::int * interval '1 hour')`,
-      [userId, hours],
+        WHERE assigned_to = $1 AND assignment_type = 'auto_assign' AND ${createdAt.sql}`,
+      [userId, ...createdAt.params],
     ),
     // "Lead stages moved or any activity updated" — every lead_activities
     // row this user is the actor for (stage changes, notes, auto_assign
@@ -351,8 +366,8 @@ export const userActivitySummary = async (tenant, userId, { hours = 720 } = {}) 
     tenantQuery(
       tenant,
       `SELECT count(*)::int AS n FROM lead_activities
-        WHERE user_id = $1 AND created_at > now() - ($2::int * interval '1 hour')`,
-      [userId, hours],
+        WHERE user_id = $1 AND ${createdAt.sql}`,
+      [userId, ...createdAt.params],
     ),
   ]);
   const totalCreated = leadsCreated.rows[0].n;
@@ -367,16 +382,17 @@ export const userActivitySummary = async (tenant, userId, { hours = 720 } = {}) 
   };
 };
 
-export const userLoginEvents = async (tenant, userId, { hours = 720 } = {}) => {
+export const userLoginEvents = async (tenant, userId, range = {}) => {
+  const createdAt = timeBoundClause('created_at', range);
   const { rows } = await tenantQuery(
     tenant,
     `SELECT created_at, kind, ip, user_agent, session_id,
             lat::float8 AS lat, lng::float8 AS lng, geo_city, geo_country, geo_isp, location_source
        FROM user_login_events
-      WHERE user_id = $1 AND created_at > now() - ($2::int * interval '1 hour')
+      WHERE user_id = $1 AND ${createdAt.sql}
       ORDER BY created_at DESC
       LIMIT 200`,
-    [userId, hours],
+    [userId, ...createdAt.params],
   );
   return rows;
 };

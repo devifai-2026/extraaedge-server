@@ -86,23 +86,36 @@ export const userLeads = async (req, res, next) => {
 // number rather than the backend needing a separate no-filter code path.
 const parseHours = (req) => Math.min(Math.max(parseInt(req.query.hours || '720', 10), 1), 87600);
 
+// An explicit calendar range (?date_from=&date_to=) takes precedence over the
+// relative hours-lookback preset — a manager picking "1 Jul to 5 Jul" means
+// exactly that window, not "however many hours that spans, counted back from
+// right now". Both bounds must be present to switch modes; a lone date_from
+// with no date_to would otherwise silently behave like "since date_from",
+// which isn't what a two-sided range picker implies.
+const parseRange = (req) => {
+  if (req.query.date_from && req.query.date_to) {
+    return { from: req.query.date_from, to: req.query.date_to, hours: undefined };
+  }
+  return { from: undefined, to: undefined, hours: parseHours(req) };
+};
+
 export const userWorkSessions = async (req, res, next) => {
   try {
-    const data = await service.userWorkSessions(req.tenant, req.params.id, { hours: parseHours(req) });
+    const data = await service.userWorkSessions(req.tenant, req.params.id, parseRange(req));
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
 export const userActivitySummary = async (req, res, next) => {
   try {
-    const data = await service.userActivitySummary(req.tenant, req.params.id, { hours: parseHours(req) });
+    const data = await service.userActivitySummary(req.tenant, req.params.id, parseRange(req));
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 
 export const userLoginEvents = async (req, res, next) => {
   try {
-    const data = await service.userLoginEvents(req.tenant, req.params.id, { hours: parseHours(req) });
+    const data = await service.userLoginEvents(req.tenant, req.params.id, parseRange(req));
     res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
