@@ -14,7 +14,7 @@ import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
 import { computeSecurityAnomalies } from '../../lib/securityAnomalies.js';
 
@@ -371,6 +371,81 @@ router.get('/counselor-performance', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN
       params,
     );
     res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// ---------- Counsellor leaderboard ----------
+// Who's moved the most leads into a "success" stage — whatever the tenant
+// has flagged as their qualified/enrolled/converted stage(s) (lead_stages.
+// is_success), not a hardcoded stage name. Ranked by lead_activities rather
+// than leads.assigned_to: the activity log's user_id is who actually
+// performed the move, so a lead reassigned after conversion still credits
+// the counsellor who converted it, not whoever holds it now. Every
+// stage-change write path (changeStage, updateLead's PUT, and the
+// discount-approval stage completion) stamps the same
+// type='stage_changed' + metadata_json.converted shape, so this one query
+// covers all of them.
+//
+// last_30_days: rolling window ending now. months: calendar-month buckets
+// for the last 6 months (covers "July, August" and then some) — kept
+// separate from the 30d window since a manager comparing "July vs August"
+// wants calendar months, not another rolling window.
+router.get('/leaderboard', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
+  try {
+    const scope = await computeScope(req);
+    // Counsellor leaderboard, specifically — a manager or admin occasionally
+    // moving a lead themselves (e.g. completing a discount-gated conversion
+    // on approval) shouldn't crowd out the counsellors this is meant to rank.
+    const conds = [
+      `la.type = 'stage_changed'`, `(la.metadata_json->>'converted')::boolean = true`,
+      `la.user_id IS NOT NULL`, `u.deleted_at IS NULL`, `u.role = 'counsellor'`,
+    ];
+    const params = [];
+    if (scope?.user_ids) {
+      params.push(scope.user_ids);
+      conds.push(`la.user_id = ANY($${params.length}::uuid[])`);
+    } else if (scope && Object.prototype.hasOwnProperty.call(scope, 'branch_id')) {
+      if (scope.branch_id) { params.push(scope.branch_id); conds.push(`u.branch_id = $${params.length}`); }
+      else conds.push('false');
+    }
+    const baseWhere = conds.join(' AND ');
+    const from = `FROM lead_activities la JOIN users u ON u.id = la.user_id`;
+
+    const [{ rows: last30 }, { rows: monthly }] = await Promise.all([
+      tenantQuery(
+        req.tenant,
+        `SELECT la.user_id, u.name, count(*)::int AS conversions
+           ${from}
+          WHERE ${baseWhere} AND la.created_at >= now() - interval '30 days'
+          GROUP BY la.user_id, u.name
+          ORDER BY conversions DESC, u.name
+          LIMIT 15`,
+        params,
+      ),
+      tenantQuery(
+        req.tenant,
+        `SELECT to_char(la.created_at, 'YYYY-MM') AS month,
+                la.user_id, u.name, count(*)::int AS conversions
+           ${from}
+          WHERE ${baseWhere} AND la.created_at >= date_trunc('month', now() - interval '5 months')
+          GROUP BY 1, la.user_id, u.name
+          ORDER BY 1 DESC, conversions DESC, u.name`,
+        params,
+      ),
+    ]);
+
+    // Group the flat monthly rows into one bucket per calendar month, each
+    // already sorted by conversions (the SQL ORDER BY carries through).
+    const byMonth = new Map();
+    for (const r of monthly) {
+      if (!byMonth.has(r.month)) byMonth.set(r.month, []);
+      byMonth.get(r.month).push({ user_id: r.user_id, name: r.name, conversions: r.conversions });
+    }
+    const months = [...byMonth.entries()]
+      .sort(([a], [b]) => (a < b ? 1 : -1))
+      .map(([month, leaders]) => ({ month, leaders: leaders.slice(0, 15) }));
+
+    res.json({ data: { last_30_days: last30, months }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
