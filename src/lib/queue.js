@@ -12,6 +12,17 @@ const bullQueues = new Map();
 
 const useBull = () => env.QUEUE_DRIVER === 'bullmq' && redisAvailable();
 
+// Whether jobs will actually travel through BullMQ, as opposed to the
+// in-process fallback. Exported because index.js has to decide whether to load
+// the worker modules into the web process, and deriving that rule a second
+// time there is what created the hole this comment exists to prevent:
+// QUEUE_DRIVER defaults to 'bullmq', so a deployment with no REDIS_URL fell
+// through to the in-process branch of publish() while index.js — which only
+// checked the driver string — never registered a single handler. Every job
+// published on that box was dropped on the floor, silently, with a 202 to the
+// caller. Ask the queue layer instead of re-deriving.
+export const usingBull = () => useBull();
+
 const getBullQueue = (queueName) => {
   if (!bullQueues.has(queueName)) {
     const q = new Queue(queueName, { connection: getRedis() });
@@ -33,6 +44,18 @@ export const publish = async (queueName, jobName, data, opts = {}) => {
     });
   }
   const handlers = inProcessHandlers.get(queueName) ?? [];
+  // A queue nobody listens to is not a no-op, it's data loss: the caller has
+  // already written its own row (a bulk_import_previews row, a queued
+  // bulk_imports row) and returned 202, so the job vanishing leaves the UI
+  // polling a record that will never be updated. That is indistinguishable
+  // from "the file had zero rows". Say so loudly instead.
+  if (!handlers.some((h) => h.jobName === jobName || h.jobName === '*')) {
+    logger.error(
+      { queueName, jobName, driver: env.QUEUE_DRIVER, redis: redisAvailable() },
+      'queue has no consumer — job dropped. Load the worker for this queue in-process, or set QUEUE_DRIVER/REDIS_URL so BullMQ is used.',
+    );
+    return { id: `dropped-${queueName}`, dropped: true };
+  }
   // fire-and-forget in dev; errors logged but do not propagate
   setImmediate(async () => {
     for (const h of handlers) {

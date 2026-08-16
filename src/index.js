@@ -4,7 +4,7 @@ import { logger } from './lib/logger.js';
 import { closeSystemPool } from './db/system.js';
 import { closeAllTenantPools } from './db/tenant.js';
 import { closeRedis } from './lib/redis.js';
-import { closeQueues } from './lib/queue.js';
+import { closeQueues, usingBull } from './lib/queue.js';
 import { initSocket } from './lib/socket.js';
 
 // In-process queue mode loads the worker modules so their handlers register on
@@ -15,7 +15,14 @@ import { initSocket } from './lib/socket.js';
 // call listen() FIRST, then load the workers asynchronously after the server is
 // already accepting connections. On Render/VPS this ordering is equally correct.
 const loadInprocessWorkers = async () => {
-  if (env.QUEUE_DRIVER !== 'inprocess') return;
+  // Gate on whether BullMQ is REALLY in play, not on the driver string alone.
+  // QUEUE_DRIVER defaults to 'bullmq', so a box with no REDIS_URL configured
+  // would skip this loader while publish() simultaneously fell back to the
+  // in-process path — leaving every queue without a consumer and every job
+  // silently discarded. Hostinger runs Passenger with no second process to
+  // pick up the slack, so the web process loading them is the only option
+  // there. usingBull() is the single source of truth for that decision.
+  if (usingBull()) return;
   try {
     await import('./workers/rule-processor.js');
     await import('./workers/bulk-import-worker.js');
