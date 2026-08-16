@@ -214,48 +214,17 @@ if (isDirectRun) {
       logger.error({ err: err.message }, 'socket init failed');
     }
 
-    if (env.QUEUE_DRIVER === 'inprocess') {
-      try {
-        await import('./workers/rule-processor.js');
-        await import('./workers/bulk-import-worker.js');
-        await import('./workers/bulk-export-worker.js');
-        await import('./workers/notification-worker.js');
-        await import('./workers/followup-reminder-scheduler.js');
-        await import('./workers/missed-followup-scanner.js');
-        await import('./workers/lms-class-reminder.js');
-        // Force-closes work_sessions still open past the tenant's local
-        // midnight (the "forgot to clock out" case) — this is the box that
-        // actually runs in production (Hostinger), so it must be here, not
-        // just in run-all.js (dev-only) — see requireClockIn/ClockInGate.
-        await import('./workers/work-session-midnight-closer.js');
-        // Pre-existing gap: /sla-policies has a full CRUD API but its
-        // scanner never actually ran on this (production) boot path either —
-        // configured SLA alerts silently never fired. Fixing alongside.
-        await import('./workers/sla-scanner.js');
-        await import('./workers/security-digest-mailer.js');
-        // ── Marketing / campaign engine ──
-        // These consume the EMAIL/SMS/CAMPAIGN/DRIP/SCHEDULED_SEND/WORKFLOW
-        // queues (email-sender/sms-sender) and run the polling schedulers
-        // (drip, scheduled-send). Without them, campaign/drip/workflow/
-        // scheduled-send jobs are enqueued but never executed — the modules
-        // look "hardcoded"/dead. run-all.js imports the same set for the
-        // dedicated worker process; we load them in-process on Hostinger.
-        await import('./workers/email-sender.js');
-        await import('./workers/sms-sender.js');
-        await import('./workers/campaign-runner.js');
-        await import('./workers/drip-scheduler.js');
-        await import('./workers/scheduled-send-runner.js');
-        await import('./workers/workflow-executor.js');
-        // Outbound webhooks + attribution/touch bookkeeping that campaigns rely on.
-        await import('./workers/outbound-webhook-dispatcher.js');
-        await import('./workers/attribution-snapshotter.js');
-        await import('./workers/touch-recorder.js');
-        // Facebook Custom Audiences sync (remarketing outbound).
-        await import('./workers/remarketing-sync.js');
-        logger.info('in-process workers loaded (incl. marketing engine)');
-      } catch (err) {
-        logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
-      }
+    // Passenger's configured startup file is THIS module, so this call is the
+    // only one that runs in production. The list itself lives in
+    // workers/load-inprocess.js — see the note there about the two copies that
+    // silently diverged and left the admission importer with no consumer.
+    // Imported here rather than at the top so it stays off the synchronous
+    // path to listen(), like initSocket above.
+    try {
+      const { loadInprocessWorkers } = await import('./workers/load-inprocess.js');
+      await loadInprocessWorkers();
+    } catch (err) {
+      logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
     }
 
     const shutdown = async (signal) => {

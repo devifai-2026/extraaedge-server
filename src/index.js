@@ -4,61 +4,18 @@ import { logger } from './lib/logger.js';
 import { closeSystemPool } from './db/system.js';
 import { closeAllTenantPools } from './db/tenant.js';
 import { closeRedis } from './lib/redis.js';
-import { closeQueues, usingBull } from './lib/queue.js';
+import { closeQueues } from './lib/queue.js';
 import { initSocket } from './lib/socket.js';
+import { loadInprocessWorkers } from './workers/load-inprocess.js';
 
-// In-process queue mode loads the worker modules so their handlers register on
-// this same process (bullmq mode runs each worker as its own process instead).
-// These imports open DB pools and start schedulers, which can take longer than
-// Hostinger's Node hosting allows before it expects app.listen() (a ~3s deadline
-// — see the "App did not call listen() within 3 seconds" runtime error). So we
-// call listen() FIRST, then load the workers asynchronously after the server is
-// already accepting connections. On Render/VPS this ordering is equally correct.
-const loadInprocessWorkers = async () => {
-  // Gate on whether BullMQ is REALLY in play, not on the driver string alone.
-  // QUEUE_DRIVER defaults to 'bullmq', so a box with no REDIS_URL configured
-  // would skip this loader while publish() simultaneously fell back to the
-  // in-process path — leaving every queue without a consumer and every job
-  // silently discarded. Hostinger runs Passenger with no second process to
-  // pick up the slack, so the web process loading them is the only option
-  // there. usingBull() is the single source of truth for that decision.
-  if (usingBull()) return;
-  try {
-    await import('./workers/rule-processor.js');
-    await import('./workers/bulk-import-worker.js');
-    // Accounts historical-admission importer. Separate queue from the lead
-    // importer above (see QUEUE_NAMES.BULK_ADMISSION_IMPORT for why), so it
-    // needs its own import here or /bulk/admissions/commit hangs at Queued.
-    await import('./workers/bulk-admission-import-worker.js');
-    // Follow-up + notifications stack:
-    //   notification-worker translates queued event types into
-    //     notifications rows + websocket pushes.
-    //   followup-reminder-scheduler scans lead_followups every minute and
-    //     publishes 'follow_up_due' events when a planned follow-up's time
-    //     is reached.
-    //   missed-followup-scanner marks planned follow-ups as 'missed' once
-    //     they're past-due by N hours and publishes 'follow_up_missed'.
-    // Without these three the notifications popover stays empty for any
-    // follow-up activity, even though /follow-ups/* CRUD works.
-    await import('./workers/notification-worker.js');
-    await import('./workers/followup-reminder-scheduler.js');
-    await import('./workers/missed-followup-scanner.js');
-    await import('./workers/lms-class-reminder.js');
-    // Force-closes work_sessions still open past the tenant's local midnight
-    // (the "forgot to clock out" case) — see requireClockIn/ClockInGate.
-    await import('./workers/work-session-midnight-closer.js');
-    // Pre-existing gap found while wiring the above: /sla-policies has a full
-    // CRUD API but its scanner never actually ran in production — nothing
-    // imported it on either boot path, so configured SLA alerts silently
-    // never fired. Fixing alongside, not related to this feature otherwise.
-    await import('./workers/sla-scanner.js');
-    await import('./workers/security-digest-mailer.js');
-    logger.info('in-process workers loaded');
-  } catch (err) {
-    logger.error({ err: err.message, stack: err.stack }, 'failed to load in-process workers');
-  }
-};
-
+// Worker loading lives in workers/load-inprocess.js so this entry point and
+// app.js (which is what Passenger actually starts in production) can never
+// again drift apart on which workers exist. The loader is a no-op under BullMQ
+// and is idempotent, so calling it here as well as from app.js is safe.
+//
+// Called AFTER listen(): importing these opens DB pools and starts schedulers,
+// which can exceed the ~3s deadline Hostinger's Node hosting allows before it
+// expects app.listen() ("App did not call listen() within 3 seconds").
 const app = buildApp();
 const server = app.listen(env.PORT, () => {
   logger.info({ port: env.PORT, env: env.NODE_ENV }, 'extraaedge-backend listening');
