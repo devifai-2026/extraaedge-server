@@ -2,7 +2,9 @@ import * as repo from './repo.js';
 import * as usersRepo from '../users/repo.js';
 import { duplicateDetected, notFound, forbidden, validationError } from '../../lib/errors.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import {
+  QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES,
+} from '../../config/constants.js';
 import { notifyLeadChange, notifyAdmins } from '../../lib/socket.js';
 import { applyAssignment, recalcScore } from '../../workers/rule-processor.js';
 import { tenantQuery } from '../../db/tenant.js';
@@ -13,10 +15,14 @@ const emit = (tenant, type, payload) =>
 
 const computeScope = async (tenant, actor, query = {}) => {
   // counsellor:      own leads only.
-  // sales_manager:   team (recursive manager_id) PLUS any unassigned leads
+  // telecaller:      own leads only (same front-line rule as counsellor).
+  // sales_manager /
+  // telecaller_lead: team (recursive manager_id) PLUS any unassigned leads
   //                  tagged with their own team_id (so quick-add leads they
   //                  create — which land in Unassigned — still show on
   //                  their dashboard until they're routed to a counsellor).
+  //                  Both are TEAM_SCOPED_MANAGER_ROLES; a telecaller_lead
+  //                  sits a tier lower but scopes identically.
   // branch_manager:  EVERY lead in their branch — assigned or not — via
   //                  leads.branch_id = their branch. This is the multi-branch
   //                  scope: a branch head sees the whole branch's pipeline.
@@ -35,7 +41,9 @@ const computeScope = async (tenant, actor, query = {}) => {
     // No branch assigned yet → see nothing (avoid leaking the whole tenant).
     return { branch_id: me?.branch_id ?? null };
   }
-  if (actor.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  // branch_manager is handled above (branch-wide), so what reaches here is
+  // sales_manager / telecaller_lead — the subtree-scoped tiers.
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
     const [ids, me] = await Promise.all([
       usersRepo.teamHierarchy(tenant, actor.id),
       usersRepo.findById(tenant, actor.id),
@@ -68,15 +76,31 @@ export const stageCounts = async (tenant, actor, query = {}) => {
   return repo.stageCounts(tenant, query, scope);
 };
 
-// Bulk auto-assign: runs the active assignment rule against every unassigned
-// lead in the tenant. Used by the LeadList "Auto-assign unassigned" button.
+// Bulk auto-assign: runs the routing pools + active assignment rule against
+// unassigned leads. Used by the LeadList "Auto-assign unassigned" button
+// (tenant-wide) and by the bulk-import worker at the end of a job.
+//
+// `leadIds`, when given, restricts the sweep to exactly those leads. The
+// import worker passes the ids it just inserted: without it the end-of-job
+// sweep reached EVERY unassigned lead in the tenant, so importing five rows
+// could silently redistribute a backlog of thousands that an admin had
+// deliberately left unassigned.
+//
 // Returns { found, assigned, skipped } so the UI can show a toast.
-export const autoAssignUnassigned = async (tenant) => {
+export const autoAssignUnassigned = async (tenant, leadIds = null) => {
+  if (Array.isArray(leadIds) && !leadIds.length) return { found: 0, assigned: 0, skipped: 0 };
+  const params = [];
+  let idClause = '';
+  if (Array.isArray(leadIds)) {
+    params.push(leadIds);
+    idClause = `AND id = ANY($${params.length}::uuid[])`;
+  }
   const { rows: leads } = await tenantQuery(
     tenant,
     `SELECT * FROM leads
-      WHERE assigned_to IS NULL AND deleted_at IS NULL
+      WHERE assigned_to IS NULL AND deleted_at IS NULL ${idClause}
       ORDER BY created_at`,
+    params,
   );
   let assigned = 0;
   let skipped = 0;
@@ -175,7 +199,9 @@ export const getLead = async (tenant, actor, id) => {
 const assignByCreator = async (tenant, actor, lead) => {
   if (!actor?.id || !actor.role) return false;
 
-  if (actor.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+  // A front-line creator (counsellor / telecaller) always owns what they
+  // create — they carry a personal queue, so the lead is theirs by definition.
+  if (LEAD_OWNER_ROLES.includes(actor.role)) {
     const me = await usersRepo.findById(tenant, actor.id);
     const managerId = me?.manager_id ?? null;
     await tenantQuery(

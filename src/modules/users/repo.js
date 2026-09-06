@@ -15,7 +15,13 @@ const COLS = `
 export const list = async (tenant, { q, role, team_id, manager_id, is_active, page, limit, scope_user_ids }) => {
   const conds = ['u.deleted_at IS NULL'];
   const params = [];
-  if (role) { params.push(role); conds.push(`u.role = $${params.length}`); }
+  // `role` arrives from listUsersQuery as an array of buckets (a bare string
+  // is still accepted for direct internal callers).
+  if (role) {
+    const roles = Array.isArray(role) ? role : [role];
+    params.push(roles);
+    conds.push(`u.role = ANY($${params.length})`);
+  }
   if (team_id) { params.push(team_id); conds.push(`u.team_id = $${params.length}`); }
   if (manager_id) { params.push(manager_id); conds.push(`u.manager_id = $${params.length}`); }
   // Branch subtree restriction (branch_manager) — only these user ids.

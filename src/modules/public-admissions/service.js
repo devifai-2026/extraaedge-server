@@ -9,7 +9,7 @@ import { randomToken } from '../../lib/crypto.js';
 import { resolveTenantById } from '../../db/tenant.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, appError, forbidden } from '../../lib/errors.js';
-import { RESPONSE_CODES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { RESPONSE_CODES, SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 import { buildKey, getUploadSignedUrl, getDownloadSignedUrl, headObject } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
 import * as tokenRepo from './repo.js';
@@ -53,7 +53,7 @@ export const generateLink = async (tenant, actor, lead_id, payment_account_id = 
   const lead = leadRows[0];
   if (!lead) throw notFound('Lead not found');
   // Counsellors may only mint a share link for their OWN leads.
-  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR && lead.assigned_to !== actor.id) {
+  if (LEAD_OWNER_ROLES.includes(actor?.role) && lead.assigned_to !== actor.id) {
     throw forbidden('This lead is not assigned to you');
   }
 

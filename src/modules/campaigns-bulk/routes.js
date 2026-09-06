@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES, QUEUE_NAMES, EVENT_TYPES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, QUEUE_NAMES, EVENT_TYPES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { notFound, forbidden } from '../../lib/errors.js';
 import { publish } from '../../lib/queue.js';
 import { countAudience } from '../../lib/audience.js';
@@ -61,7 +61,7 @@ router.get('/:id', validate({ params: idParam }), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: createSchema }), async (req, res, next) => {
+router.post('/', requireRole(...MANAGER_TIER_ROLES), validate({ body: createSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -74,7 +74,7 @@ router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLE
   } catch (err) { next(err); }
 });
 
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
+router.put('/:id', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: updateSchema }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -96,7 +96,7 @@ router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT
   } catch (err) { next(err); }
 });
 
-router.post('/:id/clone', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/clone', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -111,7 +111,7 @@ router.post('/:id/clone', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TE
   } catch (err) { next(err); }
 });
 
-router.post('/:id/launch', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/launch', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -141,7 +141,7 @@ router.post('/:id/launch', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
   } catch (err) { next(err); }
 });
 
-router.post('/:id/stop', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/stop', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -172,7 +172,7 @@ router.get('/:id/recipients', validate({ params: idParam }), async (req, res, ne
   } catch (err) { next(err); }
 });
 
-router.post('/:id/preview', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/preview', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     // Count how many leads currently match the filter — shared audience resolver.
     const { rows: [c] } = await tenantQuery(req.tenant, `SELECT audience_filter_json FROM campaigns_bulk WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);

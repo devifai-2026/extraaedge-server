@@ -4,7 +4,7 @@ import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import {
   createAdmissionSchema, updateAdmissionSchema, listQuery, reportQuery, idParam,
@@ -43,7 +43,7 @@ const acctOrBranch = requireRole(
 const acctOrCounsellor = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
-  SYSTEM_TENANT_ROLES.COUNSELLOR,
+  ...LEAD_OWNER_ROLES,
 );
 // List + single-admission read, shared by the Accounts "This/Total
 // Admissions" tables AND the counsellor's own-students subset — so it needs

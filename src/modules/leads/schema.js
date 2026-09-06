@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LEAD_ORIGINS } from '../../lib/leadOrigin.js';
 
 // Forms in the admin UI submit '' for cleared optional fields. zod's
 // `.optional()` only accepts `undefined`, so '' would fail .email() / .uuid()
@@ -188,7 +189,7 @@ export const listQuery = z.object({
   // Lead origin quick-filter — acquisition channel the lead first came through
   // (whatsapp / facebook / justdial / website), matched against
   // first_touch_source/channel.
-  lead_origin: z.enum(['whatsapp', 'facebook', 'justdial', 'website']).optional(),
+  lead_origin: z.enum(LEAD_ORIGINS).optional(),
   // "Not updated / stale" report — leads with no human activity AND no
   // follow-up inside this window (either bound optional).
   no_activity_from: z.string().optional(),

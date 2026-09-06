@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -19,7 +19,7 @@ const query = z.object({
   model: z.enum(['first_touch', 'last_touch', '50_50', 'linear']).default('50_50'),
 });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ query }), async (req, res, next) => {
+router.get('/', requireRole(...MANAGER_TIER_ROLES), validate({ query }), async (req, res, next) => {
   try {
     const amountField = {
       first_touch: 'amount_attributed_first',
@@ -51,7 +51,7 @@ router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES
   } catch (err) { next(err); }
 });
 
-router.get('/models', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), (_req, res) => {
+router.get('/models', requireRole(...MANAGER_TIER_ROLES), (_req, res) => {
   res.json({
     data: [
       { code: 'first_touch', label: 'First touch — credit the earliest touchpoint' },

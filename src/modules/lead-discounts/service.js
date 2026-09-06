@@ -3,7 +3,7 @@ import * as usersRepo from '../users/repo.js';
 import * as leadsRepo from '../leads/repo.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
-import { DISCOUNT, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { DISCOUNT, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
 import { notifyChain, notifyUser } from '../../lib/socket.js';
 
 const { COUNSELLOR_MAX_PERCENT, MAX_PERCENT, STATUS } = DISCOUNT;
@@ -35,9 +35,10 @@ export const getForLead = async (tenant, lead_id) => {
 // Whether a given actor applying `pct` would need manager sign-off. A manager
 // (sales/branch/super) applying directly IS the approver, so never needs it.
 export const discountNeedsApproval = (actor, pct) => {
+  // Any manager tier is its own approver — super_admin plus the subtree-scoped
+  // tiers (branch_manager / sales_manager / telecaller_lead).
   const isManager = actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN
-    || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER
-    || actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER;
+    || TEAM_SCOPED_MANAGER_ROLES.includes(actor?.role);
   return !(pct <= COUNSELLOR_MAX_PERCENT || isManager);
 };
 

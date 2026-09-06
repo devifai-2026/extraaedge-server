@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { shortCode } from '../../lib/crypto.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 
 const router = express.Router();
@@ -75,7 +75,7 @@ const policySchema = z.object({
   is_active: z.boolean().default(true),
 });
 
-router.get('/policies', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/policies', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try { const { rows } = await tenantQuery(req.tenant, `SELECT * FROM referral_policies WHERE deleted_at IS NULL ORDER BY trigger`); res.json({ data: rows, meta: { requestId: req.id } }); }
   catch (err) { next(err); }
 });
@@ -107,7 +107,7 @@ router.delete('/policies/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYST
 });
 
 // Credits
-router.get('/credits', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/credits', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const status = req.query.status;
     const { rows } = await tenantQuery(
@@ -124,7 +124,7 @@ router.get('/credits', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENAN
   } catch (err) { next(err); }
 });
 
-router.post('/credits/:id/credit', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/credits/:id/credit', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -136,7 +136,7 @@ router.post('/credits/:id/credit', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, 
   } catch (err) { next(err); }
 });
 
-router.post('/credits/:id/revoke', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ reason: z.string().optional() }) }), async (req, res, next) => {
+router.post('/credits/:id/revoke', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: z.object({ reason: z.string().optional() }) }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -148,7 +148,7 @@ router.post('/credits/:id/revoke', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, 
 });
 
 // All referrals overview
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,

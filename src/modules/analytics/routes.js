@@ -14,7 +14,10 @@ import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
+import {
+  SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES, LEAD_OWNER_ROLES,
+} from '../../config/constants.js';
+import { LEAD_ORIGINS, originSqlPredicate } from '../../lib/leadOrigin.js';
 import { teamHierarchy } from '../users/repo.js';
 import { computeSecurityAnomalies } from '../../lib/securityAnomalies.js';
 
@@ -222,10 +225,14 @@ router.get('/channel-source', validate({ query: rangeQuery }), async (req, res, 
   } catch (err) { next(err); }
 });
 
-// ---------- Lead Origin (WhatsApp / Facebook / other) ----------
-// Powers the dashboard WhatsApp-leads stat card + trend. `counts` gives the
-// role-scoped totals per origin; `whatsapp_trend` is a daily new-WhatsApp-lead
-// series over the last `trend_days` (default 30) for the sparkline/graph.
+// ---------- Lead Origin (WhatsApp / Instagram / Facebook / JustDial / Website) ----------
+// Powers the dashboard origin stat cards + trends. `counts` gives the
+// role-scoped totals and conversions per origin; `<origin>_trend` is a daily
+// new-lead series over the last `trend_days` (default 30) for the sparkline.
+//
+// Origins and their predicates come from lib/leadOrigin.js, so adding a
+// channel there lights it up here, in the leads filter and in the routing
+// pools at once — no per-origin code in this route.
 const originQuery = rangeQuery.extend({ trend_days: z.coerce.number().int().min(1).max(180).optional() });
 router.get('/lead-origin', validate({ query: originQuery }), async (req, res, next) => {
   try {
@@ -235,7 +242,7 @@ router.get('/lead-origin', validate({ query: originQuery }), async (req, res, ne
     const where = conds.join(' AND ');
     const trendDays = req.query.trend_days || 30;
 
-    // Daily new-lead trend for one origin (whatsapp | facebook), gap-filled.
+    // Daily new-lead trend for one origin, gap-filled.
     const trendQuery = (originCond) => tenantQuery(
       req.tenant,
       `SELECT to_char(d::date, 'YYYY-MM-DD') AS day,
@@ -254,40 +261,28 @@ router.get('/lead-origin', validate({ query: originQuery }), async (req, res, ne
         ORDER BY d`,
       [...params, trendDays],
     );
-    const WA = `first_touch_source ILIKE 'whatsapp' OR first_touch_channel ILIKE 'whatsapp'`;
-    const FB = `first_touch_source ILIKE '%facebook%' OR first_touch_channel ILIKE '%facebook%'`;
-    const JD = `first_touch_source ILIKE '%justdial%' OR first_touch_channel ILIKE '%justdial%'`;
-    // Website leads — e.g. speedupinfotech.com's Free Demo form, see
-    // modules/public-leads/service.js which sets first_touch_channel='Website'.
-    const WEB = `first_touch_channel ILIKE 'website'`;
-    const [{ rows: countRows }, { rows: waTrend }, { rows: fbTrend }, { rows: jdTrend }, { rows: webTrend }] = await Promise.all([
+    // Unaliased predicates — this route selects straight FROM leads.
+    const preds = LEAD_ORIGINS.map((o) => [o, originSqlPredicate(o, '')]);
+    const countSelect = preds
+      .flatMap(([o, p]) => [
+        `count(*) FILTER (WHERE ${p})::int AS ${o}`,
+        `count(*) FILTER (WHERE (${p}) AND converted_at IS NOT NULL)::int AS ${o}_converted`,
+      ])
+      .join(',\n           ');
+    const [{ rows: countRows }, ...trends] = await Promise.all([
       tenantQuery(
         req.tenant,
         `SELECT
-           count(*) FILTER (WHERE ${WA})::int AS whatsapp,
-           count(*) FILTER (WHERE ${FB})::int AS facebook,
-           count(*) FILTER (WHERE ${JD})::int AS justdial,
-           count(*) FILTER (WHERE ${WEB})::int AS website,
-           count(*) FILTER (WHERE (${WA}) AND converted_at IS NOT NULL)::int AS whatsapp_converted,
-           count(*) FILTER (WHERE (${FB}) AND converted_at IS NOT NULL)::int AS facebook_converted,
-           count(*) FILTER (WHERE (${JD}) AND converted_at IS NOT NULL)::int AS justdial_converted,
-           count(*) FILTER (WHERE (${WEB}) AND converted_at IS NOT NULL)::int AS website_converted,
+           ${countSelect},
            count(*)::int AS total
          FROM leads WHERE ${where}`,
         params,
       ),
-      trendQuery(WA),
-      trendQuery(FB),
-      trendQuery(JD),
-      trendQuery(WEB),
+      ...preds.map(([, p]) => trendQuery(p)),
     ]);
-    res.json({
-      data: {
-        counts: countRows[0],
-        whatsapp_trend: waTrend, facebook_trend: fbTrend, justdial_trend: jdTrend, website_trend: webTrend,
-      },
-      meta: { requestId: req.id },
-    });
+    const data = { counts: countRows[0] };
+    preds.forEach(([o], i) => { data[`${o}_trend`] = trends[i].rows; });
+    res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
@@ -346,10 +341,12 @@ router.get('/cold-enquiries', async (req, res, next) => {
 });
 
 // ---------- Counsellor leaderboard (manager / admin only) ----------
-router.get('/counselor-performance', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/counselor-performance', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const scope = await computeScope(req);
-    const params = [];
+    // Front-line performance: counsellors AND telecallers, since both carry
+    // leads (LEAD_OWNER_ROLES). Manager tiers are excluded — they own a team.
+    const params = [LEAD_OWNER_ROLES];
     let userClause = '';
     if (scope?.user_ids) {
       params.push(scope.user_ids);
@@ -366,7 +363,7 @@ router.get('/counselor-performance', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN
          LEFT JOIN leads l ON l.assigned_to = u.id
          LEFT JOIN calls c ON c.user_id = u.id
          LEFT JOIN message_log ml ON ml.user_id = u.id
-        WHERE u.deleted_at IS NULL AND u.role = 'counsellor' ${userClause}
+        WHERE u.deleted_at IS NULL AND u.role = ANY($1) ${userClause}
         GROUP BY u.id, u.name ORDER BY converted DESC NULLS LAST`,
       params,
     );
@@ -393,14 +390,15 @@ router.get('/counselor-performance', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN
 router.get('/leaderboard', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const scope = await computeScope(req);
-    // Counsellor leaderboard, specifically — a manager or admin occasionally
+    // Front-line leaderboard, specifically — a manager or admin occasionally
     // moving a lead themselves (e.g. completing a discount-gated conversion
-    // on approval) shouldn't crowd out the counsellors this is meant to rank.
+    // on approval) shouldn't crowd out the counsellors/telecallers this is
+    // meant to rank.
     const conds = [
       `la.type = 'stage_changed'`, `(la.metadata_json->>'converted')::boolean = true`,
-      `la.user_id IS NOT NULL`, `u.deleted_at IS NULL`, `u.role = 'counsellor'`,
+      `la.user_id IS NOT NULL`, `u.deleted_at IS NULL`, `u.role = ANY($1)`,
     ];
-    const params = [];
+    const params = [LEAD_OWNER_ROLES];
     if (scope?.user_ids) {
       params.push(scope.user_ids);
       conds.push(`la.user_id = ANY($${params.length}::uuid[])`);
@@ -454,7 +452,7 @@ router.get('/leaderboard', requireRole(...MANAGER_TIER_ROLES), async (req, res, 
 // row: { channel, status, n }. `channel='call'` rows encode inbound/outbound
 // in the status (`inbound_completed`, `outbound_missed`, …) so the chart can
 // stack them.
-router.get('/communications', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/communications', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const scope = await computeScope(req);
     const params = [];

@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 import { writeAuditLog } from '../../lib/auditLog.js';
 
@@ -47,7 +47,7 @@ router.get('/:id', validate({ params: idParam }), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: dripSchema }), async (req, res, next) => {
+router.post('/', requireRole(...MANAGER_TIER_ROLES), validate({ body: dripSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -58,7 +58,7 @@ router.post('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLE
   } catch (err) { next(err); }
 });
 
-router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: dripSchema.partial() }), async (req, res, next) => {
+router.put('/:id', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: dripSchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -76,7 +76,7 @@ router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT
   catch (err) { next(err); }
 });
 
-router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/:id/toggle', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `UPDATE campaigns_drip SET active = NOT active WHERE id = $1 AND deleted_at IS NULL RETURNING *`, [req.params.id]);
     // Only the "turned on" transition matters for audit — an ongoing drip is
@@ -98,7 +98,7 @@ router.post('/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
 });
 
 // Rules (steps)
-router.post('/:id/rules', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: ruleSchema }), async (req, res, next) => {
+router.post('/:id/rules', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: ruleSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -110,7 +110,7 @@ router.post('/:id/rules', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TE
   } catch (err) { next(err); }
 });
 
-router.put('/:id/rules/:rid', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: ruleIdParams, body: ruleSchema.partial() }), async (req, res, next) => {
+router.put('/:id/rules/:rid', requireRole(...MANAGER_TIER_ROLES), validate({ params: ruleIdParams, body: ruleSchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -124,7 +124,7 @@ router.put('/:id/rules/:rid', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTE
   } catch (err) { next(err); }
 });
 
-router.delete('/:id/rules/:rid', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: ruleIdParams }), async (req, res, next) => {
+router.delete('/:id/rules/:rid', requireRole(...MANAGER_TIER_ROLES), validate({ params: ruleIdParams }), async (req, res, next) => {
   try { await tenantQuery(req.tenant, `DELETE FROM campaigns_drip_rules WHERE id = $1 AND drip_id = $2`, [req.params.rid, req.params.id]); res.status(204).end(); }
   catch (err) { next(err); }
 });

@@ -64,8 +64,22 @@ export const processLeadgen = async (tenant, integration, config, change) => {
   const whatsapp = digits ? (digits.length === 10 ? `91${digits}` : digits) : null;
 
   // Attribution: channel = Facebook (or config default), source, campaign.
-  const channelName = config?.default_channel || 'Facebook';
-  const sourceName = config?.default_source || 'Facebook Lead Ads';
+  //
+  // Meta delivers Instagram lead ads on this SAME leadgen webhook, so a lead
+  // that actually came from Instagram would otherwise be filed as Facebook —
+  // and route to the Facebook pool rather than the Instagram one (see
+  // lib/leadOrigin.js, which classifies off first_touch_channel).
+  //
+  // The Graph leadgen node exposes `platform` ('ig' | 'fb') on recent API
+  // versions. We read it opportunistically: when it says Instagram we stamp
+  // the Instagram channel, and when the field is absent (older API version, or
+  // a response that omits it) we fall through to exactly the previous
+  // behaviour. `config.default_channel`, when an admin has set one, always
+  // wins — it's an explicit override.
+  const isInstagram = String(lead?.platform || '').toLowerCase() === 'ig'
+    || String(lead?.platform || '').toLowerCase() === 'instagram';
+  const channelName = config?.default_channel || (isInstagram ? 'Instagram' : 'Facebook');
+  const sourceName = config?.default_source || (isInstagram ? 'Instagram Lead Ads' : 'Facebook Lead Ads');
   const channelId = await resolveDictId(tenant, 'lead_channels', channelName);
   const sourceId = await resolveDictId(tenant, 'lead_sources_dict', sourceName);
   const campaignId = fbCampaignName ? await resolveDictId(tenant, 'lead_campaigns_dict', fbCampaignName) : null;
@@ -88,7 +102,7 @@ export const processLeadgen = async (tenant, integration, config, change) => {
     const { createLead } = await import('../leads/service.js');
     // Null actor → tenant-wide round-robin via the assignment rule.
     const created = await createLead(tenant, null, input, { on_duplicate: 'warn' });
-    logger.info({ tenantId: tenant.id, leadgenId, leadId: created?.id }, 'FB lead created');
+    logger.info({ tenantId: tenant.id, leadgenId, leadId: created?.id, platform: lead?.platform ?? null }, 'FB lead created');
     return created?.id ?? null;
   } catch (err) {
     logger.error({ tenantId: tenant.id, leadgenId, err: err.message }, 'FB lead create failed');

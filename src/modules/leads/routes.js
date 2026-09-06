@@ -6,7 +6,7 @@ import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { requireRole } from '../../middleware/rbac.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { forbidden, notFound } from '../../lib/errors.js';
 import * as controller from './controller.js';
@@ -39,7 +39,7 @@ const blockEditIfConverted = async (req, _res, next) => {
 // lead in the tenant. Admins / managers only; counsellors don't get the button.
 router.post(
   '/auto-assign-unassigned',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER),
+  requireRole(...MANAGER_TIER_ROLES),
   controller.autoAssignUnassigned,
 );
 
@@ -63,7 +63,7 @@ router.get('/stage-counts', validate({ query: listQuery }), controller.stageCoun
 // blank request can't silently select every lead in scope.
 router.post(
   '/bulk-assign',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER),
+  requireRole(...MANAGER_TIER_ROLES),
   validate({ body: bulkAssignSchema }),
   controller.bulkAssign,
 );

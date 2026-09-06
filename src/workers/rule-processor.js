@@ -1,7 +1,8 @@
 import { registerWorker, publish } from '../lib/queue.js';
-import { QUEUE_NAMES, EVENT_TYPES } from '../config/constants.js';
+import { QUEUE_NAMES, EVENT_TYPES, LEAD_OWNER_ROLES } from '../config/constants.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { evaluateCondition, materializeActions } from '../services/rule-engine.js';
+import { resolveRoutingPoolAssignee, recordPoolAssignment } from '../modules/lead-routing/service.js';
 import { logger } from '../lib/logger.js';
 
 // Assignment + scoring + generic rules engine.
@@ -61,6 +62,67 @@ registerWorker(QUEUE_NAMES.EVENTS, async ({ data }) => {
 // the pool only narrows *who* is eligible. Omit it (default) for the
 // tenant-wide behaviour used by admin creates and the bulk "auto-assign
 // unassigned" button.
+// Write one auto-assignment through every surface that has to know about it:
+// the denormalized owner on `leads`, the append-only `lead_assignments`
+// ledger, the `lead_activities` timeline, the events queue and the websocket.
+// Extracted so the routing-pool path and the assignment-rules path commit
+// IDENTICALLY — the two used to be one inline block and must not drift.
+//
+// `summary` / `payload` describe which mechanism picked the owner.
+const commitAssignment = async (tenant, lead, targetUser, { summary, payload }) => {
+  // Snap manager_id + branch_id to the new owner so the hierarchy chip on the
+  // LeadCard and branch scoping reflect reality. Mirrors the manual reassign
+  // path in modules/lead-assignments.
+  const { rows: mgrRows } = await tenantQuery(
+    tenant,
+    `SELECT manager_id, branch_id FROM users WHERE id = $1`,
+    [targetUser],
+  );
+  const newManagerId = mgrRows[0]?.manager_id ?? null;
+  const newBranchId = mgrRows[0]?.branch_id ?? null;
+  await tenantQuery(
+    tenant,
+    `UPDATE leads SET assigned_to = $2, manager_id = $3, branch_id = $4, last_activity_at = now() WHERE id = $1`,
+    [lead.id, targetUser, newManagerId, newBranchId],
+  );
+  // Close any still-active ledger row before appending the new one —
+  // `one_active_assignment_per_lead` is a partial UNIQUE index, so inserting a
+  // second active row would throw. A no-op for the common
+  // never-been-assigned case; it's the allowReassign callers that need it.
+  // The old row is closed, never deleted: the ownership history is the point.
+  await tenantQuery(
+    tenant,
+    `UPDATE lead_assignments SET is_active = false, status = 'closed' WHERE lead_id = $1 AND is_active`,
+    [lead.id],
+  );
+  await tenantQuery(tenant, `INSERT INTO lead_assignments (lead_id, assigned_to, assignment_type, is_active, status) VALUES ($1,$2,'auto_assign',true,'open')`, [lead.id, targetUser]);
+  // Timeline visibility: also drop a row in lead_activities so the
+  // "Counselor Activity" filter on the timeline modal sees this event.
+  await tenantQuery(
+    tenant,
+    `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+     VALUES ($1, NULL, 'auto_assign', $2, $3::jsonb)`,
+    [lead.id, summary, JSON.stringify({ assigned_to: targetUser, ...payload })],
+  );
+  await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.LEAD_ASSIGNED, {
+    type: EVENT_TYPES.LEAD_ASSIGNED,
+    tenantId: tenant.id,
+    occurredAt: new Date().toISOString(),
+    entityType: 'lead',
+    entityId: lead.id,
+    payload: { assigned_to: targetUser, ...payload },
+  });
+  // Real-time push to the new owner + their managers + admins.
+  const { notifyLeadChange } = await import('../lib/socket.js');
+  notifyLeadChange({
+    tenant,
+    lead: { id: lead.id, name: lead.name, assigned_to: targetUser },
+    type: 'lead.assigned',
+    actor_id: null,
+    payload: { ...payload, auto: true },
+  }).catch(() => {});
+};
+
 export const applyAssignment = async (tenant, lead, { restrictPool = null, allowReassign = false } = {}) => {
   // GUARD: never silently re-route a lead that already has an owner. This
   // function unconditionally overwrote assigned_to, so ANY path that reached
@@ -73,53 +135,45 @@ export const applyAssignment = async (tenant, lead, { restrictPool = null, allow
     const { rows: [cur] } = await tenantQuery(tenant, `SELECT assigned_to FROM leads WHERE id = $1`, [lead.id]);
     if (cur?.assigned_to) return null; // already owned → no-op, keep the owner
   }
+
+  // ---- Source-based routing pools take precedence -----------------------
+  // "WhatsApp -> Person X", "WhatsApp + Facebook + Instagram -> Z + B".
+  // These are checked FIRST because they are the specific, admin-configured
+  // intent; the assignment_rules engine below is the tenant-wide default.
+  // A null result means no pool claims this lead's origin (or none has an
+  // eligible member) and we fall through to the rules exactly as before.
+  //
+  // `lead` here may be a freshly-built snapshot rather than a DB row, so read
+  // the attribution columns the classifier needs when they're absent.
+  let originLead = lead;
+  if (lead.first_touch_channel === undefined && lead.first_touch_source === undefined) {
+    const { rows: [row] } = await tenantQuery(
+      tenant,
+      `SELECT first_touch_channel, first_touch_source FROM leads WHERE id = $1`,
+      [lead.id],
+    );
+    if (row) originLead = { ...lead, ...row };
+  }
+  const pooled = await resolveRoutingPoolAssignee(tenant, originLead, { restrictPool });
+  if (pooled) {
+    await commitAssignment(tenant, lead, pooled.user_id, {
+      summary: `Auto-assigned by ${pooled.origin} routing pool`,
+      payload: { routing_pool_id: pooled.pool.id, origin: pooled.origin },
+    });
+    await recordPoolAssignment(tenant, pooled.pool.id, pooled.user_id);
+    return { assigned_to: pooled.user_id, routing_pool_id: pooled.pool.id, origin: pooled.origin };
+  }
+
   const { rows: rules } = await tenantQuery(tenant, `SELECT * FROM assignment_rules WHERE is_active AND deleted_at IS NULL ORDER BY priority`);
   for (const rule of rules) {
     if (!evaluateCondition(rule.condition_json, { lead })) continue;
     const targetUser = await pickTarget(tenant, rule, restrictPool);
     if (!targetUser) continue;
-    // Snap manager_id + branch_id to the new counsellor so the hierarchy chip
-    // on the LeadCard and branch scoping reflect reality. Mirrors the manual
-    // reassign path in modules/lead-assignments.
-    const { rows: mgrRows } = await tenantQuery(
-      tenant,
-      `SELECT manager_id, branch_id FROM users WHERE id = $1`,
-      [targetUser],
-    );
-    const newManagerId = mgrRows[0]?.manager_id ?? null;
-    const newBranchId = mgrRows[0]?.branch_id ?? null;
-    await tenantQuery(
-      tenant,
-      `UPDATE leads SET assigned_to = $2, manager_id = $3, branch_id = $4, last_activity_at = now() WHERE id = $1`,
-      [lead.id, targetUser, newManagerId, newBranchId],
-    );
-    await tenantQuery(tenant, `INSERT INTO lead_assignments (lead_id, assigned_to, assignment_type, is_active, status) VALUES ($1,$2,'auto_assign',true,'open')`, [lead.id, targetUser]);
-    // Timeline visibility: also drop a row in lead_activities so the
-    // "Counselor Activity" filter on the timeline modal sees this event.
-    await tenantQuery(
-      tenant,
-      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-       VALUES ($1, NULL, 'auto_assign', $2, $3::jsonb)`,
-      [lead.id, 'Auto-assigned by rule', JSON.stringify({ assigned_to: targetUser, rule_id: rule.id })],
-    );
-    await tenantQuery(tenant, `UPDATE assignment_rule_state SET last_assigned_user_id = $2, last_assigned_at = now(), total_assignments = total_assignments + 1 WHERE rule_id = $1`, [rule.id, targetUser]);
-    await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.LEAD_ASSIGNED, {
-      type: EVENT_TYPES.LEAD_ASSIGNED,
-      tenantId: tenant.id,
-      occurredAt: new Date().toISOString(),
-      entityType: 'lead',
-      entityId: lead.id,
-      payload: { assigned_to: targetUser, rule_id: rule.id },
+    await commitAssignment(tenant, lead, targetUser, {
+      summary: 'Auto-assigned by rule',
+      payload: { rule_id: rule.id },
     });
-    // Real-time push to the counsellor + their managers + admins.
-    const { notifyLeadChange } = await import('../lib/socket.js');
-    notifyLeadChange({
-      tenant,
-      lead: { id: lead.id, name: lead.name, assigned_to: targetUser },
-      type: 'lead.assigned',
-      actor_id: null,
-      payload: { rule_id: rule.id, auto: true },
-    }).catch(() => {});
+    await tenantQuery(tenant, `UPDATE assignment_rule_state SET last_assigned_user_id = $2, last_assigned_at = now(), total_assignments = total_assignments + 1 WHERE rule_id = $1`, [rule.id, targetUser]);
     return { assigned_to: targetUser, rule_id: rule.id };
   }
   return null; // no rule matched → caller treats as "no-op"
@@ -133,43 +187,45 @@ const pickTarget = async (tenant, rule, restrictPool = null) => {
   }
   if (rule.target_users) candidates.push(...rule.target_users);
 
-  // Filter candidates down to ACTIVE COUNSELLORS only. `leads.assigned_to`
-  // must always point to a counsellor — sales_managers and super_admins
-  // own a TEAM of counsellors, they don't directly carry leads in their
-  // queue. Saved rule configs sometimes drift (admin pastes manager UUIDs
-  // into target_users, a counsellor gets promoted to manager, etc.); we
-  // refuse to honour those entries instead of silently corrupting
+  // Filter candidates down to ACTIVE FRONT-LINE users only (LEAD_OWNER_ROLES
+  // — counsellor or telecaller). `leads.assigned_to` must always point at one
+  // of those; manager tiers own a TEAM, they don't directly carry leads in
+  // their queue. Saved rule configs sometimes drift (admin pastes manager
+  // UUIDs into target_users, a counsellor gets switched to a telecaller_lead,
+  // etc.); we refuse to honour those entries instead of silently corrupting
   // assigned_to. Same query is the implicit pool when target_users is
-  // empty, so both paths produce a valid set of counsellors.
+  // empty, so both paths produce a valid set of owners.
   if (candidates.length) {
     const { rows: validRows } = await tenantQuery(
       tenant,
       `SELECT id FROM users
         WHERE id = ANY($1::uuid[])
-          AND role = 'counsellor'
+          AND role = ANY($2)
           AND is_active = true
           AND deleted_at IS NULL`,
-      [candidates],
+      [candidates, LEAD_OWNER_ROLES],
     );
     const valid = new Set(validRows.map((u) => u.id));
     // Preserve the rule's intended order (matters for round-robin
-    // determinism) while removing the non-counsellor entries.
+    // determinism) while removing the ineligible entries.
     const filtered = candidates.filter((id) => valid.has(id));
     candidates.length = 0;
     candidates.push(...filtered);
   }
 
   // No target team / no valid target_users → fall back to every active
-  // counsellor in the tenant. This makes the auto-seeded "Default round-robin"
-  // rule work out of the box without admins having to pick users first.
+  // front-line user in the tenant. This makes the auto-seeded "Default
+  // round-robin" rule work out of the box without admins having to pick
+  // users first.
   if (!candidates.length) {
-    const { rows: counsellors } = await tenantQuery(
+    const { rows: owners } = await tenantQuery(
       tenant,
       `SELECT id FROM users
-        WHERE role = 'counsellor' AND is_active = true AND deleted_at IS NULL
+        WHERE role = ANY($1) AND is_active = true AND deleted_at IS NULL
         ORDER BY created_at`,
+      [LEAD_OWNER_ROLES],
     );
-    candidates.push(...counsellors.map((u) => u.id));
+    candidates.push(...owners.map((u) => u.id));
   }
 
   // Narrow to the caller-supplied pool (e.g. a manager's own counsellor
@@ -185,19 +241,20 @@ const pickTarget = async (tenant, rule, restrictPool = null) => {
     candidates.push(...narrowed);
   }
 
-  // Empty pool → use the fallback ONLY if it is itself an active counsellor.
-  // A fallback pointing at a branch_manager / admin (common: admins paste a
-  // manager UUID, or a counsellor gets promoted) must NOT receive leads —
-  // leads.assigned_to must always be a counsellor. If the fallback isn't a
-  // valid counsellor we return null so the caller leaves the lead UNASSIGNED
-  // rather than piling every lead onto one manager (the SpeedUp incident).
+  // Empty pool → use the fallback ONLY if it is itself an active front-line
+  // user. A fallback pointing at a branch_manager / admin (common: admins
+  // paste a manager UUID, or a counsellor gets switched to a manager role)
+  // must NOT receive leads — leads.assigned_to must always hold a
+  // LEAD_OWNER_ROLES user. If the fallback isn't valid we return null so the
+  // caller leaves the lead UNASSIGNED rather than piling every lead onto one
+  // manager (the SpeedUp incident).
   if (!candidates.length) {
     if (!rule.fallback_user_id) return null;
     const { rows: [fb] } = await tenantQuery(
       tenant,
       `SELECT id FROM users
-        WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
-      [rule.fallback_user_id],
+        WHERE id = $1 AND role = ANY($2) AND is_active = true AND deleted_at IS NULL`,
+      [rule.fallback_user_id, LEAD_OWNER_ROLES],
     );
     return fb ? fb.id : null;
   }

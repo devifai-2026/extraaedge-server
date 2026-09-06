@@ -13,6 +13,17 @@ export const SYSTEM_TENANT_ROLES = Object.freeze({
   BRANCH_MANAGER: 'branch_manager',
   SALES_MANAGER: 'sales_manager',
   COUNSELLOR: 'counsellor',
+  // The front line splits three ways under a sales_manager: counsellors,
+  // telecaller leads, and telecallers.
+  //
+  // TELECALLER_LEAD runs a team of telecallers. It scopes like a
+  // sales_manager (own downstream subtree — see TEAM_SCOPED_MANAGER_ROLES)
+  // and, like every manager tier, does NOT carry leads itself.
+  TELECALLER_LEAD: 'telecaller_lead',
+  // TELECALLER works assigned leads exactly as a counsellor does, and is a
+  // valid leads.assigned_to owner — see LEAD_OWNER_ROLES. Reports to a
+  // telecaller_lead (or straight to the sales_manager).
+  TELECALLER: 'telecaller',
   // Tenant-level role for staff who handle CONVERTED leads (post-enrollment
   // account management). No team beneath them; they report to their branch
   // manager (or directly to the tenant's super_admin). Scoped lead
@@ -32,6 +43,24 @@ export const SYSTEM_TENANT_ROLES = Object.freeze({
 export const TEAM_SCOPED_MANAGER_ROLES = Object.freeze([
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  // telecaller_lead sits one tier BELOW sales_manager but scopes identically:
+  // their own downstream subtree (their telecallers).
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+]);
+
+// Roles a lead may actually be assigned to. `leads.assigned_to` must always
+// point at an ACTIVE user holding one of these — manager tiers own a TEAM,
+// they don't carry leads in a personal queue. Enforced by
+// assertLeadOwnerTarget() in modules/leads/repo.js (the shared insert/update
+// sink) plus the assignment engine, the bulk-import resolver and the
+// integration pools.
+//
+// Historically this was the single literal 'counsellor'; telecallers work
+// leads the same way, so both buckets are owners now. Anything added here
+// must be a front-line role with no team beneath it.
+export const LEAD_OWNER_ROLES = Object.freeze([
+  SYSTEM_TENANT_ROLES.COUNSELLOR,
+  SYSTEM_TENANT_ROLES.TELECALLER,
 ]);
 
 // Roles that get admin-like route access alongside super_admin. Used to
@@ -43,11 +72,16 @@ export const ADMIN_TIER_ROLES = Object.freeze([
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
 ]);
 
-// Convenience spread for the very common "admin + both manager tiers" gate.
+// Convenience spread for the very common "admin + every manager tier" gate.
+// telecaller_lead is included: it runs a team exactly as a sales_manager does,
+// and every route behind this gate scopes its rows through the scope helpers
+// (TEAM_SCOPED_MANAGER_ROLES), so a telecaller_lead reaching one of these
+// endpoints still only sees their own subtree.
 export const MANAGER_TIER_ROLES = Object.freeze([
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
 ]);
 
 export const TENANT_STATUS = Object.freeze({

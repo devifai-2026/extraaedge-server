@@ -1,23 +1,27 @@
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { forbidden } from '../../lib/errors.js';
+import { LEAD_OWNER_ROLES } from '../../config/constants.js';
+import { originSqlPredicate } from '../../lib/leadOrigin.js';
 
-// INVARIANT: leads.assigned_to must ALWAYS be an active, non-deleted counsellor.
-// Managers/admins own a TEAM of counsellors, they don't carry leads directly.
+// INVARIANT: leads.assigned_to must ALWAYS be an active, non-deleted user in a
+// front-line role — LEAD_OWNER_ROLES, i.e. counsellor or telecaller. Manager
+// tiers (sales_manager, telecaller_lead, branch_manager, admin) own a TEAM,
+// they don't carry leads directly.
 // This guard is enforced at the two shared DB sinks (insertLead + updateLead)
 // so EVERY write path — create, update (PUT /leads/:id), bulk-refer, quick-add,
 // workflow assign, bulk-import — is covered, not just the manual reassign route.
 // null/undefined (unassign, or "leave to round-robin") is always allowed.
 // Historically several paths wrote assigned_to with no role check, which is how
 // branch_manager / sales_manager ended up owning leads (the SpeedUp incident).
-const assertCounsellorTarget = async (client, assignedTo) => {
+const assertLeadOwnerTarget = async (client, assignedTo) => {
   if (assignedTo === null || assignedTo === undefined) return;
   const { rows } = await client.query(
     `SELECT 1 FROM users
-      WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
-    [assignedTo],
+      WHERE id = $1 AND role = ANY($2) AND is_active = true AND deleted_at IS NULL`,
+    [assignedTo, LEAD_OWNER_ROLES],
   );
   if (!rows[0]) {
-    throw forbidden('Leads can only be assigned to an active counsellor');
+    throw forbidden('Leads can only be assigned to an active counsellor or telecaller');
   }
 };
 
@@ -107,7 +111,7 @@ export const findDuplicates = async (
 
 export const insertLead = async (tenant, input, created_by) => tenantTx(tenant, async (client) => {
   // Enforce the counsellor-only ownership invariant at the shared sink.
-  await assertCounsellorTarget(client, input.assigned_to);
+  await assertLeadOwnerTarget(client, input.assigned_to);
   // Main lead row.
   //
   // `followups` is a virtual array passed by callers (manual create form +
@@ -517,7 +521,7 @@ export const updateLead = async (tenant, id, updates, actorId = null) => tenantT
   // updateLead caller) tries to change assigned_to. Only validate when the key
   // is actually present with a non-null value — clearing it (unassign) is fine.
   if ('assigned_to' in scalar && scalar.assigned_to != null) {
-    await assertCounsellorTarget(client, scalar.assigned_to);
+    await assertLeadOwnerTarget(client, scalar.assigned_to);
   }
 
   // Snapshot stage/sub-stage BEFORE the UPDATE so we can detect a real
@@ -1016,14 +1020,11 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
   // Lead origin — the acquisition channel a lead first entered through, read
   // from first_touch_source/first_touch_channel (set at createLead time). This
   // powers the Lead Manager "WhatsApp leads" / "Facebook leads" quick filters.
-  if (lead_origin === 'whatsapp') {
-    conds.push(`(l.first_touch_source ILIKE 'whatsapp' OR l.first_touch_channel ILIKE 'whatsapp')`);
-  } else if (lead_origin === 'facebook') {
-    conds.push(`(l.first_touch_source ILIKE '%facebook%' OR l.first_touch_channel ILIKE '%facebook%')`);
-  } else if (lead_origin === 'justdial') {
-    conds.push(`(l.first_touch_source ILIKE '%justdial%' OR l.first_touch_channel ILIKE '%justdial%')`);
-  } else if (lead_origin === 'website') {
-    conds.push(`(l.first_touch_source ILIKE '%website%' OR l.first_touch_channel ILIKE '%website%')`);
+  // Predicate comes from lib/leadOrigin.js so this filter, the analytics
+  // buckets and the routing pools all agree on what "a WhatsApp lead" is.
+  if (lead_origin) {
+    const originPred = originSqlPredicate(lead_origin, 'l');
+    if (originPred) conds.push(originPred);
   }
   if (date_from) { params.push(date_from); conds.push(`l.created_at >= $${params.length}::timestamptz`); }
   if (date_to) { params.push(date_to); conds.push(`l.created_at <= $${params.length}::timestamptz`); }
@@ -1402,15 +1403,16 @@ export const stageCounts = async (tenant, opts = {}, scope) => {
 // stage (lowest order_index). This matches the "Fresh → Untouched → Working"
 // lifecycle and prevents leads from sitting in "no stage" once they have an owner.
 export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, reason, filter, scope }) => tenantTx(tenant, async (client) => {
-  // INVARIANT: leads.assigned_to must be an active counsellor (managers own a
-  // team, not leads). Reject a non-counsellor target before touching any lead —
-  // this is what stops "reassign everything onto a branch_manager".
+  // INVARIANT: leads.assigned_to must be an active front-line user
+  // (LEAD_OWNER_ROLES — counsellor or telecaller); manager tiers own a team,
+  // not leads. Reject an ineligible target before touching any lead — this is
+  // what stops "reassign everything onto a branch_manager".
   const { rows: tgt } = await client.query(
-    `SELECT 1 FROM users WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
-    [assigned_to],
+    `SELECT 1 FROM users WHERE id = $1 AND role = ANY($2) AND is_active = true AND deleted_at IS NULL`,
+    [assigned_to, LEAD_OWNER_ROLES],
   );
   if (!tgt[0]) {
-    const err = new Error('Leads can only be assigned to an active counsellor');
+    const err = new Error('Leads can only be assigned to an active counsellor or telecaller');
     err.status = 403; err.code = 'FORBIDDEN'; err.isAppError = true;
     throw err;
   }

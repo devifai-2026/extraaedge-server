@@ -3,7 +3,7 @@ import * as discountRepo from '../lead-discounts/repo.js';
 import * as usersRepo from '../users/repo.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { notFound, forbidden } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 
 // A counsellor may only touch the fee offer for a lead they own.
 // branch_manager / sales_manager are scoped to their branch / team subtree —
@@ -12,7 +12,8 @@ import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 // carry branch_id + assigned_to for the manager checks to work.
 const NO_BRANCH = '00000000-0000-0000-0000-000000000000';
 const assertLeadOwnership = async (tenant, lead, actor) => {
-  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+  // Front line (counsellor / telecaller) — own leads only.
+  if (LEAD_OWNER_ROLES.includes(actor?.role)) {
     if (lead.assigned_to !== actor.id) throw forbidden('This lead is not assigned to you');
     return;
   }
@@ -22,7 +23,8 @@ const assertLeadOwnership = async (tenant, lead, actor) => {
     if (lead.branch_id !== branchId) throw forbidden('This lead is outside your branch');
     return;
   }
-  if (actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  // sales_manager / telecaller_lead — subtree-scoped tiers.
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(actor?.role)) {
     const team = await usersRepo.teamHierarchy(tenant, actor.id);
     if (!team.includes(lead.assigned_to)) throw forbidden('This lead is outside your team');
   }

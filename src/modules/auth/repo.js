@@ -164,3 +164,30 @@ export const findRefreshToken = async (tenant, token_hash) => {
 export const revokeRefreshToken = async (tenant, id) => {
   await tenantQuery(tenant, `UPDATE user_refresh_tokens SET revoked_at = now() WHERE id = $1`, [id]);
 };
+
+// Revoke EVERY live session + refresh token for one user.
+//
+// Needed because role and allowedTabs are minted into the access token at
+// login and never re-checked against the DB (middleware/auth.js reads them
+// straight off the JWT). Without this, someone whose role was just changed
+// keeps their old permissions until the access token expires. Killing the
+// refresh tokens too means the next request has to re-authenticate and pick
+// up the new role rather than silently rotating the old claims forward.
+//
+// Rows are marked revoked, never deleted — user_sessions is the login-history
+// surface behind the Users page.
+export const revokeAllForUser = async (tenant, user_id) => {
+  await tenantQuery(
+    tenant,
+    `UPDATE user_refresh_tokens SET revoked_at = now()
+      WHERE user_id = $1 AND revoked_at IS NULL`,
+    [user_id],
+  );
+  const { rowCount } = await tenantQuery(
+    tenant,
+    `UPDATE user_sessions SET revoked_at = now()
+      WHERE user_id = $1 AND revoked_at IS NULL`,
+    [user_id],
+  );
+  return rowCount;
+};

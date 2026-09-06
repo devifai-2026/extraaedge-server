@@ -15,7 +15,7 @@
 //   non-counsellor    → OWNER_NOT_COUNSELLOR
 //   active counsellor → { user: { id, manager_id } }
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { LEAD_OWNER_ROLES } from '../../config/constants.js';
 
 export const createOwnerCache = () => new Map(); // lowercased email -> user | null
 
@@ -46,12 +46,12 @@ export const resolveOwner = async (tenant, cache, email) => {
       },
     };
   }
-  if (user.role !== SYSTEM_TENANT_ROLES.COUNSELLOR) {
+  if (!LEAD_OWNER_ROLES.includes(user.role)) {
     return {
       ok: false,
       error: {
         code: 'OWNER_NOT_COUNSELLOR',
-        message: `lead_owner_email "${email}" belongs to a ${user.role}, not a counsellor — use the counsellor who actually guided this student, or leave the column blank`,
+        message: `lead_owner_email "${email}" belongs to a ${user.role}, which cannot own a lead — use the counsellor or telecaller who actually guided this student, or leave the column blank`,
       },
     };
   }

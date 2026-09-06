@@ -6,7 +6,9 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import {
+  QUEUE_NAMES, EVENT_TYPES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES,
+} from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 
 const router = express.Router();
@@ -39,9 +41,9 @@ router.get('/lead/:leadId', validate({ params: z.object({ leadId: z.string().uui
 
 // Reassign target candidates for the CURRENT actor — the exact set the POST
 // below will accept, so the FE picker never shows someone the server rejects.
-//   super_admin   → every active counsellor
+//   super_admin   → every active counsellor / telecaller
 //   manager       → their team hierarchy (downward subtree)
-//   counsellor    → their managers + peers who share a manager (NOT just their
+//   front line    → their managers + peers who share a manager (NOT just their
 //                   own downward subtree, which for a leaf counsellor is empty
 //                   — that was the "No options" bug).
 router.get('/targets', async (req, res, next) => {
@@ -52,13 +54,13 @@ router.get('/targets', async (req, res, next) => {
         req.tenant,
         `SELECT ${COLS} FROM users u
           WHERE u.deleted_at IS NULL AND u.is_active = true
-            AND u.role = 'counsellor' AND u.id <> $1
+            AND u.role = ANY($2) AND u.id <> $1
           ORDER BY u.name`,
-        [req.user.id],
+        [req.user.id, LEAD_OWNER_ROLES],
       );
       return res.json({ data: rows, meta: { requestId: req.id } });
     }
-    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    if (LEAD_OWNER_ROLES.includes(req.user.role)) {
       // Same allowed-target set the POST enforces: my managers + peers sharing
       // any of my managers + my primary manager; excluding myself.
       const { rows } = await tenantQuery(
@@ -100,31 +102,36 @@ router.get('/targets', async (req, res, next) => {
 // scope below decides who can reassign which lead to whom.
 router.post(
   '/',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR),
+  requireRole(
+    SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+    SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+    ...LEAD_OWNER_ROLES,
+  ),
   validate({ body: assignSchema }),
   async (req, res, next) => {
     try {
       const { lead_id, assigned_to, assignment_type, reason } = req.body;
       const { forbidden } = await import('../../lib/errors.js');
 
-      // INVARIANT: leads.assigned_to must always point to an ACTIVE COUNSELLOR.
-      // Managers/admins own a TEAM of counsellors, they don't carry leads in
-      // their own queue. Without this check a branch_manager/sales_manager could
-      // reassign leads onto THEMSELVES (teamHierarchy includes the manager, so
-      // the scope check below passes for a self-target) — which is exactly the
-      // mass "all leads → one branch manager" incident. Reject any non-counsellor
-      // target here, before we touch the lead.
+      // INVARIANT: leads.assigned_to must always point to an ACTIVE front-line
+      // user (LEAD_OWNER_ROLES — counsellor or telecaller). Manager tiers own a
+      // TEAM, they don't carry leads in their own queue. Without this check a
+      // branch_manager/sales_manager could reassign leads onto THEMSELVES
+      // (teamHierarchy includes the manager, so the scope check below passes
+      // for a self-target) — which is exactly the mass "all leads → one branch
+      // manager" incident. Reject any ineligible target here, before we touch
+      // the lead.
       const { rows: targetRows } = await tenantQuery(
         req.tenant,
-        `SELECT 1 FROM users WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
-        [assigned_to],
+        `SELECT 1 FROM users WHERE id = $1 AND role = ANY($2) AND is_active = true AND deleted_at IS NULL`,
+        [assigned_to, LEAD_OWNER_ROLES],
       );
       if (!targetRows[0]) {
-        throw forbidden('Leads can only be assigned to an active counsellor');
+        throw forbidden('Leads can only be assigned to an active counsellor or telecaller');
       }
 
-      // Sales-manager scope: the new owner must be inside this manager's team
-      // hierarchy. Admins can reassign to any active counsellor.
+      // Manager scope: the new owner must be inside this manager's team
+      // hierarchy. Admins can reassign to any active front-line user.
       if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
         const { teamHierarchy } = await import('../users/repo.js');
         const teamIds = await teamHierarchy(req.tenant, req.user.id);
@@ -133,12 +140,12 @@ router.post(
         }
       }
 
-      // Counsellor scope: can only reassign leads they currently own, and
-      // only to a teammate (someone who shares one of their managers via
-      // user_managers, or their primary manager via users.manager_id).
-      // The primary manager themselves is also a valid target so a
-      // counsellor can hand a lead "up" to their manager.
-      if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+      // Front-line scope (counsellor / telecaller): can only reassign leads
+      // they currently own, and only to a teammate (someone who shares one of
+      // their managers via user_managers, or their primary manager via
+      // users.manager_id). The primary manager themselves is also a valid
+      // target so a front-line user can hand a lead "up" to their manager.
+      if (LEAD_OWNER_ROLES.includes(req.user.role)) {
         const ownership = await tenantQuery(
           req.tenant,
           `SELECT assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`,

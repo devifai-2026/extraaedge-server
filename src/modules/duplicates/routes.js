@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES, EVENT_TYPES, QUEUE_NAMES } from '../../config/constants.js';
+import { EVENT_TYPES, QUEUE_NAMES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 import { findDuplicates } from '../leads/repo.js';
 import { publish } from '../../lib/queue.js';
@@ -36,7 +36,7 @@ router.post('/check', validate({ body: checkSchema }), async (req, res, next) =>
   } catch (err) { next(err); }
 });
 
-router.post('/check-bulk', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: bulkSchema }), async (req, res, next) => {
+router.post('/check-bulk', requireRole(...MANAGER_TIER_ROLES), validate({ body: bulkSchema }), async (req, res, next) => {
   try {
     const out = [];
     for (const [i, row] of req.body.rows.entries()) {
@@ -48,7 +48,7 @@ router.post('/check-bulk', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_T
   } catch (err) { next(err); }
 });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -66,7 +66,7 @@ router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES
   } catch (err) { next(err); }
 });
 
-router.post('/:matchId/ignore', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: z.object({ matchId: z.string().uuid() }) }), async (req, res, next) => {
+router.post('/:matchId/ignore', requireRole(...MANAGER_TIER_ROLES), validate({ params: z.object({ matchId: z.string().uuid() }) }), async (req, res, next) => {
   try {
     await tenantQuery(
       req.tenant,
@@ -78,7 +78,7 @@ router.post('/:matchId/ignore', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYS
 });
 
 // Merge: move all associated records from merged → surviving, mark merged lead merged_into.
-router.post('/lead/:leadId/merge', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: z.object({ leadId: z.string().uuid() }), body: mergeSchema }), async (req, res, next) => {
+router.post('/lead/:leadId/merge', requireRole(...MANAGER_TIER_ROLES), validate({ params: z.object({ leadId: z.string().uuid() }), body: mergeSchema }), async (req, res, next) => {
   try {
     const merged_lead_id = req.params.leadId;
     const surviving_lead_id = req.body.merge_into_lead_id;

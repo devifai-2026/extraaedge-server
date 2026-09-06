@@ -5,7 +5,7 @@ import * as studentAuth from '../student-auth/service.js';
 import * as coursesRepo from '../courses/repo.js';
 import * as usersRepo from '../users/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 
 // The branch/team an actor's admissions/revenue views (AND workflow actions)
 // should be scoped to. super_admin → their picked branch (?branch_id) or null
@@ -24,7 +24,8 @@ const resolveAdmissionScope = async (tenant, actor, branchId) => {
     const me = await usersRepo.findById(tenant, actor.id);
     return { branchId: me?.branch_id ?? NO_BRANCH, teamIds: null };
   }
-  if (actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  // sales_manager / telecaller_lead — subtree-scoped tiers.
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(actor?.role)) {
     const teamIds = await usersRepo.teamHierarchy(tenant, actor.id);
     return { branchId: null, teamIds };
   }
@@ -121,10 +122,11 @@ export const deleteCenter = (tenant, id) => repo.softDeleteCenter(tenant, id);
 // account_manager / super_admin see all. Enforced by forcing the filter here
 // so nobody can widen it via query params.
 const scopeForActor = async (tenant, q, actor) => {
-  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+  // Front line (counsellor / telecaller) sees only the students they converted.
+  if (LEAD_OWNER_ROLES.includes(actor?.role)) {
     return { ...q, guided_by_counsellor_id: actor.id };
   }
-  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER || actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(actor?.role)) {
     const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, null);
     return { ...q, branchId, teamIds };
   }
@@ -137,7 +139,7 @@ export const get = async (tenant, id, actor) => {
   const row = await repo.findByIdWithRelations(tenant, id);
   if (!row) throw notFound('Admission not found');
   // Counsellors can only open their own converted students' admissions.
-  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR && row.guided_by_counsellor_id !== actor.id) {
+  if (LEAD_OWNER_ROLES.includes(actor?.role) && row.guided_by_counsellor_id !== actor.id) {
     throw forbidden('This admission is not in your scope');
   }
   // branch_manager / sales_manager: theirs branch/team only.
@@ -547,7 +549,7 @@ export const deleteReceipt = async (tenant, id, actor) => {
 export const timeline = async (tenant, id, actor) => {
   const existing = await repo.findById(tenant, id);
   if (!existing) throw notFound('Admission not found');
-  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR && existing.guided_by_counsellor_id !== actor.id) {
+  if (LEAD_OWNER_ROLES.includes(actor?.role) && existing.guided_by_counsellor_id !== actor.id) {
     throw forbidden('This admission is not in your scope');
   }
   await assertAdmissionInScope(tenant, actor, id);
@@ -566,7 +568,7 @@ export const timeline = async (tenant, id, actor) => {
 // without a second round-trip.
 export const timelineByLead = async (tenant, lead_id, actor) => {
   // Counsellors can only view the admission timeline for their OWN leads.
-  if (actor?.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+  if (LEAD_OWNER_ROLES.includes(actor?.role)) {
     const { rows: own } = await tenantQuery(
       tenant,
       `SELECT 1 FROM leads WHERE id = $1 AND assigned_to = $2 AND deleted_at IS NULL`,
@@ -574,8 +576,8 @@ export const timelineByLead = async (tenant, lead_id, actor) => {
     );
     if (!own[0]) throw forbidden('This lead is not in your scope');
   }
-  // branch_manager / sales_manager: theirs branch/team only.
-  if (actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER || actor?.role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  // branch_manager / sales_manager / telecaller_lead: their branch/team only.
+  if (TEAM_SCOPED_MANAGER_ROLES.includes(actor?.role)) {
     const { rows: leadRows } = await tenantQuery(
       tenant,
       `SELECT branch_id, assigned_to FROM leads WHERE id = $1 AND deleted_at IS NULL`,

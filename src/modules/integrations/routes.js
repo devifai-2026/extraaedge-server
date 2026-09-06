@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, resolveTenantById } from '../../db/tenant.js';
 import { sysQuery } from '../../db/system.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 import { encrypt, decrypt, randomToken, hmac, safeEqual } from '../../lib/crypto.js';
 import { notFound } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
@@ -157,12 +157,12 @@ router.post('/inbound/:token', express.json({ limit: '2mb', verify: (req, _res, 
              FROM users u
              LEFT JOIN leads l ON l.assigned_to = u.id AND l.deleted_at IS NULL
                                AND l.first_touch_source ILIKE $2
-            WHERE u.id = ANY($1::uuid[]) AND u.role = 'counsellor'
+            WHERE u.id = ANY($1::uuid[]) AND u.role = ANY($3)
               AND u.is_active = true AND u.deleted_at IS NULL
             GROUP BY u.id
             ORDER BY count(l.id) ASC, u.id
             LIMIT 1`,
-          [pool, sourceName],
+          [pool, sourceName, LEAD_OWNER_ROLES],
         );
         poolAssignee = pr[0]?.id ?? null;
       }
@@ -228,14 +228,14 @@ router.get('/justdial/assignee-pool', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMI
 });
 router.put('/justdial/assignee-pool', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ body: z.object({ pool: z.array(z.string().uuid()) }) }), async (req, res, next) => {
   try {
-    // Keep only ids that are active counsellors — leads must never be assigned
-    // to a non-counsellor (mirrors the ownership invariant).
+    // Keep only ids that are active front-line users (LEAD_OWNER_ROLES) —
+    // leads must never be assigned to a manager tier (the ownership invariant).
     let pool = req.body.pool;
     if (pool.length) {
       const { rows: valid } = await tenantQuery(
         req.tenant,
-        `SELECT id FROM users WHERE id = ANY($1::uuid[]) AND role='counsellor' AND is_active=true AND deleted_at IS NULL`,
-        [pool],
+        `SELECT id FROM users WHERE id = ANY($1::uuid[]) AND role = ANY($2) AND is_active=true AND deleted_at IS NULL`,
+        [pool, LEAD_OWNER_ROLES],
       );
       pool = valid.map((v) => v.id);
     }

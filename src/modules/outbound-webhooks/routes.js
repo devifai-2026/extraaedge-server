@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { randomToken } from '../../lib/crypto.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 
 const router = express.Router();
@@ -23,7 +23,7 @@ const createSchema = z.object({
 const updateSchema = createSchema.partial();
 const idParam = z.object({ id: z.string().uuid() });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `SELECT id, name, target_url, event_types, is_active, created_at, updated_at FROM outbound_webhooks WHERE deleted_at IS NULL ORDER BY name`);
     res.json({ data: rows, meta: { requestId: req.id } });
@@ -77,7 +77,7 @@ router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TEN
   } catch (err) { next(err); }
 });
 
-router.get('/:id/deliveries', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.get('/:id/deliveries', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,

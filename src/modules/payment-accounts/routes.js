@@ -8,7 +8,7 @@ import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 import * as repo from './repo.js';
 import { createSchema, updateSchema, idParam, listQuery, primaryBulkSchema } from './schema.js';
 
@@ -27,8 +27,9 @@ const readRoles = requireRole(
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
-  SYSTEM_TENANT_ROLES.COUNSELLOR,
+  ...LEAD_OWNER_ROLES,
 );
 
 // GET /payment-accounts — list (active by default; ?include_inactive=true for all, ?type=bank|upi)

@@ -3,12 +3,17 @@ import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
 import * as phoneDirectory from './phone-directory.js';
 import { conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
 import { sendPhoneOtp } from '../../lib/providers/whatsapp-wabridge.js';
 import { logger } from '../../lib/logger.js';
+import { writeAuditLog } from '../../lib/auditLog.js';
+import { notifyUser } from '../../lib/socket.js';
+import * as leadRepo from '../leads/repo.js';
+import * as authRepo from '../auth/repo.js';
+import * as routingRepo from '../lead-routing/repo.js';
 
 const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
 
@@ -366,6 +371,157 @@ export const updateUser = async (tenant, id, updates, actor) => {
     await phoneDirectory.releasePhone(existing.phone).catch(() => {});
   }
   return result;
+};
+
+// Open (unconverted, live) leads this user currently owns. The blocker for
+// moving someone OUT of a lead-owning role — their queue has to go somewhere.
+const openLeadsOwnedBy = async (tenant, user_id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id FROM leads
+      WHERE assigned_to = $1 AND deleted_at IS NULL AND converted_at IS NULL`,
+    [user_id],
+  );
+  return rows.map((r) => r.id);
+};
+
+// Move a person between roles — the counsellor / telecaller_lead / telecaller
+// split this exists for, though it works for any bucket.
+//
+// A dedicated endpoint rather than another field on PUT /users/:id, because a
+// role change has consequences a generic patch silently skips:
+//
+//   * the JWT still carries the OLD role and allowedTabs (middleware/auth.js
+//     trusts the token and never re-reads the user row), so sessions must be
+//     revoked or the change doesn't take effect until the token expires;
+//   * a user leaving a lead-owning role leaves their queue pointing at an
+//     owner the ownership invariant now rejects;
+//   * routing pools and assignment rules may still name them;
+//   * nothing was ever written to audit_log.
+//
+// NOTHING IS DELETED. The user row is updated in place, lead handovers append
+// to the lead_assignments ledger, and pools/rules keep their member lists (the
+// resolvers already ignore members who can't currently own a lead — stripping
+// the id would throw away the admin's intent).
+export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_leads_to }, actor, reqMeta = {}) => {
+  const existing = await repo.findById(tenant, id);
+  if (!existing) throw notFound('User not found');
+
+  const scope = await resolveRoleFromRoleId(tenant, role_id);
+  if (!scope) throw notFound('Role not found');
+
+  if (scope === existing.role && role_id === existing.role_id) {
+    throw conflict('User already holds that role');
+  }
+
+  // Never strand a tenant without an admin.
+  if (existing.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN && scope !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    const others = await repo.list(tenant, { role: SYSTEM_TENANT_ROLES.SUPER_ADMIN, is_active: 'true', page: 1, limit: 2 });
+    if (others.total <= 1) throw forbidden('Cannot demote the last super_admin');
+  }
+
+  // A branch_manager may only move people inside their own branch, and never
+  // into an admin / branch-head role. Same guard the create/update paths use.
+  await assertBranchManagerScope(tenant, actor, {
+    targetRole: scope,
+    targetUserId: id,
+    managerId: Array.isArray(manager_ids) ? manager_ids[0] ?? null : null,
+  });
+
+  // ---- Hand over the lead queue, if the new role can't own leads --------
+  const wasOwner = LEAD_OWNER_ROLES.includes(existing.role);
+  const willOwn = LEAD_OWNER_ROLES.includes(scope);
+  let movedLeadIds = [];
+  if (wasOwner && !willOwn) {
+    const openLeadIds = await openLeadsOwnedBy(tenant, id);
+    if (openLeadIds.length) {
+      if (!reassign_leads_to) {
+        throw conflict(
+          `${existing.name} still owns ${openLeadIds.length} open lead(s). A ${scope} cannot own leads — choose who should take them over.`,
+          { open_lead_count: openLeadIds.length, requires: 'reassign_leads_to' },
+        );
+      }
+      if (reassign_leads_to === id) {
+        throw conflict('Cannot hand the leads back to the same user');
+      }
+      // bulkAssign enforces the ownership invariant on the target, closes each
+      // old lead_assignments row and appends a new one, and moves stageless
+      // leads into the first active stage — the same path a manual bulk
+      // reassign takes.
+      await leadRepo.bulkAssign(tenant, {
+        lead_ids: openLeadIds,
+        assigned_to: reassign_leads_to,
+        assigned_by: actor?.id ?? null,
+        reason: `Role switch: ${existing.role} → ${scope}`,
+      });
+      movedLeadIds = openLeadIds;
+    }
+  }
+
+  // ---- Flip the role ---------------------------------------------------
+  // manager_ids defaults to keeping the current primary manager, so a switch
+  // that doesn't mention reporting lines doesn't quietly orphan the user.
+  const nextManagerIds = Array.isArray(manager_ids)
+    ? manager_ids
+    : (existing.manager_id ? [existing.manager_id] : []);
+  await repo.setManagers(tenant, id, nextManagerIds);
+  const updated = await repo.update(tenant, id, {
+    role: scope,
+    role_id,
+    manager_id: nextManagerIds[0] ?? null,
+  });
+
+  // ---- Make it take effect + leave a trail -----------------------------
+  await writeAuditLog(tenant, {
+    userId: actor?.id ?? null,
+    action: 'user.role_switched',
+    entityType: 'user',
+    entityId: id,
+    ip: reqMeta.ip,
+    userAgent: reqMeta.userAgent,
+    beforeJson: { role: existing.role, role_id: existing.role_id, manager_id: existing.manager_id },
+    afterJson: {
+      role: scope,
+      role_id,
+      manager_id: nextManagerIds[0] ?? null,
+      reassigned_lead_count: movedLeadIds.length,
+      reassigned_leads_to: movedLeadIds.length ? reassign_leads_to : null,
+    },
+  });
+
+  // The access token still carries the old role/allowedTabs — kill the
+  // sessions so the next request re-authenticates into the new role.
+  let revokedSessions = 0;
+  try {
+    revokedSessions = await authRepo.revokeAllForUser(tenant, id);
+  } catch (err) {
+    // The role IS switched; a revoke failure only delays it to token expiry.
+    logger.warn({ err: err.message, userId: id }, 'role switch: session revoke failed');
+  }
+  // Live nudge for a tab open right now — Layout/Header already handles this
+  // event by re-fetching /auth/me and re-gating the current route.
+  try {
+    notifyUser(tenant.id, id, 'role.tab_permissions_changed', { role: scope, role_id });
+  } catch (err) {
+    logger.warn({ err: err.message, userId: id }, 'role switch: live refresh push failed');
+  }
+
+  // Surface, don't mutate: tell the caller where this user is still named so
+  // an admin can retune the routing deliberately.
+  let referencedBy = { routing_pools: [] };
+  try {
+    referencedBy = { routing_pools: await routingRepo.poolsContainingUser(tenant, id) };
+  } catch (err) {
+    logger.warn({ err: err.message, userId: id }, 'role switch: pool reference lookup failed');
+  }
+
+  return {
+    user: updated,
+    previous_role: existing.role,
+    reassigned_lead_count: movedLeadIds.length,
+    revoked_sessions: revokedSessions,
+    referenced_by: referencedBy,
+  };
 };
 
 export const deleteUser = async (tenant, id, actor) => {

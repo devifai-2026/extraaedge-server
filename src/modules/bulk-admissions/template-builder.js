@@ -13,6 +13,7 @@
 // unreliably in Google Sheets / LibreOffice / mobile Excel, and the server
 // validates strictly on import anyway. See bulk-ingestion/template-builder.js
 // for the full history behind that decision.
+import { LEAD_OWNER_ROLES } from '../../config/constants.js';
 import ExcelJS from 'exceljs';
 import {
   HEADERS, EXAMPLE_ROW, EMI_SLOTS, EDU_SLOTS,
@@ -309,9 +310,12 @@ export const loadTemplateLookups = async (tenantQuery, tenant) => {
   const [counsellorsRes, coursesRes, centersRes, branchesRes, paymentAccountsRes] = await Promise.all([
     tenantQuery(
       tenant,
+      // Every user who can legitimately own a lead (counsellor / telecaller) —
+      // these are the emails the lead_owner_email column will accept.
       `SELECT name, email FROM users
-        WHERE role = 'counsellor' AND is_active = true AND deleted_at IS NULL
+        WHERE role = ANY($1) AND is_active = true AND deleted_at IS NULL
         ORDER BY name NULLS LAST, email`,
+      [LEAD_OWNER_ROLES],
     ),
     tenantQuery(
       tenant,

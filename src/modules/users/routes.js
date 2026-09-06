@@ -4,10 +4,10 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
-import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
-import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema, sendPhoneOtpSchema, verifyPhoneOtpSchema } from './schema.js';
+import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema, sendPhoneOtpSchema, verifyPhoneOtpSchema, switchRoleSchema } from './schema.js';
 import { otpLimiter } from '../../middleware/rateLimit.js';
 
 const router = express.Router();
@@ -54,30 +54,31 @@ router.post('/me/phone/send-otp', otpLimiter, validate({ body: sendPhoneOtpSchem
 router.post('/me/phone/verify-otp', validate({ body: verifyPhoneOtpSchema }), controller.verifyPhoneChangeOtp);
 
 // /users/org-tree — flat list of nodes + edges for the Org Tree canvas.
-//   super_admin → entire tenant
-//   sales_manager → full chain they're part of (managers above + team below)
-//   counsellor → forbidden
+//   super_admin                     → entire tenant
+//   sales_manager / telecaller_lead → full chain they're part of
+//                                     (managers above + team below)
+//   counsellor / telecaller         → forbidden
 router.get(
   '/org-tree',
-  requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER),
+  requireRole(...MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES.TELECALLER_LEAD),
   controller.orgTree,
 );
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ query: listUsersQuery }), controller.list);
+router.get('/', requireRole(...MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES.TELECALLER_LEAD), validate({ query: listUsersQuery }), controller.list);
 
 router.get('/:id', validate({ params: idParam }), controller.get);
 
 // Per-user lead views — used by the user-profile page.
 //   /users/:id/leads?status=current  → leads currently assigned to this user
 //   /users/:id/leads?status=past     → leads previously assigned (via lead_assignments)
-router.get('/:id/leads', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), controller.userLeads);
+router.get('/:id/leads', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), controller.userLeads);
 
 // Per-user work sessions for the time-sheet table on the profile page.
-router.get('/:id/work-sessions', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), controller.userWorkSessions);
+router.get('/:id/work-sessions', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), controller.userWorkSessions);
 
 // Per-user login/logout audit (driven by user_login_events, last 30 days).
-router.get('/:id/login-events', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), controller.userLoginEvents);
-router.get('/:id/activity-summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), controller.userActivitySummary);
+router.get('/:id/login-events', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), controller.userLoginEvents);
+router.get('/:id/activity-summary', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), controller.userActivitySummary);
 
 // User CRUD is open to branch managers too, but the service layer scopes
 // WHICH users they may touch to their own branch (their team subtree) and
@@ -98,6 +99,21 @@ router.delete(
   requireRole(...ADMIN_TIER_ROLES),
   validate({ params: idParam }),
   controller.remove,
+);
+
+// Switch Role — a dedicated endpoint, not a field on PUT /users/:id, because
+// the change has to also hand over the user's lead queue, revoke their live
+// sessions (the JWT carries the OLD role), write an audit_log row and report
+// which routing pools still name them. See users/service.switchRole.
+//
+// No optimisticLock: the FE opens this from a row in a list it may have loaded
+// minutes ago, and the operation is idempotent-ish — a second switch to the
+// same role 409s on "already holds that role" rather than doing damage.
+router.post(
+  '/:id/switch-role',
+  requireRole(...ADMIN_TIER_ROLES),
+  validate({ params: idParam, body: switchRoleSchema }),
+  controller.switchRole,
 );
 
 router.post(

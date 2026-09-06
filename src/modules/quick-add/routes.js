@@ -6,7 +6,7 @@ import { createLead } from '../leads/service.js';
 import { leadCreateSchema } from '../leads/schema.js';
 import * as leadsRepo from '../leads/repo.js';
 import * as usersRepo from '../users/repo.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -35,7 +35,8 @@ router.use(authRequired, tenantRequired);
 router.post('/', validate({ body: leadCreateSchema }), async (req, res, next) => {
   try {
     const body = { ...req.body };
-    const isCounsellor = req.user?.role === SYSTEM_TENANT_ROLES.COUNSELLOR;
+    // Front line (counsellor / telecaller) self-assigns their quick-add.
+    const isCounsellor = LEAD_OWNER_ROLES.includes(req.user?.role);
     // sales_manager + branch_manager both leave the quick-add Unassigned but
     // stamp their own team_id (legacy sales_manager scope) AND their branch_id
     // (branch_manager scope) so it surfaces in their bucket.

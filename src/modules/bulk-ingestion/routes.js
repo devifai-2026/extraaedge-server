@@ -6,7 +6,9 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import {
+  QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES,
+} from '../../config/constants.js';
 import { notFound, forbidden } from '../../lib/errors.js';
 
 import { readFile } from 'node:fs/promises';
@@ -16,7 +18,11 @@ import { buildTemplateXlsx, loadTemplateLookups } from './template-builder.js';
 
 const router = express.Router();
 // All authenticated tenant users (including counsellors) may upload leads.
-router.use(authRequired, tenantRequired, requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.COUNSELLOR));
+router.use(authRequired, tenantRequired, requireRole(
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+  ...LEAD_OWNER_ROLES,
+));
 
 // Serve the bulk-lead template. The xlsx variant is generated live from
 // the tenant's current dropdown values so users pick stage / sub_stage /
@@ -82,6 +88,11 @@ const commitSchema = z.object({
   // friendlier than the storage key. Capped to keep weird values out.
   file_name: z.string().max(255).optional(),
   file_size: z.coerce.number().int().nonnegative().optional(),
+  // Job-level owner pool, from the upload dialog's "Assign to" picker. Rows
+  // WITHOUT an assigned_to_email are shared out among these people in order;
+  // a per-row email always wins. Empty/omitted = unchanged behaviour (the
+  // assignment rules pick at the end of the job).
+  assignee_pool: z.array(z.string().uuid()).max(200).optional(),
 });
 
 const downloadSchema = z.object({
@@ -134,15 +145,33 @@ router.post('/commit', validate({ body: commitSchema }), async (req, res, next) 
     const { rows: previewRows } = await tenantQuery(req.tenant, `SELECT * FROM bulk_import_previews WHERE id = $1 AND expires_at > now()`, [req.body.preview_id]);
     const preview = previewRows[0];
     if (!preview) throw notFound('Preview not found or expired');
+    // Keep only pool members who can actually receive a lead. Silently
+    // dropping the rest (rather than 400ing the whole import) matches how the
+    // JustDial pool save behaves, and the picker only offers valid people —
+    // this is the guard for a stale tab or a direct API call.
+    let assigneePool = req.body.assignee_pool ?? [];
+    if (assigneePool.length) {
+      const { rows: valid } = await tenantQuery(
+        req.tenant,
+        `SELECT id FROM users
+          WHERE id = ANY($1::uuid[]) AND role = ANY($2)
+            AND is_active = true AND deleted_at IS NULL`,
+        [assigneePool, LEAD_OWNER_ROLES],
+      );
+      const live = new Set(valid.map((v) => v.id));
+      // Preserve the operator's chosen order — the worker round-robins in it.
+      assigneePool = assigneePool.filter((id) => live.has(id));
+    }
     const { rows } = await tenantQuery(
       req.tenant,
-      `INSERT INTO bulk_imports (user_id, preview_id, source, file_r2_key, file_name, file_size, field_mapping_json, defaults_json, total_rows, duplicate_handling, status, send_welcome_email, send_welcome_sms)
-       VALUES ($1,$2,'csv',$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,'queued',$10,$11) RETURNING *`,
+      `INSERT INTO bulk_imports (user_id, preview_id, source, file_r2_key, file_name, file_size, field_mapping_json, defaults_json, total_rows, duplicate_handling, status, send_welcome_email, send_welcome_sms, assignee_pool)
+       VALUES ($1,$2,'csv',$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,'queued',$10,$11,$12::uuid[]) RETURNING *`,
       [
         req.user.id, preview.id, preview.file_r2_key,
         req.body.file_name ?? null, req.body.file_size ?? null,
         preview.field_mapping_json, preview.defaults_json, preview.total_rows,
         req.body.duplicate_handling, req.body.send_welcome_email, req.body.send_welcome_sms,
+        assigneePool,
       ],
     );
     await publish(QUEUE_NAMES.BULK_IMPORT, 'commit', { tenantId: req.tenant.id, import_id: rows[0].id });
@@ -403,15 +432,16 @@ router.post('/status-change', validate({ body: statusChangeSchema }), async (req
 router.post('/refer', validate({ body: referSchema }), async (req, res, next) => {
   try {
     const { lead_ids, assigned_to, reason } = req.body;
-    // Ownership invariant: bulk-refer target must be an active counsellor.
-    // (Mirrors the single-lead reassign route + the insertLead/updateLead sink
-    // guard — closes the mass "all leads → one manager" leak.)
+    // Ownership invariant: bulk-refer target must be an active front-line user
+    // (LEAD_OWNER_ROLES). (Mirrors the single-lead reassign route + the
+    // insertLead/updateLead sink guard — closes the mass "all leads → one
+    // manager" leak.)
     const { rows: valid } = await tenantQuery(
       req.tenant,
-      `SELECT 1 FROM users WHERE id = $1 AND role = 'counsellor' AND is_active = true AND deleted_at IS NULL`,
-      [assigned_to],
+      `SELECT 1 FROM users WHERE id = $1 AND role = ANY($2) AND is_active = true AND deleted_at IS NULL`,
+      [assigned_to, LEAD_OWNER_ROLES],
     );
-    if (!valid[0]) throw forbidden('Leads can only be referred to an active counsellor');
+    if (!valid[0]) throw forbidden('Leads can only be referred to an active counsellor or telecaller');
     const count = await tenantTx(req.tenant, async (client) => {
       // Resolve the new owner's manager once so we can snap leads.manager_id
       // (same as bulkAssign / the single-lead reassign path).

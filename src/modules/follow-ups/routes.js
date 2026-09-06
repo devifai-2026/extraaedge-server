@@ -10,7 +10,7 @@ import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { isValidRRule } from '../../lib/rrule.js';
 import { publish } from '../../lib/queue.js';
-import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
 import { notifyChain } from '../../lib/socket.js';
 
@@ -71,7 +71,7 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
     // can open the lead, you see its full followup trail. Nothing is hidden by
     // who happened to create each row.
     if (!req.query.lead_id) {
-      if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+      if (LEAD_OWNER_ROLES.includes(req.user.role)) {
         params.push(req.user.id);
         conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
       } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
@@ -126,7 +126,7 @@ router.get('/calendar', async (req, res, next) => {
     if (date_from) { params.push(date_from); conds.push(`f.next_action_datetime >= $${params.length}::timestamptz`); }
     if (date_to)   { params.push(date_to);   conds.push(`f.next_action_datetime <= $${params.length}::timestamptz`); }
     if (req.query.assigned_user_id) { params.push(req.query.assigned_user_id); conds.push(`l.assigned_to = $${params.length}`); }
-    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    if (LEAD_OWNER_ROLES.includes(req.user.role)) {
       params.push(req.user.id);
       conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
     } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
@@ -169,7 +169,7 @@ router.get('/analytics', async (req, res, next) => {
     if (date_to)   { params.push(date_to);   conds.push(`f.next_action_datetime <= $${params.length}::timestamptz`); }
     if (req.query.assigned_user_id) { params.push(req.query.assigned_user_id); conds.push(`l.assigned_to = $${params.length}`); }
     if (req.query.stage_id)         { params.push(req.query.stage_id);         conds.push(`l.stage_id = $${params.length}`); }
-    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    if (LEAD_OWNER_ROLES.includes(req.user.role)) {
       params.push(req.user.id);
       conds.push(`(f.created_by = $${params.length} OR l.assigned_to = $${params.length})`);
     } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
@@ -382,7 +382,7 @@ router.put(
       }
       const { rows: existing } = await tenantQuery(req.tenant, `SELECT created_by FROM lead_followups WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
       if (!existing[0]) throw notFound('Follow-up not found');
-      if (existing[0].created_by !== req.user.id && req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) throw forbidden('Not your follow-up');
+      if (existing[0].created_by !== req.user.id && LEAD_OWNER_ROLES.includes(req.user.role)) throw forbidden('Not your follow-up');
       const fields = []; const params = []; let i = 1;
       for (const [k, v] of Object.entries(req.body)) {
         if (v === undefined) continue;

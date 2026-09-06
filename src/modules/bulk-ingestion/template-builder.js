@@ -290,9 +290,9 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   addRule('primary_source',      'No',                               'Text (auto-create)', 'Primary marketing source dictionary — separate from `source`. Auto-created on first use. Stored directly on the lead (not as attribution row).');
   addRule('campaign',            'No',                               'Text (auto-create)', 'Marketing campaign name. New entries created on first use.');
   addRule('medium',              'No',                               'Text (auto-create)', 'Marketing medium — e.g. CPC / Organic / Free. New entries created on first use.');
-  addRule('current_lead_owner_email', 'No',                          'Email',              'Any active user email. Counsellor → direct assign. Sales-manager → round-robin within their team. Super-admin → round-robin across the tenant. Interchangeable with assigned_to_email; if both are set they must point to the SAME user (OWNER_MISMATCH otherwise).');
+  addRule('current_lead_owner_email', 'No',                          'Email',              'Any active user email. Counsellor or telecaller → direct assign. Sales-manager / telecaller-lead → round-robin within their own team. Super-admin → round-robin across the tenant. Interchangeable with assigned_to_email; if both are set they must point to the SAME user (OWNER_MISMATCH otherwise).');
   addRule('previous_lead_owner_email', 'No',                         'Email',              'Any active user (any role). Recorded as prior owner in the lead\'s ownership history — does NOT affect current assignment.');
-  addRule('assigned_to_email',   'No',                               'Email',              'Same semantics as current_lead_owner_email. Counsellor → direct; sales-manager → RR within team; super-admin → RR tenant-wide. Both columns blank → end-of-upload auto-assignment rule picks an owner.');
+  addRule('assigned_to_email',   'No',                               'Email',              'Same semantics as current_lead_owner_email. Counsellor / telecaller → direct; sales-manager / telecaller-lead → RR within their team; super-admin → RR tenant-wide. Both columns blank → the batch \'Assign to\' picker, else the auto-assignment rule, picks an owner.');
   addRule('referral_code_used',  'No',                               'Text',         'Free text.');
   addRule('tags',                'No',                               'Comma-separated', 'e.g. priority,returning. Trimmed.');
 
@@ -331,13 +331,15 @@ export const buildTemplateXlsx = async ({ stages, subStagesByStageName, countrie
   heading('Owner columns — how each behaves', 13);
   blank();
   para('There are three optional owner columns. Use the one that fits your workflow:');
-  para('  • current_lead_owner_email — Any active user email. Counsellor → direct assignment (manager_id snapped from their manager). Sales-manager → round-robin across their team. Super-admin → round-robin across the whole tenant. Interchangeable with assigned_to_email below.');
+  para('  • current_lead_owner_email — Any active user email. Counsellor or telecaller → direct assignment (manager_id snapped from their manager). Sales-manager or telecaller-lead → round-robin across their own team. Super-admin → round-robin across the whole tenant. Interchangeable with assigned_to_email below.');
   para('  • previous_lead_owner_email — Any active user (any role). Recorded as prior owner in lead_assignments history; doesn\'t affect current assignment.');
   para('  • assigned_to_email — Same role-aware routing as current_lead_owner_email:');
-  para('       - counsellor email → assigns directly to that counsellor.');
-  para('       - sales_manager email → round-robins across that manager\'s counsellors within the upload.');
-  para('       - super_admin email → round-robins across every counsellor + sales_manager in the tenant (excluding the admin themselves).');
-  para('  • All three blank → lead lands unassigned; the active auto-assignment rule picks it up at end-of-upload.');
+  para('       - counsellor or telecaller email → assigns directly to that person. Both roles carry a personal queue of leads.');
+  para('       - sales_manager email → round-robins across the counsellors / telecallers reporting to that manager.');
+  para('       - telecaller_lead email → round-robins across the telecallers reporting to that lead.');
+  para('       - super_admin email → round-robins across every counsellor and telecaller in the tenant (excluding the admin themselves).');
+  para('       - A manager-tier email (branch_manager, and the manager roles above) never becomes the owner itself — managers run a team, they don\'t carry leads.');
+  para('  • All three blank → the batch \'Assign to\' picker in the upload dialog shares the row out among the people chosen there. If that was left empty too, the lead lands unassigned and the active auto-assignment rule picks it up at end-of-upload.');
   para('  • Setting BOTH assigned_to_email and current_lead_owner_email to DIFFERENT emails fails with OWNER_MISMATCH. If they match (case-insensitive trim) they\'re treated as one and the same.');
 
   return wb.xlsx.writeBuffer();

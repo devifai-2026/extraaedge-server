@@ -1,5 +1,5 @@
 import { registerWorker, publish } from '../lib/queue.js';
-import { QUEUE_NAMES } from '../config/constants.js';
+import { QUEUE_NAMES, LEAD_OWNER_ROLES } from '../config/constants.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { evaluateCondition, materializeActions } from '../services/rule-engine.js';
 import { logger } from '../lib/logger.js';
@@ -69,7 +69,8 @@ registerWorker(QUEUE_NAMES.WORKFLOW, async ({ data }) => {
           switch (action.type) {
             case 'assign': {
               if (lead && action.user_id) {
-                // Ownership invariant: only assign to an active counsellor. A
+                // Ownership invariant: only assign to an active front-line
+                // user (LEAD_OWNER_ROLES — counsellor or telecaller). A
                 // workflow node configured with a manager/admin id must NOT
                 // become a lead owner — skip it instead of corrupting
                 // assigned_to. Mirrors rule-processor.pickTarget + the sink guard.
@@ -78,9 +79,9 @@ registerWorker(QUEUE_NAMES.WORKFLOW, async ({ data }) => {
                   `SELECT manager_id, role, is_active FROM users WHERE id = $1 AND deleted_at IS NULL`,
                   [action.user_id],
                 );
-                if (mgrRows[0]?.role !== 'counsellor' || mgrRows[0]?.is_active !== true) {
+                if (!LEAD_OWNER_ROLES.includes(mgrRows[0]?.role) || mgrRows[0]?.is_active !== true) {
                   logger.warn({ tenantId: tenant.id, leadId: lead.id, target: action.user_id },
-                    'workflow assign: target is not an active counsellor — skipped');
+                    'workflow assign: target is not an active counsellor/telecaller — skipped');
                   break;
                 }
                 const newManagerId = mgrRows[0]?.manager_id ?? null;

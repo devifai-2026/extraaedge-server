@@ -23,7 +23,7 @@ import { tenantQuery } from '../../db/tenant.js';
 import { sysQuery } from '../../db/system.js';
 import { notFound, forbidden } from '../../lib/errors.js';
 import { teamHierarchy, getManagerIds } from '../users/repo.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -49,7 +49,8 @@ const idParam = z.object({ id: z.string().uuid() });
 // POST validator. Always includes the caller's reporting chain.
 const allowedContactIds = async (tenant, actor) => {
   const ids = new Set();
-  if (actor.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+  // Front line (counsellor / telecaller): their managers + admins only.
+  if (LEAD_OWNER_ROLES.includes(actor.role)) {
     const mgrs = await getManagerIds(tenant, actor.id);
     for (const m of mgrs) ids.add(m);
     const { rows: admins } = await tenantQuery(

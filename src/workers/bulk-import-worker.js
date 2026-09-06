@@ -1,5 +1,5 @@
 import { registerWorker } from '../lib/queue.js';
-import { QUEUE_NAMES } from '../config/constants.js';
+import { QUEUE_NAMES, LEAD_OWNER_ROLES } from '../config/constants.js';
 import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { getDownloadSignedUrl } from '../lib/r2.js';
 import { parseSpreadsheetBuffer } from '../lib/csv.js';
@@ -437,6 +437,37 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
       // Per-job assignee cache: holds user lookups + per-pool RR cursors so
       // rows in a single upload distribute fairly across each manager's team.
       const assigneeCache = createAssigneeCache();
+
+      // Job-level "Assign to" pool from the upload dialog. Re-validated here
+      // rather than trusted from the row: a member could have been
+      // deactivated or switched to a manager role between commit and the
+      // worker picking the job up, and assigning to them would trip the
+      // ownership invariant and fail every row. Order is preserved so the
+      // round-robin follows the operator's chosen order.
+      let poolOwnerIds = [];
+      let poolCursor = 0;
+      const requestedPool = Array.isArray(imp.assignee_pool) ? imp.assignee_pool : [];
+      if (requestedPool.length) {
+        const { rows: poolRows } = await tenantQuery(
+          tenant,
+          `SELECT id, manager_id FROM users
+            WHERE id = ANY($1::uuid[]) AND role = ANY($2)
+              AND is_active = true AND deleted_at IS NULL`,
+          [requestedPool, LEAD_OWNER_ROLES],
+        );
+        const byId = new Map(poolRows.map((r) => [r.id, r]));
+        poolOwnerIds = requestedPool.map((id) => byId.get(id)).filter(Boolean);
+        if (poolOwnerIds.length !== requestedPool.length) {
+          logger.warn(
+            { tenantId: tenant.id, import_id, requested: requestedPool.length, usable: poolOwnerIds.length },
+            'bulk import: some assignee-pool members can no longer own leads — skipped',
+          );
+        }
+      }
+
+      // Ids of the leads THIS job inserted, so the end-of-job auto-assign
+      // sweep touches only them (it used to sweep the whole tenant).
+      const insertedLeadIds = [];
       let success = 0; let failed = 0; let duplicates = 0;
       // `batch` (declared above the try) buffers failure/duplicate side-inserts
       // so they flush as multi-row INSERTs instead of one round-trip per row.
@@ -596,12 +627,22 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
             // an empty team), we leave assigned_to NULL so the end-of-job
             // auto-assign sweep can place the lead via the global rule
             // rather than fail the row.
+          } else if (poolOwnerIds.length) {
+            // No owner column on this row — share it out among the people the
+            // operator picked in the upload dialog's "Assign to" box. Ordered
+            // round-robin so a multi-person pool splits the file evenly; a
+            // single-person pool sends every ownerless row to them.
+            const picked = poolOwnerIds[poolCursor % poolOwnerIds.length];
+            poolCursor += 1;
+            resolved.assigned_to = picked.id;
+            resolved.manager_id = picked.manager_id ?? null;
           }
           delete resolved.assigned_to_email;
           delete resolved.current_lead_owner_email;
           delete resolved.previous_lead_owner_email;
 
           const insertedLead = await insertLead(tenant, buildInsertPayload(resolved), imp.user_id);
+          if (insertedLead?.id) insertedLeadIds.push(insertedLead.id);
           insertedAny = true;
           success += 1;
 
@@ -680,10 +721,14 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
         [import_id, rows.length, success, failed, duplicates],
       );
 
-      // (3) Auto-assign any unassigned leads — including the ones we just
-      // inserted with assigned_to = null. Runs once at the end of the import
-      // rather than per-row to avoid hammering the assignment rule on a 30k
-      // upload. Idempotent: leads already assigned won't be touched.
+      // (3) Auto-assign the leads THIS import inserted that still have no
+      // owner. Runs once at the end rather than per-row to avoid hammering the
+      // assignment engine on a 30k upload. Idempotent: leads already assigned
+      // won't be touched.
+      //
+      // Scoped to insertedLeadIds — previously this swept every unassigned
+      // lead in the tenant, so a five-row import could redistribute a backlog
+      // an admin had deliberately left unassigned.
       if (insertedAny) {
         emitProgress({
           total: rows.length,
@@ -692,7 +737,7 @@ registerWorker(QUEUE_NAMES.BULK_IMPORT, async ({ name, data }) => {
           phase: 'auto_assigning',
         }, { force: true });
         try {
-          const result = await autoAssignUnassigned(tenant);
+          const result = await autoAssignUnassigned(tenant, insertedLeadIds);
           logger.info({ import_id, ...result }, 'bulk import auto-assign complete');
         } catch (err) {
           // Auto-assign failures shouldn't fail the import — the rows are

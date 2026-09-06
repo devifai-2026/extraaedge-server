@@ -120,6 +120,19 @@ export const userLoginEvents = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const switchRole = async (req, res, next) => {
+  try {
+    const data = await service.switchRole(
+      req.tenant,
+      req.params.id,
+      req.body,
+      req.user,
+      { ip: req.ip, userAgent: req.get('user-agent') },
+    );
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const orgTree = async (req, res, next) => {
   try {
     const data = await service.orgTree(req.tenant, req.user);

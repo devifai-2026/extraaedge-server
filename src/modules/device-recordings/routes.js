@@ -36,7 +36,7 @@ import { getUploadSignedUrl, getDownloadSignedUrl, deleteObject, headObject, bui
 import { last10Digits } from '../../lib/phone.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { env } from '../../config/env.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 
 const router = express.Router();
 
@@ -446,10 +446,11 @@ router.post(
 // ------------------------------- CRM READ/ADMIN -----------------------------
 // Counsellors can reach these routes too, but only ever see their OWN uploads
 // (enforced per-query via `ownOnly`). Managers/admins see everything in scope.
-router.use(authRequired, tenantRequired, requireRole(...READ_ROLES, SYSTEM_TENANT_ROLES.COUNSELLOR));
+router.use(authRequired, tenantRequired, requireRole(...READ_ROLES, ...LEAD_OWNER_ROLES));
 
-// True when the actor is limited to their own uploaded recordings.
-const isOwnOnly = (user) => user.role === SYSTEM_TENANT_ROLES.COUNSELLOR;
+// True when the actor is limited to their own uploaded recordings — the
+// front-line roles (counsellor / telecaller). Manager tiers see their scope.
+const isOwnOnly = (user) => LEAD_OWNER_ROLES.includes(user.role);
 
 const listQuery = z.object({
   // 'matched' includes multi-lead matches — both tabs of the review UI only

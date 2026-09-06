@@ -7,7 +7,7 @@ import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { teamHierarchy } from '../users/repo.js';
 import { findOpenSession, stoppedTodayAlready, computeActiveSeconds, computePausedSeconds } from './repo.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { conflict, forbidden } from '../../lib/errors.js';
 
 const router = express.Router();
@@ -202,7 +202,7 @@ router.get('/me/today', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ query: listQuery }), async (req, res, next) => {
+router.get('/', requireRole(...MANAGER_TIER_ROLES), validate({ query: listQuery }), async (req, res, next) => {
   try {
     const conds = [];
     const params = [];
@@ -228,7 +228,7 @@ router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES
   } catch (err) { next(err); }
 });
 
-router.get('/team-summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/team-summary', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     let userIds = null;
     if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {

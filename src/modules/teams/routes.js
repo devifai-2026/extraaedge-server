@@ -4,7 +4,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
 import { createTeamSchema, updateTeamSchema, idParam, memberParam, addMemberSchema } from './schema.js';
@@ -27,8 +27,8 @@ router.put(
 router.delete('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER), validate({ params: idParam }), controller.remove);
 
 router.get('/:id/members', validate({ params: idParam }), controller.listMembers);
-router.post('/:id/members', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: addMemberSchema }), controller.addMember);
-router.delete('/:id/members/:user_id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: memberParam }), controller.removeMember);
+router.post('/:id/members', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: addMemberSchema }), controller.addMember);
+router.delete('/:id/members/:user_id', requireRole(...MANAGER_TIER_ROLES), validate({ params: memberParam }), controller.removeMember);
 router.get('/:id/leads', validate({ params: idParam }), controller.listLeads);
 
 export default router;

@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 
 // NOTE: WhatsApp sending has moved to the per-user whatsapp-web.js gateway
 // (see whatsapp-connection-routes.js). The WABridge Business-API path —
@@ -35,7 +35,7 @@ router.get('/templates', async (req, res, next) => {
   catch (err) { next(err); }
 });
 
-router.post('/templates', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: tplSchema }), async (req, res, next) => {
+router.post('/templates', requireRole(...MANAGER_TIER_ROLES), validate({ body: tplSchema }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -47,7 +47,7 @@ router.post('/templates', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TE
   } catch (err) { next(err); }
 });
 
-router.put('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: tplSchema.partial() }), async (req, res, next) => {
+router.put('/templates/:id', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: tplSchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {

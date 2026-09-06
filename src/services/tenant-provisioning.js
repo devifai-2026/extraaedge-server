@@ -81,6 +81,27 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
   try {
     await client.query('BEGIN');
 
+    // Front-line tab grant, shared by `counsellor` and `telecaller` — the two
+    // roles both work a personal queue of assigned leads (see
+    // LEAD_OWNER_ROLES), so their surfaces are identical by definition. Held
+    // in one binding so the two bundles can never drift apart.
+    const frontLineTabs = {
+      dashboard: 'full', leads: 'full', raw_data: 'read_only', failed_leads: 'read_only',
+      followups: 'full', whatsapp: 'full', bulk_upload: 'full',
+      'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
+      // Scoped admissions tab: their own converted students (configure offer + send link).
+      'admissions.my_students': 'full',
+    };
+    // Team-lead tab grant, shared by `sales_manager` and `telecaller_lead`:
+    // everything except tenant administration, the third-party integration
+    // console, and the QA scoring queue (whose routes accept only qa +
+    // super_admin, so the tab would 403 on load).
+    const teamLeadTabs = Object.fromEntries(
+      DEFAULT_TAB_KEYS
+        .filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration' && t !== 'qa.reviews')
+        .map((t) => [t, 'full']),
+    );
+
     // Default custom roles with tab permissions
     const roleBundles = [
       { name: 'super_admin', description: 'Tenant owner — full access', scope: 'super_admin', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.map((t) => [t, 'full'])) },
@@ -93,14 +114,15 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       // behind it accept only qa + super_admin, so granting the tab would put
       // a page in their sidebar that 403s on load.
       { name: 'branch_manager', description: 'Runs a branch — admin-like, minus lead export & user impersonation', scope: 'branch_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => t !== 'qa.reviews').map((t) => [t, 'full'])) },
-      { name: 'sales_manager', description: 'Manages a team of counsellors', scope: 'sales_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration' && t !== 'qa.reviews').map((t) => [t, 'full'])) },
-      { name: 'counsellor', description: 'Handles assigned leads', scope: 'counsellor', is_system: true, tab_permissions: {
-        dashboard: 'full', leads: 'full', raw_data: 'read_only', failed_leads: 'read_only',
-        followups: 'full', whatsapp: 'full', bulk_upload: 'full',
-        'settings.email_templates': 'read_only', 'settings.sms_templates': 'read_only',
-        // Scoped admissions tab: their own converted students (configure offer + send link).
-        'admissions.my_students': 'full',
-      } },
+      { name: 'sales_manager', description: 'Manages a team of counsellors', scope: 'sales_manager', is_system: true, tab_permissions: teamLeadTabs },
+      { name: 'counsellor', description: 'Handles assigned leads', scope: 'counsellor', is_system: true, tab_permissions: frontLineTabs },
+      // ---- Telecalling side of the front line ----------------------------
+      // telecaller_lead runs a team of telecallers under a sales_manager. Same
+      // surfaces and same team-subtree scoping as a sales_manager, one tier down.
+      { name: 'telecaller_lead', description: 'Runs a team of telecallers', scope: 'telecaller_lead', is_system: true, tab_permissions: teamLeadTabs },
+      // telecaller works a personal queue of assigned leads, exactly like a
+      // counsellor — it is a valid leads.assigned_to owner.
+      { name: 'telecaller', description: 'Handles assigned leads (telecalling)', scope: 'telecaller', is_system: true, tab_permissions: frontLineTabs },
       // Post-conversion account ops. No team beneath them, reports to
       // super_admin. Lead visibility is scoped server-side to converted
       // leads only (see leads/service.js computeScope).
@@ -209,6 +231,24 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
         [rows[0].id],
       );
     }
+
+    // Stale-lead SLA: 6 days without activity notifies the owner and everyone
+    // above them; on day 7 the lead moves to another owner in the same role
+    // class (counsellor -> counsellor, telecaller -> telecaller). Handled by
+    // workers/sla-scanner.js. Existing tenants get this from migration
+    // 1700000127000_seed_stale_lead_sla_policy — keep the two in sync.
+    await client.query(
+      `INSERT INTO sla_policies
+         (name, condition_json, no_activity_hours, escalate_after_hours, action_json, is_active)
+       VALUES (
+         'Stale lead — 6 days no activity',
+         '{"all":[{"field":"lead.is_cold","op":"neq","value":true}]}'::jsonb,
+         144,
+         24,
+         '[{"type":"reassign_same_role"}]'::jsonb,
+         true
+       )`,
+    );
 
     await client.query('COMMIT');
   } catch (err) {

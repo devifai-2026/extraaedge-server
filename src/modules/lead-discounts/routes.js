@@ -3,7 +3,7 @@ import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
-import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import { leadIdParam, applyDiscountSchema, decideDiscountSchema } from './schema.js';
 
@@ -21,7 +21,8 @@ const readRoles = requireRole(
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
-  SYSTEM_TENANT_ROLES.COUNSELLOR,
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+  ...LEAD_OWNER_ROLES,
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
 );
 

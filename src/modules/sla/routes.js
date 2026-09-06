@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -27,7 +27,7 @@ const alertsQuery = z.object({
 });
 
 // Policies
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try { const { rows } = await tenantQuery(req.tenant, `SELECT * FROM sla_policies WHERE deleted_at IS NULL ORDER BY name`); res.json({ data: rows, meta: { requestId: req.id } }); }
   catch (err) { next(err); }
 });
@@ -78,7 +78,9 @@ router.get('/alerts', validate({ query: alertsQuery }), async (req, res, next) =
     if (req.query.user_id) { params.push(req.query.user_id); conds.push(`a.assigned_to = $${params.length}`); }
     if (req.query.status === 'open') conds.push('a.resolved_at IS NULL');
     if (req.query.status === 'resolved') conds.push('a.resolved_at IS NOT NULL');
-    if (req.user.role === SYSTEM_TENANT_ROLES.COUNSELLOR) {
+    // Front-line users (counsellor / telecaller) only ever see their own
+    // breaches; manager tiers see everyone's.
+    if (LEAD_OWNER_ROLES.includes(req.user.role)) {
       params.push(req.user.id);
       conds.push(`a.assigned_to = $${params.length}`);
     }
@@ -112,7 +114,7 @@ router.post('/alerts/:id/resolve', validate({ params: idParam, body: z.object({ 
   } catch (err) { next(err); }
 });
 
-router.get('/alerts/summary', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/alerts/summary', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,

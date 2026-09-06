@@ -15,7 +15,11 @@ import { z } from 'zod';
 // be created from Add-User. `student` is intentionally EXCLUDED — students are a
 // separate principal created via Accounts course-confirm, never as a staff user.
 const roleBucket = z.enum([
-  'super_admin', 'branch_manager', 'sales_manager', 'counsellor', 'account_manager',
+  'super_admin', 'branch_manager', 'sales_manager', 'counsellor',
+  // The telecalling half of the front line. telecaller_lead scopes like a
+  // sales_manager (team subtree); telecaller carries leads like a counsellor.
+  'telecaller_lead', 'telecaller',
+  'account_manager',
   'head_trainer', 'trainer', 'hr', 'placement', 'qa',
 ]);
 
@@ -65,14 +69,48 @@ export const resetPasswordSchema = z.object({
   new_password: z.string().min(10),
 });
 
+// `role` accepts either a single bucket ("counsellor") or a comma-separated
+// list ("counsellor,telecaller"). The list form exists because the split of
+// the front line into counsellor + telecaller means every "pick a lead owner"
+// dropdown now needs two buckets in one request. Parsed to an array of
+// validated buckets; repo.list matches with `= ANY(...)`.
+const roleBucketList = z.string().transform((v, ctx) => {
+  const parts = v.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'role must not be empty' });
+    return z.NEVER;
+  }
+  for (const p of parts) {
+    if (!roleBucket.options.includes(p)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown role: ${p}` });
+      return z.NEVER;
+    }
+  }
+  return parts;
+});
+
 export const listUsersQuery = z.object({
   q: z.string().optional(),
-  role: roleBucket.optional(),
+  role: roleBucketList.optional(),
   team_id: z.string().uuid().optional(),
   manager_id: z.string().uuid().optional(),
   is_active: z.enum(['true', 'false']).optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+// Switch Role — POST /users/:id/switch-role.
+// `role_id` (a custom_roles row) is the only required field; the role bucket
+// is derived from that row's scope, exactly as create/update do it.
+export const switchRoleSchema = z.object({
+  role_id: z.string().uuid(),
+  // Omitted => keep the current primary manager. Pass [] to clear reporting
+  // lines, or a list to re-parent (a counsellor becoming a telecaller normally
+  // moves under a telecaller_lead).
+  manager_ids: z.array(z.string().uuid()).optional(),
+  // Required only when the switch moves the user out of a lead-owning role
+  // while they still own open leads — the API returns a 409 naming the count.
+  reassign_leads_to: z.string().uuid().optional(),
 });
 
 export const idParam = z.object({ id: z.string().uuid() });

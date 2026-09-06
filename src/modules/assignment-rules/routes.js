@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 import { evaluateCondition } from '../../services/rule-engine.js';
 
@@ -24,7 +24,7 @@ const ruleSchema = z.object({
 });
 const idParam = z.object({ id: z.string().uuid() });
 
-router.get('/', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), async (req, res, next) => {
+router.get('/', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -84,7 +84,7 @@ router.put('/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_RO
 });
 
 // Test a rule against a specific lead (dry run)
-router.post('/:id/test', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
+router.post('/:id/test', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: z.object({ lead_id: z.string().uuid() }) }), async (req, res, next) => {
   try {
     const { rows: [rule] } = await tenantQuery(req.tenant, `SELECT * FROM assignment_rules WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
     if (!rule) throw notFound('Rule not found');

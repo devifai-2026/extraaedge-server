@@ -56,6 +56,7 @@ import qaReviewsRouter from './modules/qa-reviews/routes.js';
 import paymentsRouter from './modules/payments/routes.js';
 import subscriptionsRouter from './modules/subscriptions/routes.js';
 import assignmentRulesRouter from './modules/assignment-rules/routes.js';
+import leadRoutingRouter from './modules/lead-routing/routes.js';
 import leadScoreRouter from './modules/lead-score/routes.js';
 import workflowsRouter from './modules/workflows/routes.js';
 import campaignsBulkRouter from './modules/campaigns-bulk/routes.js';
@@ -214,6 +215,8 @@ export const mountRoutes = (app) => {
 
   // Rules, scoring, workflows
   api.use('/assignment-rules', assignmentRulesRouter);
+  // Source-based lead distribution pools (WhatsApp/Facebook/Instagram/... -> named people).
+  api.use('/lead-routing-pools', leadRoutingRouter);
   api.use('/lead-score', leadScoreRouter);
   api.use('/workflows', workflowsRouter);
 

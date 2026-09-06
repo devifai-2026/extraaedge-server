@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { QUEUE_NAMES, SYSTEM_TENANT_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { notFound, forbidden, suppressed } from '../../lib/errors.js';
 import { render, extractVariables, buildContext } from '../../lib/templating.js';
 import { normalizeDlrEvent } from '../../lib/providers/sms-messagecentral.js';
@@ -57,7 +57,7 @@ router.get('/templates', async (req, res, next) => {
   catch (err) { next(err); }
 });
 
-router.post('/templates', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ body: tplSchema }), async (req, res, next) => {
+router.post('/templates', requireRole(...MANAGER_TIER_ROLES), validate({ body: tplSchema }), async (req, res, next) => {
   try {
     const vars = extractVariables(req.body.body);
     const { rows } = await tenantQuery(
@@ -70,7 +70,7 @@ router.post('/templates', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TE
   } catch (err) { next(err); }
 });
 
-router.put('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam, body: tplSchema.partial() }), async (req, res, next) => {
+router.put('/templates/:id', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam, body: tplSchema.partial() }), async (req, res, next) => {
   try {
     const fields = []; const params = []; let i = 1;
     for (const [k, v] of Object.entries(req.body)) {
@@ -89,7 +89,7 @@ router.delete('/templates/:id', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYS
   catch (err) { next(err); }
 });
 
-router.post('/templates/:id/toggle', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, SYSTEM_TENANT_ROLES.SALES_MANAGER), validate({ params: idParam }), async (req, res, next) => {
+router.post('/templates/:id/toggle', requireRole(...MANAGER_TIER_ROLES), validate({ params: idParam }), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(req.tenant, `UPDATE sms_templates SET is_visible = NOT is_visible WHERE id = $1 AND deleted_at IS NULL RETURNING ${TPL_COLS}`, [req.params.id]);
     res.json({ data: rows[0], meta: { requestId: req.id } });
