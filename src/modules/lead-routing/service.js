@@ -86,7 +86,10 @@ const eligibleMembers = async (tenant, member_ids) => {
 // generalised from one hardcoded source to any origin predicate. Ties break on
 // id so the choice is stable.
 const pickLoadBalanced = async (tenant, members, origin) => {
-  const pred = originSqlPredicate(origin, 'l');
+  // Balance on leads from THIS origin when we have one; otherwise on the
+  // member's whole open queue, which is the closest sensible meaning of
+  // "least loaded" for a source-matched (e.g. Social Media) pool.
+  const pred = (origin && originSqlPredicate(origin, 'l')) || 'l.converted_at IS NULL';
   const { rows } = await tenantQuery(
     tenant,
     `SELECT u.id
@@ -126,12 +129,21 @@ export const pickRoundRobin = (members, lastAssignedUserId) => {
 // An empty intersection means this pool has nobody the caller may assign to,
 // so we move on to the next pool rather than escaping the restriction.
 export const resolveRoutingPoolAssignee = async (tenant, lead, { restrictPool = null } = {}) => {
+  // May be null — a lead whose channel matches none of the built-ins can still
+  // be claimed by a pool through source_names (e.g. "Social Media"), so we do
+  // NOT bail out here.
   const origin = classifyOrigin(lead);
-  if (!origin) return null;
+  const source = lead?.first_touch_source ?? null;
+  const channel = lead?.first_touch_channel ?? null;
+  if (!origin && !source && !channel) return null;
 
   let pools;
   try {
-    pools = await repo.findActiveForOrigin(tenant, origin);
+    pools = await repo.findActiveForLead(tenant, {
+      origin,
+      source: lead?.first_touch_source ?? null,
+      channel: lead?.first_touch_channel ?? null,
+    });
   } catch (err) {
     // A tenant whose DB predates the lead_routing_pools migration must not
     // break lead intake — fall through to the assignment rules.
@@ -150,10 +162,38 @@ export const resolveRoutingPoolAssignee = async (tenant, lead, { restrictPool = 
       ? pickRoundRobin(members, pool.last_assigned_user_id)
       // eslint-disable-next-line no-await-in-loop
       : await pickLoadBalanced(tenant, members, origin);
-    if (user_id) return { user_id, pool, origin };
+    if (user_id) return { user_id, pool, origin: origin ?? source ?? channel };
   }
   return null;
 };
 
 export const recordPoolAssignment = (tenant, poolId, userId) =>
   repo.recordAssignment(tenant, poolId, userId);
+
+// MoM 5.2: when a stale lead is auto-reassigned, a lead that arrived through a
+// routing pool must go back to that SAME pool's configured people — not to any
+// counsellor/telecaller in the tenant. Otherwise a "Social Leads go only to
+// these five" rule silently leaks the moment a lead goes quiet for a week.
+//
+// Returns a user id, or null when this lead came through no pool (or the pool
+// has nobody else eligible) — the caller then falls back to the same-role
+// tenant-wide pick.
+//
+// `excludeUserId` is the current owner: handing the lead back to the person
+// who let it go stale would defeat the whole mechanism.
+export const pickPoolReplacement = async (tenant, lead, excludeUserId) => {
+  const match = await resolveRoutingPoolAssignee(tenant, lead);
+  if (!match) return null;
+
+  const members = await eligibleMembers(tenant, match.pool.member_ids);
+  const candidates = members.filter((id) => id !== excludeUserId);
+  if (!candidates.length) return null;
+
+  // Reuse the pool's own strategy so reassignment spreads the same way normal
+  // intake does.
+  if (match.pool.strategy === 'round_robin') {
+    return pickRoundRobin(candidates, match.pool.last_assigned_user_id);
+  }
+  const origin = classifyOrigin(lead);
+  return pickLoadBalanced(tenant, candidates, origin);
+};

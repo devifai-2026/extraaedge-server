@@ -1,6 +1,6 @@
 import { tenantQuery } from '../../db/tenant.js';
 
-const COLS = `id, name, origins, member_ids, strategy, priority, is_active,
+const COLS = `id, name, origins, source_names, member_ids, strategy, priority, is_active,
               last_assigned_user_id, last_assigned_at, total_assignments,
               created_at, updated_at`;
 
@@ -23,16 +23,33 @@ export const findById = async (tenant, id) => {
   return rows[0] ?? null;
 };
 
-// Active pools claiming this origin, best-priority first. `origins @> ARRAY[x]`
-// rides the GIN index.
-export const findActiveForOrigin = async (tenant, origin) => {
+// Active pools that claim a lead, best-priority first. A pool matches when
+// EITHER
+//   (a) the lead's derived origin is in `origins`  — the built-in channels, or
+//   (b) the lead's own first_touch_source/channel text appears in
+//       `source_names` — the tenant's own vocabulary ("Social Media").
+//
+// (b) is a case-insensitive comparison, so the array is lowercased on both
+// sides; that means it can't ride the GIN index, but the active-pool set is a
+// handful of rows per tenant and is already narrowed by the is_active partial
+// index, so it stays cheap.
+//
+// `origin` may be null (a lead with no recognisable channel) — such a lead can
+// still be claimed through source_names, which is the whole point.
+export const findActiveForLead = async (tenant, { origin, source, channel }) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT ${COLS} FROM lead_routing_pools
       WHERE is_active AND deleted_at IS NULL
-        AND origins @> ARRAY[$1]::text[]
+        AND (
+          ($1::text IS NOT NULL AND origins @> ARRAY[$1]::text[])
+          OR EXISTS (
+            SELECT 1 FROM unnest(source_names) sn
+             WHERE lower(sn) = lower($2::text) OR lower(sn) = lower($3::text)
+          )
+        )
       ORDER BY priority, created_at`,
-    [origin],
+    [origin ?? null, source ?? null, channel ?? null],
   );
   return rows;
 };
@@ -40,12 +57,13 @@ export const findActiveForOrigin = async (tenant, origin) => {
 export const insert = async (tenant, input) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO lead_routing_pools (name, origins, member_ids, strategy, priority, is_active)
-     VALUES ($1,$2::text[],$3::uuid[],$4,$5,$6)
+    `INSERT INTO lead_routing_pools (name, origins, source_names, member_ids, strategy, priority, is_active)
+     VALUES ($1,$2::text[],$3::text[],$4::uuid[],$5,$6,$7)
      RETURNING ${COLS}`,
     [
       input.name,
       input.origins ?? [],
+      input.source_names ?? [],
       input.member_ids ?? [],
       input.strategy ?? 'load_balanced',
       input.priority ?? 100,
@@ -57,7 +75,7 @@ export const insert = async (tenant, input) => {
 
 // Only these columns are patchable — the round-robin cursor and the counters
 // are owned by the resolver, never by the API.
-const UPDATABLE = ['name', 'origins', 'member_ids', 'strategy', 'priority', 'is_active'];
+const UPDATABLE = ['name', 'origins', 'source_names', 'member_ids', 'strategy', 'priority', 'is_active'];
 
 export const update = async (tenant, id, updates) => {
   const fields = [];
@@ -66,7 +84,7 @@ export const update = async (tenant, id, updates) => {
     if (updates[key] === undefined) continue;
     params.push(updates[key]);
     // origins/member_ids need an explicit array cast for the pg driver.
-    const cast = key === 'origins' ? '::text[]' : key === 'member_ids' ? '::uuid[]' : '';
+    const cast = (key === 'origins' || key === 'source_names') ? '::text[]' : key === 'member_ids' ? '::uuid[]' : '';
     fields.push(`${key} = $${params.length}${cast}`);
   }
   if (!fields.length) return findById(tenant, id);
@@ -109,7 +127,7 @@ export const recordAssignment = async (tenant, id, userId) => {
 export const poolsContainingUser = async (tenant, userId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT id, name, origins, is_active FROM lead_routing_pools
+    `SELECT id, name, origins, source_names, is_active FROM lead_routing_pools
       WHERE deleted_at IS NULL AND member_ids @> ARRAY[$1]::uuid[]
       ORDER BY priority, created_at`,
     [userId],

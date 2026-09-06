@@ -32,6 +32,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
+import { teamHierarchy } from '../users/repo.js';
 import { getUploadSignedUrl, getDownloadSignedUrl, deleteObject, headObject, buildKey } from '../../lib/r2.js';
 import { last10Digits } from '../../lib/phone.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
@@ -43,10 +44,13 @@ const router = express.Router();
 const MAX_BYTES = 100 * 1024 * 1024; // 100 MB, consistent with lead_call_recordings
 
 // Manager-tier roles that may review / play / delete device recordings.
+// telecaller_lead is here so a lead can listen to their own telecallers'
+// calls; what they can actually SEE is narrowed by visibleUploaderIds below.
 const MANAGER_ROLES = [
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
 ];
 
 // QA reviewers list and play recordings to score them (see modules/qa-reviews),
@@ -448,9 +452,56 @@ router.post(
 // (enforced per-query via `ownOnly`). Managers/admins see everything in scope.
 router.use(authRequired, tenantRequired, requireRole(...READ_ROLES, ...LEAD_OWNER_ROLES));
 
-// True when the actor is limited to their own uploaded recordings — the
-// front-line roles (counsellor / telecaller). Manager tiers see their scope.
-const isOwnOnly = (user) => LEAD_OWNER_ROLES.includes(user.role);
+// Sentinel for "branch manager with no branch" — matches no row.
+const NO_BRANCH = '00000000-0000-0000-0000-000000000000';
+
+// Which uploaders' recordings this actor may see.
+//
+// Returns null for "no restriction", or an array of user ids to constrain
+// `device_recordings.uploaded_by` to. Callers MUST apply it — before this
+// existed the only filter was "own uploads" for the front line, and everyone
+// else saw every recording in the tenant unless the FE happened to pass a
+// branch_id, so one team lead could listen to another team's calls.
+//
+//   counsellor / telecaller   -> their own uploads only
+//   sales_manager /
+//   telecaller_lead           -> their own downstream team subtree
+//   branch_manager            -> their whole branch (branch-wide by design;
+//                                handled via branchScopeId, not this list)
+//   super_admin / qa          -> everything
+const visibleUploaderIds = async (tenant, user) => {
+  if (LEAD_OWNER_ROLES.includes(user.role)) return [user.id];
+  if (user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER
+      || user.role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD) {
+    const team = await teamHierarchy(tenant, user.id);
+    // teamHierarchy includes the actor; a lead with no reports still sees
+    // their own uploads rather than the whole tenant.
+    return team.length ? team : [user.id];
+  }
+  return null;
+};
+
+// Branch managers are branch-scoped, not subtree-scoped. Returns the branch
+// id to force onto the query, or null when the actor isn't branch-limited.
+// Previously the branch filter was applied ONLY when the client sent
+// ?branch_id=, so a branch manager who didn't use the switcher saw every
+// recording in the tenant.
+const branchScopeId = async (tenant, user) => {
+  if (user.role !== SYSTEM_TENANT_ROLES.BRANCH_MANAGER) return null;
+  const { rows } = await tenantQuery(tenant, `SELECT branch_id FROM users WHERE id = $1`, [user.id]);
+  // No branch assigned yet -> see nothing, rather than leaking the tenant.
+  return rows[0]?.branch_id ?? NO_BRANCH;
+};
+
+// Shared read guard for the single-recording routes: throws notFound (not
+// forbidden — we don't confirm the row exists) when the recording's uploader
+// is outside the actor's scope.
+const assertRecordingVisible = async (req, recording) => {
+  const allowed = await visibleUploaderIds(req.tenant, req.user);
+  if (allowed && !allowed.includes(recording.uploaded_by)) throw notFound('Recording not found');
+  const branchId = await branchScopeId(req.tenant, req.user);
+  if (branchId && recording.branch_id !== branchId) throw notFound('Recording not found');
+};
 
 const listQuery = z.object({
   // 'matched' includes multi-lead matches — both tabs of the review UI only
@@ -471,7 +522,14 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
   try {
     const conds = ['dr.deleted_at IS NULL'];
     const params = [];
-    if (isOwnOnly(req.user)) { params.push(req.user.id); conds.push(`dr.uploaded_by = $${params.length}`); }
+    const allowedUploaders = await visibleUploaderIds(req.tenant, req.user);
+    if (allowedUploaders) {
+      params.push(allowedUploaders);
+      conds.push(`dr.uploaded_by = ANY($${params.length}::uuid[])`);
+    }
+    // Branch managers are pinned to their own branch regardless of the query.
+    const forcedBranchId = await branchScopeId(req.tenant, req.user);
+    if (forcedBranchId) { params.push(forcedBranchId); conds.push(`dr.branch_id = $${params.length}`); }
     if (req.query.match_status === 'matched') {
       conds.push(`dr.match_status IN ('matched', 'multi')`);
     } else if (req.query.match_status) {
@@ -508,11 +566,11 @@ router.get('/:id/url', validate({ params: idParam }), async (req, res, next) => 
   try {
     const { rows } = await tenantQuery(
       req.tenant,
-      `SELECT r2_key, file_name, uploaded_by FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT r2_key, file_name, uploaded_by, branch_id FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
       [req.params.id],
     );
     if (!rows[0]) throw notFound('Recording not found');
-    if (isOwnOnly(req.user) && rows[0].uploaded_by !== req.user.id) throw notFound('Recording not found');
+    await assertRecordingVisible(req, rows[0]);
     const url = await getDownloadSignedUrl({ key: rows[0].r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS });
     res.json({ data: { url, file_name: rows[0].file_name }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
@@ -524,11 +582,11 @@ router.post('/:id/attach', validate({ params: idParam, body: attachBody }), asyn
   try {
     const { rows: recRows } = await tenantQuery(
       req.tenant,
-      `SELECT id, file_name, duration_seconds, uploaded_by FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT id, file_name, duration_seconds, uploaded_by, branch_id FROM device_recordings WHERE id = $1 AND deleted_at IS NULL`,
       [req.params.id],
     );
     if (!recRows[0]) throw notFound('Recording not found');
-    if (isOwnOnly(req.user) && recRows[0].uploaded_by !== req.user.id) throw notFound('Recording not found');
+    await assertRecordingVisible(req, recRows[0]);
     const { rows: leadRows } = await tenantQuery(
       req.tenant,
       `SELECT id FROM leads WHERE id = $1 AND deleted_at IS NULL`,

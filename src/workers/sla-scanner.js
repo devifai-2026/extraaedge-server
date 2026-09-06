@@ -4,6 +4,7 @@ import { pushNotification } from '../modules/notifications/service.js';
 import { evaluateCondition } from '../services/rule-engine.js';
 import { managerChain } from '../modules/users/repo.js';
 import { pickSameRoleReplacement, policyReassignsOnEscalation } from '../modules/sla/reassign.js';
+import { pickPoolReplacement } from '../modules/lead-routing/service.js';
 import { publish } from '../lib/queue.js';
 import { QUEUE_NAMES, EVENT_TYPES } from '../config/constants.js';
 import { logger } from '../lib/logger.js';
@@ -214,8 +215,22 @@ const tick = async () => {
             // still the escalation.
             let reassignedTo = null;
             if (reassigns && e.assigned_to) {
+              // MoM 5.2: a lead that arrived through a routing pool goes back
+              // to that SAME pool's configured people. Handing a "Social
+              // Leads" lead to any counsellor in the tenant would quietly
+              // break the rule the admin configured. Falls through to the
+              // same-role tenant-wide pick when the lead came through no pool
+              // (or that pool has nobody else eligible).
               // eslint-disable-next-line no-await-in-loop
-              reassignedTo = await pickSameRoleReplacement(tenant, e.assigned_to);
+              const { rows: [leadRow] } = await tenantQuery(
+                tenant,
+                `SELECT id, first_touch_channel, first_touch_source FROM leads WHERE id = $1`,
+                [e.lead_id],
+              );
+              // eslint-disable-next-line no-await-in-loop
+              reassignedTo = leadRow ? await pickPoolReplacement(tenant, leadRow, e.assigned_to) : null;
+              // eslint-disable-next-line no-await-in-loop
+              if (!reassignedTo) reassignedTo = await pickSameRoleReplacement(tenant, e.assigned_to);
               if (reassignedTo) {
                 // eslint-disable-next-line no-await-in-loop
                 await reassignStaleLead(tenant, {
