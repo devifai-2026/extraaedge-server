@@ -496,7 +496,15 @@ const branchScopeId = async (tenant, user) => {
 // Shared read guard for the single-recording routes: throws notFound (not
 // forbidden — we don't confirm the row exists) when the recording's uploader
 // is outside the actor's scope.
+//
+// telecaller_lead is exempt: it reviews ANY recording in the tenant (see
+// modules/qa-reviews REVIEWER_ROLES / applyReviewScope), and the QA queue's
+// player fetches its audio through this very route — scoping it here would
+// 403 the review flow for every call outside its own team. Its team
+// restriction still governs the Call Recordings LIST below, which is that
+// team's upload history rather than a review surface.
 const assertRecordingVisible = async (req, recording) => {
+  if (req.user.role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD) return;
   const allowed = await visibleUploaderIds(req.tenant, req.user);
   if (allowed && !allowed.includes(recording.uploaded_by)) throw notFound('Recording not found');
   const branchId = await branchScopeId(req.tenant, req.user);
@@ -542,14 +550,21 @@ router.get('/', validate({ query: listQuery }), async (req, res, next) => {
     params.push(req.query.limit, offset);
     const { rows } = await tenantQuery(
       req.tenant,
+      // qa_reviews joins 1:0..1 — `qa_reviews_recording_uq` allows exactly one
+      // live review per recording — so this cannot multiply rows or skew the
+      // count(*) OVER() total.
       `SELECT dr.id, dr.lead_id, dr.phone_raw, dr.phone_digits, dr.match_status,
               dr.multi_match, dr.file_name, dr.size_bytes, dr.duration_seconds,
               dr.device_id, dr.uploaded_at, l.name AS lead_name,
               u.name AS uploaded_by_name,
+              qr.id AS review_id, qr.overall_percent, qr.reviewed_at,
+              rb.name AS reviewed_by_name,
               count(*) OVER() AS total_count
          FROM device_recordings dr
          LEFT JOIN leads l ON l.id = dr.lead_id
          LEFT JOIN users u ON u.id = dr.uploaded_by
+         LEFT JOIN qa_reviews qr ON qr.recording_id = dr.id AND qr.deleted_at IS NULL
+         LEFT JOIN users rb ON rb.id = qr.reviewed_by
         WHERE ${conds.join(' AND ')}
         ORDER BY dr.uploaded_at DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}`,

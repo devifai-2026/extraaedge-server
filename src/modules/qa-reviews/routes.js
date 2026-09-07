@@ -41,15 +41,16 @@ const REVIEWER_ROLES = [
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
 ];
-// Who may read the scorecards back. telecaller_lead is here because its tab
-// grant already includes 'qa.feedback' — without it the page sat in their
-// sidebar and 403'd on load.
+// Who may read the aggregate scorecards back (the QA Feedback report).
+// telecaller_lead is deliberately NOT here: it scores its own team's calls via
+// the queue above, but the cross-team feedback report belongs to the tiers
+// above it. Its 'qa.feedback' tab is withheld to match, so no page appears in
+// its sidebar that would 403.
 const READER_ROLES = [
   SYSTEM_TENANT_ROLES.QA,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
-  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
 ];
 
 // A branch_manager only ever sees their own branch; anyone else may pass
@@ -81,19 +82,22 @@ const applyBranch = async (req, requested, col, conds, params) => {
 
 // Constrain a query to the reviewers/scorecards this actor may see.
 //
-// branch_manager is handled by applyBranch (branch-wide, by design). The
-// subtree-scoped tiers — sales_manager and telecaller_lead — are narrowed to
-// the people who actually report to them, so one team lead can never read or
-// score another team's calls. QA and super_admin are unrestricted.
+// branch_manager is handled by applyBranch (branch-wide, by design).
+// sales_manager is narrowed to the people who actually report to it — before
+// this existed there was NO team filter here at all, so a sales_manager could
+// read every counsellor's scorecards tenant-wide.
 //
-// Before this existed there was NO team filter here at all: a sales_manager
-// could read every counsellor's scorecards tenant-wide.
+// telecaller_lead is deliberately NOT narrowed here. It acts as a REVIEWER:
+// per the product decision it may review any recording in the tenant, not
+// only its own telecallers'. Its team restriction still applies to the
+// separate Call Recordings log (device-recordings visibleUploaderIds) — that
+// is its team's upload history — but reviewing is a tenant-wide duty.
 //
 // `col` is the qualified column holding the reviewed user (dr.uploaded_by on
 // the queue, qr.counsellor_id on the scorecards).
 const applyReviewScope = async (req, col, conds, params) => {
   const role = req.user.role;
-  if (role !== SYSTEM_TENANT_ROLES.SALES_MANAGER && role !== SYSTEM_TENANT_ROLES.TELECALLER_LEAD) return;
+  if (role !== SYSTEM_TENANT_ROLES.SALES_MANAGER) return;
   const team = await teamHierarchy(req.tenant, req.user.id);
   // teamHierarchy includes the actor; a lead with no reports still sees only
   // themselves rather than falling through to an unfiltered read.
@@ -101,8 +105,15 @@ const applyReviewScope = async (req, col, conds, params) => {
   conds.push(`${col} = ANY($${params.length}::uuid[])`);
 };
 
+// Anyone who scores OR reads needs the rubric — a scorer can't render the
+// score dialog without it. It's tenant-wide config (parameter names + max
+// scores), not per-counsellor data, so there is nothing to scope here.
+// De-duplicated because the two lists overlap and requireRole does a flat
+// includes().
+const RUBRIC_ROLES = [...new Set([...REVIEWER_ROLES, ...READER_ROLES])];
+
 // ------------------------------- RUBRIC -------------------------------------
-router.get('/parameters', requireRole(...READER_ROLES), async (req, res, next) => {
+router.get('/parameters', requireRole(...RUBRIC_ROLES), async (req, res, next) => {
   try {
     const { rows } = await tenantQuery(
       req.tenant,
@@ -182,7 +193,11 @@ const assertReviewableByActor = async (req, rec) => {
     if (!pin || rec.branch_id !== pin) throw notFound('Recording not found');
     return;
   }
-  if (role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD || role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  // telecaller_lead is intentionally absent: it reviews any recording (see
+  // applyReviewScope). sales_manager is not in REVIEWER_ROLES and so never
+  // reaches this, but the check is kept so adding it later can't silently
+  // grant tenant-wide scoring.
+  if (role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
     const team = await teamHierarchy(req.tenant, req.user.id);
     const allowed = team.length ? team : [req.user.id];
     if (!allowed.includes(rec.uploaded_by)) throw notFound('Recording not found');

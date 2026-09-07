@@ -96,15 +96,16 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
     // everything except tenant administration and the third-party integration
     // console.
     //
-    // 'qa.reviews' (the scoring queue) is granted to telecaller_lead only —
-    // it reviews its own telecallers' calls. sales_manager keeps read-only QA
-    // feedback ('qa.feedback', part of the set below) but does not score, so
-    // the queue tab would 403 for them.
+    // The two QA tabs are split deliberately between the tiers:
+    //   sales_manager   — 'qa.feedback' only (reads scorecards, doesn't score)
+    //   telecaller_lead — 'qa.reviews' only (scores its own telecallers' calls;
+    //                     the aggregate feedback report belongs to the tiers
+    //                     above it, so it is withheld here)
     const teamLeadBase = DEFAULT_TAB_KEYS
       .filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration' && t !== 'qa.reviews');
     const teamLeadTabs = Object.fromEntries(teamLeadBase.map((t) => [t, 'full']));
     const telecallerLeadTabs = Object.fromEntries(
-      [...teamLeadBase, 'qa.reviews'].map((t) => [t, 'full']),
+      [...teamLeadBase.filter((t) => t !== 'qa.feedback'), 'qa.reviews'].map((t) => [t, 'full']),
     );
 
     // Default custom roles with tab permissions
