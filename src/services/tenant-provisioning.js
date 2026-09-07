@@ -93,13 +93,18 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       'admissions.my_students': 'full',
     };
     // Team-lead tab grant, shared by `sales_manager` and `telecaller_lead`:
-    // everything except tenant administration, the third-party integration
-    // console, and the QA scoring queue (whose routes accept only qa +
-    // super_admin, so the tab would 403 on load).
-    const teamLeadTabs = Object.fromEntries(
-      DEFAULT_TAB_KEYS
-        .filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration' && t !== 'qa.reviews')
-        .map((t) => [t, 'full']),
+    // everything except tenant administration and the third-party integration
+    // console.
+    //
+    // 'qa.reviews' (the scoring queue) is granted to telecaller_lead only —
+    // it reviews its own telecallers' calls. sales_manager keeps read-only QA
+    // feedback ('qa.feedback', part of the set below) but does not score, so
+    // the queue tab would 403 for them.
+    const teamLeadBase = DEFAULT_TAB_KEYS
+      .filter((t) => !t.startsWith('advanced.') && t !== 'third_party_integration' && t !== 'qa.reviews');
+    const teamLeadTabs = Object.fromEntries(teamLeadBase.map((t) => [t, 'full']));
+    const telecallerLeadTabs = Object.fromEntries(
+      [...teamLeadBase, 'qa.reviews'].map((t) => [t, 'full']),
     );
 
     // Default custom roles with tab permissions
@@ -110,16 +115,15 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       // CSV export and sudo-login (impersonation) — are enforced at the route
       // layer, not via tab keys, so the tab grant can be the full set. Lead /
       // analytics visibility is scoped server-side to their branch subtree.
-      // 'qa.reviews' is withheld from both manager tiers: the scoring routes
-      // behind it accept only qa + super_admin, so granting the tab would put
-      // a page in their sidebar that 403s on load.
-      { name: 'branch_manager', description: 'Runs a branch — admin-like, minus lead export & user impersonation', scope: 'branch_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.filter((t) => t !== 'qa.reviews').map((t) => [t, 'full'])) },
+      // 'qa.reviews' IS granted now: a branch_manager scores calls in their
+      // own branch (qa-reviews REVIEWER_ROLES + applyBranch).
+      { name: 'branch_manager', description: 'Runs a branch — admin-like, minus lead export & user impersonation', scope: 'branch_manager', is_system: true, tab_permissions: Object.fromEntries(DEFAULT_TAB_KEYS.map((t) => [t, 'full'])) },
       { name: 'sales_manager', description: 'Manages a team of counsellors', scope: 'sales_manager', is_system: true, tab_permissions: teamLeadTabs },
       { name: 'counsellor', description: 'Handles assigned leads', scope: 'counsellor', is_system: true, tab_permissions: frontLineTabs },
       // ---- Telecalling side of the front line ----------------------------
       // telecaller_lead runs a team of telecallers under a sales_manager. Same
       // surfaces and same team-subtree scoping as a sales_manager, one tier down.
-      { name: 'telecaller_lead', description: 'Runs a team of telecallers', scope: 'telecaller_lead', is_system: true, tab_permissions: teamLeadTabs },
+      { name: 'telecaller_lead', description: 'Runs a team of telecallers', scope: 'telecaller_lead', is_system: true, tab_permissions: telecallerLeadTabs },
       // telecaller works a personal queue of assigned leads, exactly like a
       // counsellor — it is a valid leads.assigned_to owner.
       { name: 'telecaller', description: 'Handles assigned leads (telecalling)', scope: 'telecaller', is_system: true, tab_permissions: frontLineTabs },

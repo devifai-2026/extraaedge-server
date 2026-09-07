@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { authRequired } from '../../middleware/auth.js';
 import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
+import { teamHierarchy } from '../users/repo.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { notFound, validationError } from '../../lib/errors.js';
@@ -30,15 +31,25 @@ const router = express.Router();
 
 router.use(authRequired, tenantRequired);
 
-// Who may score a call: the QA role itself, plus super_admin (so an owner can
-// review without provisioning a QA seat).
-const REVIEWER_ROLES = [SYSTEM_TENANT_ROLES.QA, SYSTEM_TENANT_ROLES.SUPER_ADMIN];
-// Who may read the scorecards back.
+// Who may score a call. The QA role and super_admin review across the tenant;
+// a branch_manager reviews their branch, and a telecaller_lead reviews their
+// own telecallers — both narrowed by applyReviewScope below, so widening this
+// list does NOT widen what anyone can see.
+const REVIEWER_ROLES = [
+  SYSTEM_TENANT_ROLES.QA,
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+];
+// Who may read the scorecards back. telecaller_lead is here because its tab
+// grant already includes 'qa.feedback' — without it the page sat in their
+// sidebar and 403'd on load.
 const READER_ROLES = [
   SYSTEM_TENANT_ROLES.QA,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
 ];
 
 // A branch_manager only ever sees their own branch; anyone else may pass
@@ -66,6 +77,28 @@ const applyBranch = async (req, requested, col, conds, params) => {
   if (!branch) return;
   params.push(branch);
   conds.push(`${col} = $${params.length}`);
+};
+
+// Constrain a query to the reviewers/scorecards this actor may see.
+//
+// branch_manager is handled by applyBranch (branch-wide, by design). The
+// subtree-scoped tiers — sales_manager and telecaller_lead — are narrowed to
+// the people who actually report to them, so one team lead can never read or
+// score another team's calls. QA and super_admin are unrestricted.
+//
+// Before this existed there was NO team filter here at all: a sales_manager
+// could read every counsellor's scorecards tenant-wide.
+//
+// `col` is the qualified column holding the reviewed user (dr.uploaded_by on
+// the queue, qr.counsellor_id on the scorecards).
+const applyReviewScope = async (req, col, conds, params) => {
+  const role = req.user.role;
+  if (role !== SYSTEM_TENANT_ROLES.SALES_MANAGER && role !== SYSTEM_TENANT_ROLES.TELECALLER_LEAD) return;
+  const team = await teamHierarchy(req.tenant, req.user.id);
+  // teamHierarchy includes the actor; a lead with no reports still sees only
+  // themselves rather than falling through to an unfiltered read.
+  params.push(team.length ? team : [req.user.id]);
+  conds.push(`${col} = ANY($${params.length}::uuid[])`);
 };
 
 // ------------------------------- RUBRIC -------------------------------------
@@ -105,6 +138,7 @@ router.get('/queue', requireRole(...REVIEWER_ROLES), validate({ query: queueQuer
     const conds = [`dr.deleted_at IS NULL`, `dr.match_status IN ('matched','multi')`];
     const params = [];
     await applyBranch(req, req.query.branch_id, 'dr.branch_id', conds, params);
+    await applyReviewScope(req, 'dr.uploaded_by', conds, params);
     if (req.query.counsellor_id) { params.push(req.query.counsellor_id); conds.push(`dr.uploaded_by = $${params.length}`); }
     if (req.query.status === 'pending') conds.push(`qr.id IS NULL`);
     if (req.query.status === 'reviewed') conds.push(`qr.id IS NOT NULL`);
@@ -139,6 +173,22 @@ router.get('/queue', requireRole(...REVIEWER_ROLES), validate({ query: queueQuer
   } catch (err) { next(err); }
 });
 
+// Write-side mirror of applyReviewScope + applyBranch, for the single-call
+// scoring route where there is no query to attach predicates to.
+const assertReviewableByActor = async (req, rec) => {
+  const role = req.user.role;
+  if (role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+    const pin = await pinnedBranch(req.tenant, req.user);
+    if (!pin || rec.branch_id !== pin) throw notFound('Recording not found');
+    return;
+  }
+  if (role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD || role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+    const team = await teamHierarchy(req.tenant, req.user.id);
+    const allowed = team.length ? team : [req.user.id];
+    if (!allowed.includes(rec.uploaded_by)) throw notFound('Recording not found');
+  }
+};
+
 // ------------------------------- SUBMIT -------------------------------------
 // Upsert: re-submitting replaces the scores and comment in place, so a review
 // can be corrected without accumulating duplicates.
@@ -166,6 +216,10 @@ router.post(
       );
       const rec = recRows[0];
       if (!rec) throw notFound('Recording not found');
+      // A branch_manager may only score their own branch, a telecaller_lead
+      // only their own telecallers. notFound (not forbidden) so we don't
+      // confirm the existence of a call outside their scope.
+      await assertReviewableByActor(req, rec);
       if (!['matched', 'multi'].includes(rec.match_status)) {
         throw validationError([{ path: 'recordingId', message: 'Only recordings attached to a lead can be reviewed' }]);
       }
@@ -247,6 +301,7 @@ router.get('/', requireRole(...READER_ROLES), validate({ query: listQuery }), as
     const conds = ['qr.deleted_at IS NULL'];
     const params = [];
     await applyBranch(req, req.query.branch_id, 'qr.branch_id', conds, params);
+    await applyReviewScope(req, 'qr.counsellor_id', conds, params);
     if (req.query.counsellor_id) { params.push(req.query.counsellor_id); conds.push(`qr.counsellor_id = $${params.length}`); }
     if (req.query.from) { params.push(req.query.from); conds.push(`qr.reviewed_at >= $${params.length}::date`); }
     if (req.query.to) { params.push(req.query.to); conds.push(`qr.reviewed_at < ($${params.length}::date + interval '1 day')`); }
@@ -304,6 +359,7 @@ router.get('/summary', requireRole(...READER_ROLES), validate({ query: summaryQu
     const conds = ['qr.deleted_at IS NULL'];
     const params = [];
     await applyBranch(req, req.query.branch_id, 'qr.branch_id', conds, params);
+    await applyReviewScope(req, 'qr.counsellor_id', conds, params);
     if (req.query.from) { params.push(req.query.from); conds.push(`qr.reviewed_at >= $${params.length}::date`); }
     if (req.query.to) { params.push(req.query.to); conds.push(`qr.reviewed_at < ($${params.length}::date + interval '1 day')`); }
 
