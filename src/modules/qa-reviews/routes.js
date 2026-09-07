@@ -87,11 +87,11 @@ const applyBranch = async (req, requested, col, conds, params) => {
 // this existed there was NO team filter here at all, so a sales_manager could
 // read every counsellor's scorecards tenant-wide.
 //
-// telecaller_lead is deliberately NOT narrowed here. It acts as a REVIEWER:
-// per the product decision it may review any recording in the tenant, not
-// only its own telecallers'. Its team restriction still applies to the
-// separate Call Recordings log (device-recordings visibleUploaderIds) — that
-// is its team's upload history — but reviewing is a tenant-wide duty.
+// telecaller_lead is deliberately NOT narrowed here, because its cross-team
+// access is READ-ONLY rather than absent: it can see and listen to any call in
+// the tenant, but assertReviewableByActor stops it SCORING anything outside
+// its own telecallers. The queue returns can_review per row so the UI reflects
+// that split.
 //
 // `col` is the qualified column holding the reviewed user (dr.uploaded_by on
 // the queue, qr.counsellor_id on the scorecards).
@@ -142,6 +142,16 @@ const queueQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
+// Uploader ids this actor may SCORE, or null for "anyone". Mirrors
+// assertReviewableByActor so the queue can flag each row up-front instead of
+// letting the UI discover the restriction through a rejected submit.
+const scorableUploaderIds = async (req) => {
+  const role = req.user.role;
+  if (role !== SYSTEM_TENANT_ROLES.TELECALLER_LEAD && role !== SYSTEM_TENANT_ROLES.SALES_MANAGER) return null;
+  const team = await teamHierarchy(req.tenant, req.user.id);
+  return team.length ? team : [req.user.id];
+};
+
 router.get('/queue', requireRole(...REVIEWER_ROLES), validate({ query: queueQuery }), async (req, res, next) => {
   try {
     // Only matched calls are reviewable: an unmatched recording has no lead
@@ -177,8 +187,15 @@ router.get('/queue', requireRole(...REVIEWER_ROLES), validate({ query: queueQuer
       params,
     );
     const total = rows[0] ? Number(rows[0].total_count) : 0;
+    // can_review: false rows are listen-only for this actor (another team's
+    // calls, for a telecaller_lead). A branch_manager is already constrained
+    // by applyBranch, so everything it can see it can also score.
+    const scorable = await scorableUploaderIds(req);
     res.json({
-      data: rows.map(({ total_count, ...r }) => r),
+      data: rows.map(({ total_count, ...r }) => ({
+        ...r,
+        can_review: !scorable || scorable.includes(r.counsellor_id),
+      })),
       meta: { requestId: req.id, total, page: req.query.page, limit: req.query.limit },
     });
   } catch (err) { next(err); }
@@ -193,11 +210,11 @@ const assertReviewableByActor = async (req, rec) => {
     if (!pin || rec.branch_id !== pin) throw notFound('Recording not found');
     return;
   }
-  // telecaller_lead is intentionally absent: it reviews any recording (see
-  // applyReviewScope). sales_manager is not in REVIEWER_ROLES and so never
-  // reaches this, but the check is kept so adding it later can't silently
-  // grant tenant-wide scoring.
-  if (role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
+  // telecaller_lead may LISTEN to any call in the tenant but may only SCORE
+  // its own telecallers' — another lead's team is read-only to it (MoM 3.1.7).
+  // The queue below returns can_review per row so the UI never offers a score
+  // button this would reject.
+  if (role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD || role === SYSTEM_TENANT_ROLES.SALES_MANAGER) {
     const team = await teamHierarchy(req.tenant, req.user.id);
     const allowed = team.length ? team : [req.user.id];
     if (!allowed.includes(rec.uploaded_by)) throw notFound('Recording not found');
