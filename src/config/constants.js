@@ -49,18 +49,28 @@ export const TEAM_SCOPED_MANAGER_ROLES = Object.freeze([
 ]);
 
 // Roles a lead may actually be assigned to. `leads.assigned_to` must always
-// point at an ACTIVE user holding one of these — manager tiers own a TEAM,
-// they don't carry leads in a personal queue. Enforced by
+// point at an ACTIVE user holding one of these. Enforced by
 // assertLeadOwnerTarget() in modules/leads/repo.js (the shared insert/update
 // sink) plus the assignment engine, the bulk-import resolver and the
 // integration pools.
 //
 // Historically this was the single literal 'counsellor'; telecallers work
-// leads the same way, so both buckets are owners now. Anything added here
-// must be a front-line role with no team beneath it.
+// leads the same way, so both buckets became owners.
+//
+// telecaller_lead is a DELIBERATE hybrid: it runs a team (it is also in
+// TEAM_SCOPED_MANAGER_ROLES) *and* carries a personal queue, because a
+// telecalling team lead works leads alongside the telecallers they manage.
+// It is the only role in both sets. Code that branches "owner vs manager"
+// must therefore test TEAM_SCOPED_MANAGER_ROLES **first** wherever the two
+// behaviours differ (lead distribution / fan-out), so a telecaller_lead keeps
+// managing instead of silently self-assigning — see assignByCreator() in
+// modules/leads/service.js, resolveAssignee() in
+// modules/bulk-ingestion/assignee-resolver.js and modules/quick-add/routes.js.
+// Any OTHER role added here must be a front-line role with no team beneath it.
 export const LEAD_OWNER_ROLES = Object.freeze([
   SYSTEM_TENANT_ROLES.COUNSELLOR,
   SYSTEM_TENANT_ROLES.TELECALLER,
+  SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
 ]);
 
 // Roles that get admin-like route access alongside super_admin. Used to
@@ -243,6 +253,15 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // Lead Transfer / Lead Report — admin + sales_manager. Telecaller /
   // Counsellor performance via the immutable lead_assignments ledger.
   'lead_transfer_report',
+  // Reassign Logs — super_admin ONLY. Actor-first audit of manual lead moves
+  // (who moved what, to whom, in bulk or one-off). Separate key from
+  // lead_transfer_report because managers legitimately read that report, but
+  // this one exists to audit the managers/admins themselves.
+  'reassign_logs',
+  // Stale Leads — the 6-day/7-day auto-handover rule made visible: what was
+  // flagged, what moved to whom, and what was held because nobody else in the
+  // same role class was free. Admin + manager tiers.
+  'stale_handovers',
   // Unmatched call recordings uploaded from the mobile app whose number
   // matched no lead — counsellors review their own, managers see scope, and
   // can create a lead from the number.

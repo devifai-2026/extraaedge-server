@@ -199,9 +199,14 @@ export const getLead = async (tenant, actor, id) => {
 const assignByCreator = async (tenant, actor, lead) => {
   if (!actor?.id || !actor.role) return false;
 
+  // NOTE: telecaller_lead is in BOTH LEAD_OWNER_ROLES and
+  // TEAM_SCOPED_MANAGER_ROLES. The manager check therefore runs FIRST (below)
+  // so a telecaller_lead creating a lead still fans it out across their team
+  // instead of self-assigning; this branch is the pure front line only.
+  //
   // A front-line creator (counsellor / telecaller) always owns what they
   // create — they carry a personal queue, so the lead is theirs by definition.
-  if (LEAD_OWNER_ROLES.includes(actor.role)) {
+  if (LEAD_OWNER_ROLES.includes(actor.role) && !TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
     const me = await usersRepo.findById(tenant, actor.id);
     const managerId = me?.manager_id ?? null;
     await tenantQuery(

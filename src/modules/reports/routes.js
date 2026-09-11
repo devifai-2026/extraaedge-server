@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
-import { QUEUE_NAMES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
+import { QUEUE_NAMES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import ExcelJS from 'exceljs';
@@ -234,6 +234,102 @@ router.get('/lead-transfers', adminOrManager, validate({ query: transferQuery })
     return res.json({
       data: rows,
       meta: { requestId: req.id, count: rows.length, lead_count: leadCount, transfer_count: transferCount, page: req.query.page, limit: req.query.limit },
+    });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// Reassign Logs — super_admin only. An actor-first audit of who moved leads
+// between owners, the inverse of /lead-transfers (which is lead-first, one row
+// per lead with its transfers attached).
+//
+// Why this exists: a routing pool can be configured perfectly and still be
+// bypassed, because a manual reassign overrides it. On SpeedUp a super_admin
+// bulk-moved ~2.4k leads onto a single counsellor in one action; the live lead
+// rows show only the end state, so from the Lead Manager it looked like the
+// distribution rule was leaking. Nothing in the UI surfaced the actor.
+//
+// Rows are BATCHES, not individual transfers: a bulk reassign writes one
+// lead_assignments row per lead, which would bury the reader in thousands of
+// near-identical lines. We group by (actor, from, to, type, reason, second) so
+// one bulk action collapses to one row carrying its lead count. `bulk` marks a
+// batch of more than one lead. Drill into a batch with ?batch_at=<iso> to get
+// its individual leads.
+const reassignLogQuery = z.object({
+  date_from: z.string().optional(),
+  date_to: z.string().optional(),
+  by_user_id: z.string().uuid().optional(),   // who performed it
+  from_user_id: z.string().uuid().optional(), // previous owner
+  to_user_id: z.string().uuid().optional(),   // new owner
+  assignment_type: z.enum(['assign', 'reassign', 'auto_assign', 'refer', 'unassign']).optional(),
+  // 'manual' (default) hides the auto_assign firehose — the routing engine's
+  // own writes are noise in an audit of human actions. 'all' includes them.
+  scope: z.enum(['manual', 'all']).optional().default('manual'),
+  // Only batches touching at least this many leads — surfaces bulk moves.
+  min_leads: z.coerce.number().int().min(1).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+router.get('/reassign-logs', requireRole(SYSTEM_TENANT_ROLES.SUPER_ADMIN), validate({ query: reassignLogQuery }), async (req, res, next) => {
+  try {
+    const q = req.query;
+    const where = ['la.assigned_by IS NOT NULL'];
+    const params = [];
+    const add = (sql, val) => { params.push(val); where.push(sql.replace('$$', `$${params.length}`)); };
+
+    // Manual-only by default: auto_assign rows are the engine's own writes.
+    if (q.assignment_type) add('la.assignment_type = $$', q.assignment_type);
+    else if (q.scope !== 'all') where.push("la.assignment_type <> 'auto_assign'");
+
+    if (q.date_from) add('la.created_at >= $$::timestamptz', q.date_from);
+    // Bare YYYY-MM-DD means "through the end of that day", same convention as
+    // the lead list's follow-up bounds.
+    if (q.date_to) {
+      add('la.created_at <= $$::timestamptz', /^\d{4}-\d{2}-\d{2}$/.test(q.date_to) ? `${q.date_to}T23:59:59.999` : q.date_to);
+    }
+    if (q.by_user_id) add('la.assigned_by = $$::uuid', q.by_user_id);
+    if (q.from_user_id) add('la.from_user_id = $$::uuid', q.from_user_id);
+    if (q.to_user_id) add('la.assigned_to = $$::uuid', q.to_user_id);
+
+    const limit = q.limit;
+    const offset = (q.page - 1) * limit;
+    params.push(limit, offset);
+
+    const having = q.min_leads ? `HAVING count(*) >= ${Number(q.min_leads)}` : '';
+
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT date_trunc('second', la.created_at)      AS batch_at,
+              la.assigned_by                           AS by_user_id,
+              b.name                                   AS by_name,
+              b.role                                   AS by_role,
+              la.from_user_id,
+              f.name                                   AS from_name,
+              la.assigned_to                           AS to_user_id,
+              u.name                                   AS to_name,
+              u.role                                   AS to_role,
+              la.assignment_type,
+              la.reason,
+              count(*)::int                            AS lead_count,
+              (count(*) > 1)                           AS bulk,
+              (array_agg(l.name ORDER BY l.name))[1:5] AS sample_leads
+         FROM lead_assignments la
+         JOIN leads l ON l.id = la.lead_id AND l.deleted_at IS NULL
+         LEFT JOIN users b ON b.id = la.assigned_by
+         LEFT JOIN users f ON f.id = la.from_user_id
+         LEFT JOIN users u ON u.id = la.assigned_to
+        WHERE ${where.join(' AND ')}
+        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+        ${having}
+        ORDER BY batch_at DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+
+    return res.json({
+      data: rows,
+      meta: { requestId: req.id, count: rows.length, page: q.page, limit: q.limit },
     });
   } catch (err) { next(err); }
 });

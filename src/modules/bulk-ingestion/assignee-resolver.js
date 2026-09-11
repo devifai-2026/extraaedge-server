@@ -123,7 +123,10 @@ export const resolveAssignee = async (tenant, cache, assigned_to_email) => {
   if (!user) return { assigned_to: null, manager_id: null };
 
   // A front-line user (counsellor / telecaller) owns the lead directly.
-  if (LEAD_OWNER_ROLES.includes(user.role)) {
+  // telecaller_lead is in both sets, so it is excluded here and handled by the
+  // manager fan-out below — naming a team lead in an import spreads the rows
+  // across their telecallers, which is what an importer means by that column.
+  if (LEAD_OWNER_ROLES.includes(user.role) && !TEAM_SCOPED_MANAGER_ROLES.includes(user.role)) {
     return { assigned_to: user.id, manager_id: user.manager_id ?? null };
   }
 

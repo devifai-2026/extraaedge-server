@@ -36,7 +36,11 @@ router.post('/', validate({ body: leadCreateSchema }), async (req, res, next) =>
   try {
     const body = { ...req.body };
     // Front line (counsellor / telecaller) self-assigns their quick-add.
-    const isCounsellor = LEAD_OWNER_ROLES.includes(req.user?.role);
+    // telecaller_lead is in both role sets; excluding the manager tiers here
+    // keeps it on the `isManager` path below (Unassigned + team stamp), the
+    // same behaviour a sales_manager gets.
+    const isCounsellor = LEAD_OWNER_ROLES.includes(req.user?.role)
+      && !TEAM_SCOPED_MANAGER_ROLES.includes(req.user?.role);
     // sales_manager + branch_manager both leave the quick-add Unassigned but
     // stamp their own team_id (legacy sales_manager scope) AND their branch_id
     // (branch_manager scope) so it surfaces in their bucket.

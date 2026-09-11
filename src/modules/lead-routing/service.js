@@ -186,8 +186,39 @@ export const pickPoolReplacement = async (tenant, lead, excludeUserId) => {
   if (!match) return null;
 
   const members = await eligibleMembers(tenant, match.pool.member_ids);
-  const candidates = members.filter((id) => id !== excludeUserId);
+  let candidates = members.filter((id) => id !== excludeUserId);
   if (!candidates.length) return null;
+
+  // Stay inside the OUTGOING owner's role class: a telecaller's stale lead
+  // goes to another telecaller, a counsellor's to another counsellor. The two
+  // halves of the front line run different playbooks, so a stale lead must
+  // never cross between them (the same invariant pickSameRoleReplacement
+  // enforces on the fallback path).
+  //
+  // Without this the pool pick silently outranked the role rule: a pool whose
+  // members are all counsellors handed telecaller leads to counsellors, which
+  // is exactly what happened on SpeedUp (819 leads crossed before this guard).
+  // When the pool has nobody left in the right class we return null so the
+  // caller falls through to pickSameRoleReplacement rather than crossing.
+  if (excludeUserId) {
+    const { rows: [outgoing] } = await tenantQuery(
+      tenant,
+      `SELECT role FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      [excludeUserId],
+    );
+    if (outgoing?.role) {
+      const { rows: sameClass } = await tenantQuery(
+        tenant,
+        `SELECT id FROM users
+          WHERE id = ANY($1::uuid[]) AND role = $2
+            AND is_active = true AND deleted_at IS NULL`,
+        [candidates, outgoing.role],
+      );
+      const keep = new Set(sameClass.map((r) => r.id));
+      candidates = candidates.filter((id) => keep.has(id));
+      if (!candidates.length) return null;
+    }
+  }
 
   // Reuse the pool's own strategy so reassignment spreads the same way normal
   // intake does.
