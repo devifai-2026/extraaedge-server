@@ -52,6 +52,9 @@ const handoverQuery = z.object({
   from_user_id: z.string().uuid().optional(),
   to_user_id: z.string().uuid().optional(),
   outcome: z.enum(['pending', 'moved', 'held', 'resolved']).optional(),
+  // 'history' (default) = what already happened. 'upcoming' = the pipeline:
+  // open leads still inside the window, ordered by how soon they go stale.
+  view: z.enum(['history', 'upcoming']).optional().default('history'),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(500).default(100),
 });
@@ -59,6 +62,113 @@ const handoverQuery = z.object({
 router.get('/handovers', requireRole(...MANAGER_TIER_ROLES), validate({ query: handoverQuery }), async (req, res, next) => {
   try {
     const q = req.query;
+
+    // ---- Upcoming: leads heading TOWARD a move -------------------------
+    // Same predicate the scanner flags on (workers/sla-scanner.js), just
+    // before the threshold instead of after: owned, open, not already
+    // flagged, and past the policy's backlog guard (a lead last touched
+    // before the policy existed never enters the rotation — see the
+    // BACKLOG GUARD comment in the scanner).
+    //
+    // due_at is when it goes stale (day 6) and move_at when it would be
+    // reassigned (day 7). The new owner is deliberately NOT predicted: the
+    // pick is made at escalation time from whoever is least loaded THEN, so
+    // naming someone now would be a guess that goes stale the moment anyone
+    // is assigned a lead. The UI shows "TBD" and the role class the lead
+    // will stay inside, which is the part that is actually knowable.
+    if (q.view === 'upcoming') {
+      const { rows: [policy] } = await tenantQuery(
+        req.tenant,
+        `SELECT id, no_activity_hours, escalate_after_hours, created_at
+           FROM sla_policies
+          WHERE is_active AND deleted_at IS NULL
+          ORDER BY created_at
+          LIMIT 1`,
+      );
+      if (!policy) {
+        return res.json({ data: [], meta: { requestId: req.id, count: 0, view: 'upcoming', totals: null } });
+      }
+
+      // $1 window hours, $2 backlog guard, $3 policy id, $4 escalate hours.
+      // Optional owner filter appends as $5.
+      const uParams = [
+        policy.no_activity_hours,
+        policy.created_at,
+        policy.id,
+        policy.escalate_after_hours ?? 0,
+      ];
+      const uConds = [
+        'l.deleted_at IS NULL',
+        'l.assigned_to IS NOT NULL',
+        'l.converted_at IS NULL',
+        'l.last_activity_at >= $2',                                 // backlog guard
+        "l.last_activity_at >= now() - ($1 * interval '1 hour')",   // not yet due
+        'NOT EXISTS (SELECT 1 FROM sla_alerts a WHERE a.lead_id = l.id AND a.policy_id = $3 AND a.resolved_at IS NULL)',
+      ];
+      if (q.from_user_id) {
+        uParams.push(q.from_user_id);
+        uConds.push(`l.assigned_to = $${uParams.length}::uuid`);
+      }
+      const uWhere = uConds.join(' AND ');
+
+      const pageParams = [...uParams, q.limit, (q.page - 1) * q.limit];
+      const { rows } = await tenantQuery(
+        req.tenant,
+        `SELECT l.id                AS lead_id,
+                l.name              AS lead_name,
+                l.phone             AS lead_phone,
+                l.last_activity_at,
+                l.assigned_to       AS from_user_id,
+                f.name              AS from_name,
+                f.role              AS from_role,
+                (l.last_activity_at + ($1 * interval '1 hour'))              AS due_at,
+                (l.last_activity_at + (($1 + $4) * interval '1 hour'))       AS move_at,
+                GREATEST(0, round(extract(epoch from (
+                  l.last_activity_at + ($1 * interval '1 hour') - now()
+                )) / 3600))::int    AS hours_left
+           FROM leads l
+           JOIN users f ON f.id = l.assigned_to
+          WHERE ${uWhere}
+          ORDER BY l.last_activity_at ASC
+          LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+
+      // uWhere references $1-$3 (+$5 when an owner filter is set) but never
+      // $4 (escalate hours, used only in the SELECT above). Postgres rejects a
+      // bind with more parameters than the statement references, so build the
+      // totals query with $4 consumed harmlessly rather than trimming the
+      // array — which would renumber the optional owner filter.
+      const { rows: [utot] } = await tenantQuery(
+        req.tenant,
+        `SELECT count(*)::int AS in_rotation,
+                count(*) FILTER (
+                  WHERE l.last_activity_at < now() - (GREATEST($1 - 24, 0) * interval '1 hour')
+                )::int AS due_within_24h,
+                ($4 * 0)::int AS _unused
+           FROM leads l
+          WHERE ${uWhere}`,
+        uParams,
+      );
+
+      return res.json({
+        data: rows,
+        meta: {
+          requestId: req.id,
+          count: rows.length,
+          view: 'upcoming',
+          page: q.page,
+          limit: q.limit,
+          policy: {
+            no_activity_hours: policy.no_activity_hours,
+            escalate_after_hours: policy.escalate_after_hours,
+          },
+          // Drop the $4-consuming placeholder column from the payload.
+          totals: utot ? { in_rotation: utot.in_rotation, due_within_24h: utot.due_within_24h } : null,
+        },
+      });
+    }
+
     const conds = ['l.deleted_at IS NULL'];
     const params = [];
     const add = (sql, val) => { params.push(val); conds.push(sql.replace('$$', `$${params.length}`)); };
@@ -88,6 +198,8 @@ router.get('/handovers', requireRole(...MANAGER_TIER_ROLES), validate({ query: h
               a.flagged_at,
               a.escalated_at,
               a.resolved_at,
+              a.hold_reason,
+              a.handover_attempts,
               a.assigned_to         AS from_user_id,
               f.name                AS from_name,
               f.role                AS from_role,

@@ -3,7 +3,7 @@ import { resolveTenantById, tenantQuery } from '../db/tenant.js';
 import { pushNotification } from '../modules/notifications/service.js';
 import { evaluateCondition } from '../services/rule-engine.js';
 import { managerChain } from '../modules/users/repo.js';
-import { pickSameRoleReplacement, policyReassignsOnEscalation } from '../modules/sla/reassign.js';
+import { pickSameRoleReplacement, pickSameRoleReplacementDetailed, policyReassignsOnEscalation, HOLD_REASONS } from '../modules/sla/reassign.js';
 import { pickPoolReplacement } from '../modules/lead-routing/service.js';
 import { publish } from '../lib/queue.js';
 import { QUEUE_NAMES, EVENT_TYPES } from '../config/constants.js';
@@ -198,22 +198,44 @@ const tick = async () => {
           const reassigns = policyReassignsOnEscalation(p);
           const { rows: toEscalate } = await tenantQuery(
             tenant,
+            // Two groups:
+            //   (a) never escalated and now past the escalation window;
+            //   (b) escalated earlier but STRANDED — no handover happened and
+            //       a hold reason was recorded. escalated_at is stamped before
+            //       the pick is attempted, so without this a failed pick froze
+            //       the lead with its inactive owner forever. Capped attempts
+            //       so a genuinely impossible case (a solo counsellor) stops
+            //       being retried every tick.
             `SELECT a.id, a.lead_id, a.assigned_to, u.manager_id
                FROM sla_alerts a LEFT JOIN users u ON u.id = a.assigned_to
-              WHERE a.policy_id = $1 AND a.resolved_at IS NULL AND a.escalated_at IS NULL
+              WHERE a.policy_id = $1 AND a.resolved_at IS NULL
                 AND a.flagged_at < now() - ($2 * interval '1 hour')
+                AND (
+                  a.escalated_at IS NULL
+                  OR (a.hold_reason IS NOT NULL AND a.handover_attempts < 10)
+                )
               LIMIT 200`,
             [p.id, p.escalate_after_hours],
           );
           for (const e of toEscalate) {
             // eslint-disable-next-line no-await-in-loop
-            await tenantQuery(tenant, `UPDATE sla_alerts SET escalated_at = now() WHERE id = $1`, [e.id]);
+            // COALESCE keeps the ORIGINAL escalation time on a retry — the
+            // day-7 moment is a fact, not something to rewrite each attempt.
+            await tenantQuery(
+              tenant,
+              `UPDATE sla_alerts
+                  SET escalated_at = COALESCE(escalated_at, now()),
+                      handover_attempts = handover_attempts + 1
+                WHERE id = $1`,
+              [e.id],
+            );
 
             // Hand the lead to a fresh owner in the same role class. Skipped
             // when the policy doesn't ask for it, or when there is nobody
             // else in that class — in which case the notification below is
             // still the escalation.
             let reassignedTo = null;
+            let holdReason = reassigns ? null : 'policy_no_reassign';
             if (reassigns && e.assigned_to) {
               // MoM 5.2: a lead that arrived through a routing pool goes back
               // to that SAME pool's configured people. Handing a "Social
@@ -229,8 +251,20 @@ const tick = async () => {
               );
               // eslint-disable-next-line no-await-in-loop
               reassignedTo = leadRow ? await pickPoolReplacement(tenant, leadRow, e.assigned_to) : null;
+              if (!reassignedTo) {
+                // eslint-disable-next-line no-await-in-loop
+                const detailed = await pickSameRoleReplacementDetailed(tenant, e.assigned_to);
+                reassignedTo = detailed.userId;
+                holdReason = detailed.reason;
+              }
+              // Record why nothing moved (or clear a stale reason on success)
+              // so the admin UI can name the cause per lead.
               // eslint-disable-next-line no-await-in-loop
-              if (!reassignedTo) reassignedTo = await pickSameRoleReplacement(tenant, e.assigned_to);
+              await tenantQuery(
+                tenant,
+                `UPDATE sla_alerts SET hold_reason = $2 WHERE id = $1`,
+                [e.id, reassignedTo ? null : (holdReason ?? HOLD_REASONS.NO_PEERS)],
+              );
               if (reassignedTo) {
                 // eslint-disable-next-line no-await-in-loop
                 await reassignStaleLead(tenant, {

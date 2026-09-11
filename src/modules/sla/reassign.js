@@ -27,6 +27,34 @@ export const policyReassignsOnEscalation = (policy) =>
 // or an owner whose role can't own leads at all. The caller must treat null as
 // "escalate the notification only" and leave the lead where it is; silently
 // unassigning it would be worse than a stale owner.
+// Why a handover could not happen. Stored on sla_alerts.hold_reason so the
+// admin UI can state the actual cause instead of guessing "nobody was free" —
+// which was wrong often enough to be misleading.
+export const HOLD_REASONS = Object.freeze({
+  NO_OWNER: 'no_owner',                 // the alert's owner row is gone
+  OWNER_NOT_LEAD_ROLE: 'owner_role',    // owner can no longer hold leads
+  NO_PEERS: 'no_peers',                 // nobody else in that role class
+  OK: null,
+});
+
+// Same as pickSameRoleReplacement but reports WHY when it can't pick.
+// Returns { userId, reason } — reason is null on success.
+export const pickSameRoleReplacementDetailed = async (tenant, currentOwnerId) => {
+  if (!currentOwnerId) return { userId: null, reason: HOLD_REASONS.NO_OWNER };
+  const { rows: [owner] } = await tenantQuery(
+    tenant,
+    `SELECT id, role, manager_id, branch_id FROM users
+      WHERE id = $1 AND deleted_at IS NULL`,
+    [currentOwnerId],
+  );
+  if (!owner) return { userId: null, reason: HOLD_REASONS.NO_OWNER };
+  if (!LEAD_OWNER_ROLES.includes(owner.role)) {
+    return { userId: null, reason: HOLD_REASONS.OWNER_NOT_LEAD_ROLE };
+  }
+  const userId = await pickSameRoleReplacement(tenant, currentOwnerId);
+  return { userId, reason: userId ? HOLD_REASONS.OK : HOLD_REASONS.NO_PEERS };
+};
+
 export const pickSameRoleReplacement = async (tenant, currentOwnerId) => {
   if (!currentOwnerId) return null;
   const { rows: [owner] } = await tenantQuery(
