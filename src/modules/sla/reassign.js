@@ -65,6 +65,21 @@ export const pickSameRoleReplacement = async (tenant, currentOwnerId) => {
   );
   if (!owner || !LEAD_OWNER_ROLES.includes(owner.role)) return null;
 
+  // The open-lead count is recomputed on EVERY call, so a batch of stale
+  // leads escalating together spreads as it goes: each handover raises that
+  // person's count and the next lead picks whoever is now lowest.
+  //
+  // This is deliberately a live count rather than a stored cursor. An earlier
+  // version took `LIMIT 1` of this ordering, which reads as "least loaded" but
+  // collapsed to ONE person for a whole batch: the escalation loop reassigns
+  // many leads inside a single tick, and every pick saw the same pre-batch
+  // counts. On SpeedUp that sent all 1,036 retried leads to the one counsellor
+  // who happened to start the batch lowest (843 open vs ~3,034 for her peers),
+  // which is the opposite of the round-robin the rule promises.
+  //
+  // `tenantQuery` runs each statement on its own connection and the caller
+  // awaits the reassignment before the next pick, so the count a later pick
+  // sees already includes the earlier ones.
   const { rows } = await tenantQuery(
     tenant,
     `SELECT u.id

@@ -200,9 +200,17 @@ router.get('/handovers', requireRole(...MANAGER_TIER_ROLES), validate({ query: h
               a.resolved_at,
               a.hold_reason,
               a.handover_attempts,
+              a.resolution_reason,
               a.assigned_to         AS from_user_id,
               f.name                AS from_name,
               f.role                AS from_role,
+              -- Who holds the lead RIGHT NOW. For a 'moved' row this equals
+              -- the recipient; for 'resolved'/'held'/'pending' it is still the
+              -- original owner, which is the question the table has to answer
+              -- ("so who has it?") and could not before.
+              l.assigned_to         AS current_user_id,
+              cur.name              AS current_name,
+              cur.role              AS current_role,
               mv.assigned_to        AS to_user_id,
               t.name                AS to_name,
               t.role                AS to_role,
@@ -216,6 +224,7 @@ router.get('/handovers', requireRole(...MANAGER_TIER_ROLES), validate({ query: h
          FROM sla_alerts a
          JOIN leads l  ON l.id = a.lead_id
          LEFT JOIN users f ON f.id = a.assigned_to
+         LEFT JOIN users cur ON cur.id = l.assigned_to
          -- The scanner's own handover for this alert: same lead, same outgoing
          -- owner, its SLA reason, at/after the escalation. LATERAL keeps it to
          -- the single nearest row so a later manual move can't be picked up.
