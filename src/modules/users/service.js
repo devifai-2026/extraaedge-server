@@ -2,8 +2,8 @@ import argon2 from 'argon2';
 import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
 import * as phoneDirectory from './phone-directory.js';
-import { conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR } from '../../config/constants.js';
+import { appError, conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR, RESPONSE_CODES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
@@ -160,6 +160,77 @@ export const getUser = async (tenant, id) => {
   return row;
 };
 
+// Refuse to create (or switch into) a front-line role when the reporting line
+// it needs does not exist. Driven by EXPECTED_SUPERVISOR, so this is the same
+// rule the org-tree warning reports — one definition, enforced at the write
+// path instead of only described after the fact.
+//
+// Two ways it can fail, with different fixes, so they get different messages:
+//   - nobody in the tenant holds the supervisor role at all → an admin has to
+//     create/promote one first;
+//   - a supervisor exists but this user's chain doesn't reach one → the
+//     reporting manager is wrong or missing on this form.
+//
+// Deliberately NOT applied when the actor is assigning a manager that already
+// satisfies the rule, and skipped entirely for roles with no declared
+// supervisor, so nothing outside the declared pairs changes behaviour.
+const assertSupervisorExists = async (tenant, { role, managerIds }) => {
+  const rule = EXPECTED_SUPERVISOR.find((r) => r.role === role);
+  if (!rule) return;
+
+  const { rows: supervisors } = await tenantQuery(
+    tenant,
+    `SELECT id FROM users
+      WHERE role = $1 AND is_active = true AND deleted_at IS NULL`,
+    [rule.supervisor],
+  );
+  if (!supervisors.length) {
+    throw appError({
+      status: 400,
+      code: RESPONSE_CODES.VALIDATION_FAILED,
+      message: `No active ${rule.supervisorLabel} exists yet. Please contact your admin to add a ${rule.supervisorLabel} before adding ${rule.label}s.`,
+      details: { code: 'missing_supervisor', role, supervisor_role: rule.supervisor },
+    });
+  }
+
+  const ids = (managerIds || []).filter(Boolean);
+  if (!ids.length) {
+    throw appError({
+      status: 400,
+      code: RESPONSE_CODES.VALIDATION_FAILED,
+      message: `A ${rule.label} needs a reporting manager. Please contact your admin to add your reporting manager.`,
+      details: { code: 'missing_manager', role, supervisor_role: rule.supervisor },
+    });
+  }
+
+  // Does any chosen manager reach the required supervisor role, at itself or
+  // anywhere above it? Mirrors the org-tree walk: follows user_managers AND
+  // legacy users.manager_id, and is cycle-safe.
+  const { rows: reach } = await tenantQuery(
+    tenant,
+    `WITH RECURSIVE chain AS (
+       SELECT id, role, manager_id FROM users
+        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
+       UNION
+       SELECT up.id, up.role, up.manager_id
+         FROM chain c
+         LEFT JOIN user_managers um ON um.user_id = c.id
+         JOIN users up ON up.id = c.manager_id OR up.id = um.manager_id
+        WHERE up.deleted_at IS NULL
+     )
+     SELECT 1 FROM chain WHERE role = $2 LIMIT 1`,
+    [ids, rule.supervisor],
+  );
+  if (!reach.length) {
+    throw appError({
+      status: 400,
+      code: RESPONSE_CODES.VALIDATION_FAILED,
+      message: `A ${rule.label} must report to a ${rule.supervisorLabel} (directly or above). Please contact your admin to add your reporting manager.`,
+      details: { code: 'supervisor_not_in_chain', role, supervisor_role: rule.supervisor },
+    });
+  }
+};
+
 export const createUser = async (tenant, input, actor) => {
   if (await repo.findByEmail(tenant, input.email)) throw conflict('Email already in use');
 
@@ -224,6 +295,14 @@ export const createUser = async (tenant, input, actor) => {
     targetRole: role,
     targetUserId: null,
     managerId: input.manager_ids?.[0] ?? input.manager_id ?? null,
+  });
+
+  // The reporting line a front-line role depends on must already exist.
+  await assertSupervisorExists(tenant, {
+    role,
+    managerIds: Array.isArray(input.manager_ids) && input.manager_ids.length
+      ? input.manager_ids
+      : (input.manager_id ? [input.manager_id] : []),
   });
 
   // super_admin role should default track_work_time=false
@@ -426,6 +505,16 @@ export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_le
     targetRole: scope,
     targetUserId: id,
     managerId: Array.isArray(manager_ids) ? manager_ids[0] ?? null : null,
+  });
+
+  // Same structural rule as creation: switching INTO a front-line role still
+  // requires the reporting line that role depends on, otherwise switch-role
+  // becomes a way around the create-time guard.
+  await assertSupervisorExists(tenant, {
+    role: scope,
+    managerIds: Array.isArray(manager_ids) && manager_ids.length
+      ? manager_ids
+      : (existing.manager_id ? [existing.manager_id] : []),
   });
 
   // ---- Hand over the lead queue, if the new role can't own leads --------
