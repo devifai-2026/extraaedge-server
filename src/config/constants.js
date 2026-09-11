@@ -94,6 +94,31 @@ export const MANAGER_TIER_ROLES = Object.freeze([
   SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
 ]);
 
+// Which role is expected to SUPERVISE which front-line role. Drives the org
+// structure warnings on /users/org-tree — a tenant running telecallers with no
+// telecaller_lead above them has a real hole, not a cosmetic one: the
+// stale-lead rule hands a lead to another member of the SAME role class, so a
+// front line with no lead and no peers is what leaves leads stuck with an
+// inactive owner.
+//
+// Declared as data so the check generalises: add a pair here and the warning,
+// the count and the copy all follow. Nothing about telecalling is special-cased
+// in the detector itself.
+export const EXPECTED_SUPERVISOR = Object.freeze([
+  {
+    role: SYSTEM_TENANT_ROLES.TELECALLER,
+    supervisor: SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+    label: 'telecaller',
+    supervisorLabel: 'telecaller lead',
+  },
+  {
+    role: SYSTEM_TENANT_ROLES.COUNSELLOR,
+    supervisor: SYSTEM_TENANT_ROLES.SALES_MANAGER,
+    label: 'counsellor',
+    supervisorLabel: 'sales manager',
+  },
+]);
+
 export const TENANT_STATUS = Object.freeze({
   ACTIVE: 'active',
   SUSPENDED: 'suspended',

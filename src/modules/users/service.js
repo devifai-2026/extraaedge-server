@@ -3,7 +3,7 @@ import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
 import * as phoneDirectory from './phone-directory.js';
 import { conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
@@ -602,6 +602,71 @@ export const updatedAtLoader = (tenant) => async (req) => repo.getUpdatedAt(tena
 //   sales_manager → full chain they're part of (their managers above + team
 //                   below, recursive). Counsellors only see themselves so
 //                   we don't expose this route to them at the route layer.
+// Structural holes in the reporting tree, derived from EXPECTED_SUPERVISOR
+// rather than hardcoded per role. For each declared pair we report either:
+//   missing_supervisor — the role exists but NOBODY holds the supervisor role
+//   unsupervised       — a supervisor exists, but some members don't report
+//                        to one (directly or anywhere up their chain)
+// Computed over the SAME visible node set the chart draws, so a manager is
+// never warned about people they cannot see.
+const detectOrgGaps = (nodes, edges) => {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  // user_id -> [manager_id]; a user can have several managers.
+  const parents = new Map();
+  for (const e of edges) {
+    if (!parents.has(e.user_id)) parents.set(e.user_id, []);
+    parents.get(e.user_id).push(e.manager_id);
+  }
+
+  // Does any ancestor of `id` hold `role`? Walks up every manager path,
+  // guarding against cycles so a mis-set manager_id can't hang the request.
+  const hasAncestorWithRole = (id, role) => {
+    const seen = new Set([id]);
+    const queue = [...(parents.get(id) || [])];
+    while (queue.length) {
+      const pid = queue.shift();
+      if (!pid || seen.has(pid)) continue;
+      seen.add(pid);
+      if (byId.get(pid)?.role === role) return true;
+      queue.push(...(parents.get(pid) || []));
+    }
+    return false;
+  };
+
+  const gaps = [];
+  for (const rule of EXPECTED_SUPERVISOR) {
+    const members = nodes.filter((n) => n.role === rule.role && n.is_active !== false);
+    if (!members.length) continue;
+    const supervisors = nodes.filter((n) => n.role === rule.supervisor && n.is_active !== false);
+
+    if (!supervisors.length) {
+      gaps.push({
+        code: 'missing_supervisor',
+        role: rule.role,
+        supervisor_role: rule.supervisor,
+        count: members.length,
+        // Names so the UI can show who is affected without another request.
+        members: members.slice(0, 10).map((m) => m.name),
+        message: `${members.length} ${rule.label}${members.length === 1 ? '' : 's'} with no ${rule.supervisorLabel}`,
+      });
+      continue;
+    }
+
+    const orphans = members.filter((m) => !hasAncestorWithRole(m.id, rule.supervisor));
+    if (orphans.length) {
+      gaps.push({
+        code: 'unsupervised',
+        role: rule.role,
+        supervisor_role: rule.supervisor,
+        count: orphans.length,
+        members: orphans.slice(0, 10).map((m) => m.name),
+        message: `${orphans.length} ${rule.label}${orphans.length === 1 ? '' : 's'} not reporting to a ${rule.supervisorLabel}`,
+      });
+    }
+  }
+  return gaps;
+};
+
 export const orgTree = async (tenant, actor) => {
   const isAdmin = actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN;
 
@@ -700,7 +765,7 @@ export const orgTree = async (tenant, actor) => {
     [userIds],
   );
 
-  return { nodes, edges };
+  return { nodes, edges, gaps: detectOrgGaps(nodes, edges) };
 };
 
 // Self-service phone update for the logged-in user (mandatory phone-capture
