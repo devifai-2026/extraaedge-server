@@ -4,7 +4,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
-import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES, MANAGER_TIER_ROLES, STAFF_ADMIN_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
 import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema, sendPhoneOtpSchema, verifyPhoneOtpSchema, switchRoleSchema, offboardSchema } from './schema.js';
@@ -84,7 +84,10 @@ router.get('/:id/activity-summary', requireRole(...MANAGER_TIER_ROLES), validate
 // WHICH users they may touch to their own branch (their team subtree) and
 // blocks them from creating/promoting super_admins or branch_managers — see
 // users/service.js. The route gate only checks "is this a user-managing role".
-router.post('/', requireRole(...ADMIN_TIER_ROLES), validate({ body: createUserSchema }), controller.create);
+// Staff onboarding: admin, branch manager AND the HR team lead. HR is blocked
+// from admin-tier accounts inside the service by assertHrScope, so widening the
+// gate here cannot become a privilege-escalation path.
+router.post('/', requireRole(...STAFF_ADMIN_ROLES), validate({ body: createUserSchema }), controller.create);
 
 router.put(
   '/:id',
@@ -97,7 +100,7 @@ router.put(
 // What a user still owns. Drives the offboarding dialog; read-only.
 router.get(
   '/:id/offboarding-preview',
-  requireRole(...ADMIN_TIER_ROLES),
+  requireRole(...STAFF_ADMIN_ROLES),
   validate({ params: idParam }),
   controller.offboardingPreview,
 );
@@ -106,7 +109,7 @@ router.get(
 // user still owns live work and no successor was named.
 router.delete(
   '/:id',
-  requireRole(...ADMIN_TIER_ROLES),
+  requireRole(...STAFF_ADMIN_ROLES),
   validate({ params: idParam, body: offboardSchema }),
   controller.remove,
 );

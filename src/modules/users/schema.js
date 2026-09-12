@@ -53,6 +53,13 @@ export const createUserSchema = z.object({
   // beyond their primary branch_id. Ignored for non-teaching roles.
   branch_ids: z.array(z.string().uuid()).optional(),
   designation: z.string().optional(),
+  // Staff profile. personal_email is where onboarding credentials and the offer
+  // letter go — they arrive before the work account exists, so they cannot be
+  // sent to `email`. Nullable and non-unique on purpose (see the migration).
+  personal_email: z.string().email().optional().nullable(),
+  joining_date: z.string().optional().nullable(),
+  dob: z.string().optional().nullable(),
+  employee_code: z.string().max(40).optional().nullable(),
   track_work_time: z.boolean().optional(),
   session_timeout_minutes: z.coerce.number().int().min(5).max(120).optional(),
   permissions_json: z.record(z.string(), z.any()).optional(),

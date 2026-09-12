@@ -5,6 +5,7 @@ const COLS = `
   u.manager_id, u.team_id, u.branch_id, u.is_active, u.last_login_at,
   u.session_timeout_minutes, u.track_work_time, u.permissions_json,
   u.designation,
+  u.personal_email, u.joining_date, u.dob, u.employee_code,
   u.created_at, u.updated_at, r.name AS role_name, r.scope AS role_scope,
   COALESCE(
     (SELECT array_agg(um.manager_id) FROM user_managers um WHERE um.user_id = u.id),
@@ -110,9 +111,9 @@ export const findByEmail = async (tenant, email) => {
 export const insert = async (tenant, input, password_hash) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO users (name, email, phone, password_hash, role, role_id, manager_id, team_id, branch_id, track_work_time, session_timeout_minutes, permissions_json, designation, is_active)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, COALESCE($10, true), COALESCE($11, 15), $12, $13, true)
-     RETURNING id, email, phone, name, avatar_r2_key, role, role_id, manager_id, team_id, branch_id, is_active, session_timeout_minutes, track_work_time, permissions_json, designation, created_at, updated_at`,
+    `INSERT INTO users (name, email, phone, password_hash, role, role_id, manager_id, team_id, branch_id, track_work_time, session_timeout_minutes, permissions_json, designation, personal_email, joining_date, dob, employee_code, is_active)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, COALESCE($10, true), COALESCE($11, 15), $12, $13, $14, $15, $16, $17, true)
+     RETURNING id, email, phone, name, avatar_r2_key, role, role_id, manager_id, team_id, branch_id, is_active, session_timeout_minutes, track_work_time, permissions_json, designation, personal_email, joining_date, dob, employee_code, created_at, updated_at`,
     [
       input.name,
       input.email,
@@ -127,6 +128,12 @@ export const insert = async (tenant, input, password_hash) => {
       input.session_timeout_minutes ?? null,
       input.permissions_json ?? null,
       input.designation ?? null,
+      // Blank strings from the form become NULL — an empty personal_email
+      // should read as "not on file", not as an empty address.
+      input.personal_email || null,
+      input.joining_date || null,
+      input.dob || null,
+      input.employee_code || null,
     ],
   );
   return rows[0];

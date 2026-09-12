@@ -412,6 +412,22 @@ export const LMS_TENANT_ROLES = Object.freeze({
   PLACEMENT_OFFICER: 'placement_officer',
 });
 
+// Who may create, edit and offboard STAFF accounts.
+//
+// ADMIN_TIER_ROLES (super_admin + branch_manager) plus hr_team_lead, because
+// onboarding people is the HR lead's actual job and the MoM asks for it. HR is
+// still blocked from admin-tier accounts by assertHrScope — this constant only
+// says "may reach the user-management endpoints at all".
+//
+// hr_recruiter is deliberately NOT here: a recruiter runs the hiring pipeline
+// and hands a completed onboarding to HR, but must not be able to mint a login
+// on their own.
+export const STAFF_ADMIN_ROLES = Object.freeze([
+  ...ADMIN_TIER_ROLES,
+  LMS_TENANT_ROLES.HR_TEAM_LEAD,
+]);
+
+
 // Tab bundles per LMS role — used by provisioning + the seed migration so the
 // grant list stays in one place.
 export const TRAINER_TAB_KEYS = Object.freeze([

@@ -3,7 +3,7 @@ import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
 import * as phoneDirectory from './phone-directory.js';
 import { appError, conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR, RESPONSE_CODES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR, RESPONSE_CODES } from '../../config/constants.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
@@ -34,6 +34,37 @@ const BRANCH_MANAGER_FORBIDDEN_ROLES = [
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
 ];
+
+// Roles an HR team lead may NOT create, promote into, or edit.
+//
+// HR onboards and offboards staff, but must never be able to mint an admin or
+// a branch head — that would make "HR can add users" a privilege-escalation
+// path. Mirrors BRANCH_MANAGER_FORBIDDEN_ROLES.
+const HR_FORBIDDEN_ROLES = [
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+];
+
+// Constrain what an hr_team_lead may do to a target user. No-op for anyone
+// else, exactly like assertBranchManagerScope, so the two compose.
+const assertHrScope = async (tenant, actor, { targetRole, targetUserId }) => {
+  if (!actor || actor.role !== LMS_TENANT_ROLES.HR_TEAM_LEAD) return;
+  if (targetRole && HR_FORBIDDEN_ROLES.includes(targetRole)) {
+    throw forbidden('HR cannot create or manage admin or branch-manager accounts');
+  }
+  if (targetUserId) {
+    const { rows: [target] } = await tenantQuery(
+      tenant,
+      `SELECT role FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      [targetUserId],
+    );
+    // Also blocks EDITING an existing admin, not just creating one — otherwise
+    // HR could rename or deactivate the super_admin.
+    if (target && HR_FORBIDDEN_ROLES.includes(target.role)) {
+      throw forbidden('HR cannot manage admin or branch-manager accounts');
+    }
+  }
+};
 
 // The tenant's primary super_admin id — a branch_manager always reports up to
 // the admin (the top of the tree), so we default their manager to it. Returns
@@ -296,6 +327,7 @@ export const createUser = async (tenant, input, actor) => {
     targetUserId: null,
     managerId: input.manager_ids?.[0] ?? input.manager_id ?? null,
   });
+  await assertHrScope(tenant, actor, { targetRole: role, targetUserId: null });
 
   // The reporting line a front-line role depends on must already exist.
   await assertSupervisorExists(tenant, {
@@ -418,6 +450,7 @@ export const updateUser = async (tenant, id, updates, actor) => {
       ? (updates.manager_ids[0] ?? null)
       : (updates.manager_id ?? null),
   });
+  await assertHrScope(tenant, actor, { targetRole: updates.role ?? existing.role, targetUserId: id });
   // Don't let the last active super_admin deactivate themselves — would lock
   // everybody out. Same logic as the demote / delete guards above.
   if (updates.is_active === false && existing.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN && existing.is_active) {
@@ -802,6 +835,7 @@ export const offboardingPreview = async (tenant, id, actor) => {
     targetUserId: id,
     managerId: null,
   });
+  await assertHrScope(tenant, actor, { targetRole: existing.role, targetUserId: id });
 
   const work = await pendingWorkFor(tenant, id);
 
