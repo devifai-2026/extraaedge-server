@@ -59,9 +59,17 @@ const handoverQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(100),
 });
 
-router.get('/handovers', requireRole(...MANAGER_TIER_ROLES), validate({ query: handoverQuery }), async (req, res, next) => {
+// Front-line roles are admitted too, but FORCED to their own rows below — the
+// 6/7-day rule takes leads away from them, so the owner needs to see the
+// warning inside the window. Managers keep the full scoped view.
+router.get('/handovers', requireRole(...MANAGER_TIER_ROLES, ...LEAD_OWNER_ROLES), validate({ query: handoverQuery }), async (req, res, next) => {
   try {
     const q = req.query;
+    // A lead owner may only ever see their own handovers; ignore any
+    // from_user_id they send rather than trusting the client.
+    const selfOnly = LEAD_OWNER_ROLES.includes(req.user.role)
+      && !MANAGER_TIER_ROLES.includes(req.user.role);
+    if (selfOnly) q.from_user_id = req.user.id;
 
     // ---- Upcoming: leads heading TOWARD a move -------------------------
     // Same predicate the scanner flags on (workers/sla-scanner.js), just

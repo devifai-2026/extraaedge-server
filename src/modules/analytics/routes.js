@@ -110,13 +110,31 @@ router.get('/summary', validate({ query: rangeQuery }), async (req, res, next) =
     const fuParams = scope?.user_ids ? [scope.user_ids] : [];
     const admScope = scope?.user_ids ? `AND guided_by_counsellor_id = ANY($1::uuid[])` : '';
     const admParams = scope?.user_ids ? [scope.user_ids] : [];
-    const [fuToday, admMonth] = await Promise.all([
+    const [fuToday, fuOverdue, admMonth] = await Promise.all([
       tenantQuery(
         req.tenant,
         `SELECT count(*)::int n
            FROM lead_followups f JOIN leads l ON l.id = f.lead_id
           WHERE f.deleted_at IS NULL AND f.status = 'planned'
             AND f.next_action_datetime::date = now()::date ${fuScope}`,
+        fuParams,
+      ),
+      // Overdue = still open and already past its moment.
+      //
+      // Counts BOTH 'planned' and 'missed': followup-reminder-scheduler flips a
+      // planned row to 'missed' once it lapses, so counting only 'planned'
+      // reports 0 the moment the worker has run — which is exactly when the
+      // number matters. 'done' is excluded; it was completed, late or not.
+      //
+      // Reuses the same fuScope as due-today, so a manager sees their team's
+      // and a counsellor their own — unlike GET /follow-ups/overdue, which is
+      // hardcoded to the caller and so was useless to a manager.
+      tenantQuery(
+        req.tenant,
+        `SELECT count(*)::int n
+           FROM lead_followups f JOIN leads l ON l.id = f.lead_id
+          WHERE f.deleted_at IS NULL AND f.status IN ('planned', 'missed')
+            AND f.next_action_datetime < now() ${fuScope}`,
         fuParams,
       ),
       tenantQuery(
@@ -142,6 +160,7 @@ router.get('/summary', validate({ query: rangeQuery }), async (req, res, next) =
         unassigned_leads: s.unassigned_leads,
         enrolled_this_month: s.enrolled_this_month,
         followups_due_today: fuToday.rows[0].n,
+        followups_overdue: fuOverdue.rows[0].n,
         admissions_this_month: admMonth.rows[0].n,
       },
       meta: { requestId: req.id },
