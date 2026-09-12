@@ -213,6 +213,50 @@ export const managerChain = async (tenant, user_id) => {
 };
 
 // Recursive CTE for my-team (manager hierarchy).
+// Downstream team following BOTH reporting paths: users.manager_id (the
+// primary line) and user_managers (the secondary ones).
+//
+// Why this exists separately from teamHierarchy: multi-manager has been in the
+// schema, the API and the admin UI since 1700000013000, but teamHierarchy only
+// ever walked users.manager_id — so a second manager appeared in the org chart
+// and saw none of their reports' data. This is the function that makes
+// "reporting manager can be any 1 or any 2 people" actually mean something.
+//
+// It is NOT a drop-in replacement. Use it for READ/visibility scope (whose
+// leads may I see). Keep plain teamHierarchy for write-authority and
+// assignment pools — widening those would silently expand permissions and
+// change lead routing. Each call site is chosen deliberately; see the comment
+// on teamHierarchy below.
+//
+// Cycle safety: the CTE selects a BARE id and uses UNION (not UNION ALL), so
+// Postgres dedupes against the accumulated set and an A->B->A loop terminates.
+// Do not add a depth column — UNION dedupes whole ROWS, so (A,1) and (A,3)
+// would be distinct and the guard would stop working.
+//
+// is_active is deliberately NOT filtered, matching teamHierarchy: a manager
+// must still see and reassign an ex-employee's queue.
+export const teamHierarchyMulti = async (tenant, root_user_id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `WITH RECURSIVE team AS (
+       SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL
+       UNION
+       SELECT u.id
+         FROM team t
+         JOIN users u ON u.deleted_at IS NULL
+         LEFT JOIN user_managers um ON um.user_id = u.id AND um.manager_id = t.id
+        WHERE u.manager_id = t.id OR um.manager_id IS NOT NULL
+     )
+     SELECT id FROM team`,
+    [root_user_id],
+  );
+  return rows.map((r) => r.id);
+};
+
+// Downstream team via the PRIMARY reporting line only (users.manager_id).
+// Retained deliberately for write-authority and assignment-pool call sites —
+// see teamHierarchyMulti above for the read/visibility variant and why the two
+// must not be merged.
 export const teamHierarchy = async (tenant, root_user_id) => {
   const { rows } = await tenantQuery(
     tenant,

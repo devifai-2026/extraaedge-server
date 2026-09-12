@@ -44,8 +44,12 @@ const computeScope = async (tenant, actor, query = {}) => {
   // branch_manager is handled above (branch-wide), so what reaches here is
   // sales_manager / telecaller_lead — the subtree-scoped tiers.
   if (TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
+    // Multi: a lead's SECOND manager must see it too, which is the whole point
+    // of the "reporting manager can be any 1 or any 2 people" rule. This is a
+    // read scope — assignByCreator below deliberately stays on the primary
+    // line, because widening an assignment POOL silently changes lead routing.
     const [ids, me] = await Promise.all([
-      usersRepo.teamHierarchy(tenant, actor.id),
+      usersRepo.teamHierarchyMulti(tenant, actor.id),
       usersRepo.findById(tenant, actor.id),
     ]);
     return { user_ids: ids, include_unassigned_team_id: me?.team_id ?? null };

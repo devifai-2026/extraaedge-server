@@ -26,7 +26,7 @@ const resolveAdmissionScope = async (tenant, actor, branchId) => {
   }
   // sales_manager / telecaller_lead — subtree-scoped tiers.
   if (TEAM_SCOPED_MANAGER_ROLES.includes(actor?.role)) {
-    const teamIds = await usersRepo.teamHierarchy(tenant, actor.id);
+    const teamIds = await usersRepo.teamHierarchyMulti(tenant, actor.id);
     return { branchId: null, teamIds };
   }
   return { branchId: null, teamIds: null };

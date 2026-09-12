@@ -10,7 +10,7 @@ import { QUEUE_NAMES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES, SYSTEM_TENA
 import { notFound } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import ExcelJS from 'exceljs';
-import { teamHierarchy } from '../users/repo.js';
+import { teamHierarchyMulti } from '../users/repo.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired);
@@ -209,7 +209,7 @@ router.get('/lead-transfers', adminOrManager, validate({ query: transferQuery })
     // Manager → recursive team scope; admin → all.
     let scopeUserIds = null;
     if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
-      scopeUserIds = await teamHierarchy(req.tenant, req.user.id);
+      scopeUserIds = await teamHierarchyMulti(req.tenant, req.user.id);
     }
     const { rows, leadCount, transferCount } = await fetchLeadTransfers(req.tenant, req.query, scopeUserIds);
 

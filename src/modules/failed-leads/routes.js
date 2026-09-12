@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
-import { teamHierarchy } from '../users/repo.js';
+import { teamHierarchyMulti } from '../users/repo.js';
 import { forbidden } from '../../lib/errors.js';
 import { maskFailedLeadRows } from '../../lib/leadMasking.js';
 
@@ -36,7 +36,7 @@ const scopeFor = async (req) => {
   const { role, id } = req.user;
   if (role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) return null;
   if (TEAM_SCOPED_MANAGER_ROLES.includes(role)) {
-    return await teamHierarchy(req.tenant, id);
+    return await teamHierarchyMulti(req.tenant, id);
   }
   return [id];
 };

@@ -129,7 +129,7 @@ export const decideDiscount = async (tenant, actor, lead_id, { decision, reject_
   // Team-scoped managers may only decide discounts raised inside their branch
   // subtree. super_admin is unrestricted.
   if (actor?.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
-    const team = await usersRepo.teamHierarchy(tenant, actor.id); // includes actor + subtree
+    const team = await usersRepo.teamHierarchyMulti(tenant, actor.id); // includes actor + subtree
     if (existing.requested_by && !team.includes(existing.requested_by)) {
       throw forbidden('This discount was requested outside your team');
     }
@@ -206,6 +206,6 @@ export const listPending = async (tenant, actor) => {
   if (actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
     return repo.listPending(tenant, null);
   }
-  const team = await usersRepo.teamHierarchy(tenant, actor.id);
+  const team = await usersRepo.teamHierarchyMulti(tenant, actor.id);
   return repo.listPending(tenant, team);
 };

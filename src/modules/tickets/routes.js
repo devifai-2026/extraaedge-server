@@ -22,7 +22,7 @@ import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { sysQuery } from '../../db/system.js';
 import { notFound, forbidden } from '../../lib/errors.js';
-import { teamHierarchy, getManagerIds } from '../users/repo.js';
+import { teamHierarchyMulti, getManagerIds } from '../users/repo.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
 
 const router = express.Router();
@@ -66,7 +66,7 @@ const allowedContactIds = async (tenant, actor) => {
     for (const a of admins) ids.add(a.id);
   } else if (TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
     // Manager sees: their downstream team + their own managers + admins
-    const team = await teamHierarchy(tenant, actor.id);
+    const team = await teamHierarchyMulti(tenant, actor.id);
     for (const t of team) ids.add(t);
     const mgrs = await getManagerIds(tenant, actor.id);
     for (const m of mgrs) ids.add(m);
@@ -135,7 +135,7 @@ router.get('/', async (req, res, next) => {
     if (req.user.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
       // super_admins see every ticket in the tenant — no extra filter.
     } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
-      const team = await teamHierarchy(req.tenant, req.user.id);
+      const team = await teamHierarchyMulti(req.tenant, req.user.id);
       params.push(req.user.id, team);
       conds.push(`(t.user_id = $1 OR t.target_user_id = $1 OR t.user_id = ANY($2::uuid[]))`);
     } else {

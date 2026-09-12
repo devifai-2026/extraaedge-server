@@ -25,7 +25,7 @@ const assertLeadOwnership = async (tenant, lead, actor) => {
   }
   // sales_manager / telecaller_lead — subtree-scoped tiers.
   if (TEAM_SCOPED_MANAGER_ROLES.includes(actor?.role)) {
-    const team = await usersRepo.teamHierarchy(tenant, actor.id);
+    const team = await usersRepo.teamHierarchyMulti(tenant, actor.id);
     if (!team.includes(lead.assigned_to)) throw forbidden('This lead is outside your team');
   }
 };

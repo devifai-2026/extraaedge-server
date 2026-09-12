@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { teamHierarchy } from '../users/repo.js';
+import { teamHierarchyMulti } from '../users/repo.js';
 import { findOpenSession, stoppedTodayAlready, computeActiveSeconds, computePausedSeconds } from './repo.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import { conflict, forbidden } from '../../lib/errors.js';
@@ -207,7 +207,7 @@ router.get('/', requireRole(...MANAGER_TIER_ROLES), validate({ query: listQuery 
     const conds = [];
     const params = [];
     if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
-      const ids = await teamHierarchy(req.tenant, req.user.id);
+      const ids = await teamHierarchyMulti(req.tenant, req.user.id);
       params.push(ids);
       conds.push(`user_id = ANY($${params.length}::uuid[])`);
     }
@@ -232,7 +232,7 @@ router.get('/team-summary', requireRole(...MANAGER_TIER_ROLES), async (req, res,
   try {
     let userIds = null;
     if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
-      userIds = await teamHierarchy(req.tenant, req.user.id);
+      userIds = await teamHierarchyMulti(req.tenant, req.user.id);
     }
     const params = userIds ? [userIds] : [];
     const filter = userIds ? 'WHERE u.id = ANY($1::uuid[])' : '';

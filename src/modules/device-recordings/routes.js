@@ -32,7 +32,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
-import { teamHierarchy } from '../users/repo.js';
+import { teamHierarchyMulti } from '../users/repo.js';
 import { getUploadSignedUrl, getDownloadSignedUrl, deleteObject, headObject, buildKey } from '../../lib/r2.js';
 import { last10Digits } from '../../lib/phone.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
@@ -482,7 +482,7 @@ const visibleUploaderIds = async (tenant, user) => {
   // branchScopeId, which scopes it branch-wide rather than by subtree.
   if (user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER
       || user.role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD) {
-    const team = await teamHierarchy(tenant, user.id);
+    const team = await teamHierarchyMulti(tenant, user.id);
     // teamHierarchy includes the actor; a lead with no reports still sees
     // their own uploads rather than the whole tenant.
     return team.length ? team : [user.id];

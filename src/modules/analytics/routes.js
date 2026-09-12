@@ -18,7 +18,7 @@ import {
   SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES, LEAD_OWNER_ROLES,
 } from '../../config/constants.js';
 import { LEAD_ORIGINS, originSqlPredicate } from '../../lib/leadOrigin.js';
-import { teamHierarchy } from '../users/repo.js';
+import { teamHierarchyMulti } from '../users/repo.js';
 import { computeSecurityAnomalies } from '../../lib/securityAnomalies.js';
 
 const router = express.Router();
@@ -46,7 +46,7 @@ const computeScope = async (req) => {
     return { branch_id: actor.branch_id ?? null };
   }
   if (TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
-    const ids = await teamHierarchy(req.tenant, actor.id);
+    const ids = await teamHierarchyMulti(req.tenant, actor.id);
     return { user_ids: ids };
   }
   return { user_ids: [actor.id] };
