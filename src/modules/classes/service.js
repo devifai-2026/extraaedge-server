@@ -7,7 +7,7 @@
 import * as repo from './repo.js';
 import * as coursesRepo from '../courses/repo.js';
 import { notFound, forbidden, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 import { emitToBatch } from '../../lib/socket.js';
 import { notifyBatch } from '../student-notifications/service.js';
 
@@ -62,6 +62,56 @@ export const markLifecycle = async (tenant, actor, id, action) => {
   const row = await repo.markLifecycle(tenant, id, action, actor?.id);
   emitToBatch(tenant.id, c.batch_id, 'lms:class-state', { class_id: id, action });
   return row;
+};
+
+// Who may overrule a completion verdict: the branch manager and above, plus the
+// head trainer who owns the roster. A trainer may set their OWN class while it
+// is still pending, but cannot reverse a decision once it is made — otherwise
+// the 24-hour deadline means nothing.
+const OVERRIDE_ROLES = [...ADMIN_TIER_ROLES, LMS_TENANT_ROLES.HEAD_TRAINER];
+
+export const setCompletion = async (tenant, actor, id, { status, note, is_billable }) => {
+  // assertClassAccess only returns program_id/batch_id, so read the full row —
+  // the guards below turn on completion_status, and an undefined field would
+  // silently let anyone reverse a decided class.
+  const access = await assertClassAccess(tenant, id, actor);
+  const c = { ...access, ...(await repo.findClass(tenant, id)) };
+  if (!c?.id) throw notFound('Class not found');
+  const canOverride = OVERRIDE_ROLES.includes(actor.role);
+
+  // Already decided — only an override role may change it.
+  if (c.completion_status && c.completion_status !== 'pending' && !canOverride) {
+    throw forbidden(
+      c.auto_marked_at
+        ? 'This class was already closed by the system. Ask your branch manager to change it.'
+        : 'This class has already been marked. Ask your branch manager to change it.',
+    );
+  }
+
+  // Marking a class billable is a pay decision, so it is not the trainer's to
+  // make unilaterally — they mark it complete, a manager marks it payable.
+  if (is_billable !== undefined && !canOverride) {
+    throw forbidden('Only a manager can mark a class as billable');
+  }
+
+  const isOverride = canOverride && c.completion_status !== 'pending';
+  const row = await repo.setCompletion(tenant, id, {
+    status, note, billable: is_billable, actorId: actor.id, isOverride,
+  });
+  if (!row) throw notFound('Class not found');
+
+  emitToBatch(tenant.id, c.batch_id, 'lms:class-state', {
+    class_id: id, action: status === 'completed' ? 'class_ended' : 'class_not_conducted',
+  });
+  return row;
+};
+
+// The trainer's own worklist: what still needs confirming, and by when.
+export const pendingCompletions = async (tenant, actor) => {
+  const isManager = OVERRIDE_ROLES.includes(actor.role);
+  return repo.pendingCompletionsFor(tenant, {
+    trainerId: isManager ? null : actor.id,
+  });
 };
 
 // ---------- Question bank ----------

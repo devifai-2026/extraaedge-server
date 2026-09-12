@@ -19,6 +19,15 @@ export const markLifecycle = async (req, res, next) => {
   try { ok(res, req, await service.markLifecycle(req.tenant, req.user, req.params.id, req.body.action)); } catch (e) { next(e); }
 };
 
+// Mark a class complete / not conducted. This is what makes an extra class
+// payable, so it is also a payroll input.
+export const setCompletion = async (req, res, next) => {
+  try { ok(res, req, await service.setCompletion(req.tenant, req.user, req.params.id, req.body)); } catch (e) { next(e); }
+};
+export const pendingCompletions = async (req, res, next) => {
+  try { ok(res, req, await service.pendingCompletions(req.tenant, req.user)); } catch (e) { next(e); }
+};
+
 // ---- Trainer: question bank ----
 export const listBank = async (req, res, next) => {
   try { ok(res, req, await service.listBank(req.tenant, req.user, req.query.programId, req.params.moduleId)); } catch (e) { next(e); }

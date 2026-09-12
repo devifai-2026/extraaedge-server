@@ -65,11 +65,141 @@ export const deleteClass = async (tenant, id) => {
 export const markLifecycle = async (tenant, classId, action, trainerId) =>
   tenantTx(tenant, async (client) => {
     if (action === 'class_started') await client.query(`UPDATE classes SET started_at = COALESCE(started_at, now()), updated_at = now() WHERE id = $1`, [classId]);
-    if (action === 'class_ended') await client.query(`UPDATE classes SET ended_at = now(), updated_at = now() WHERE id = $1`, [classId]);
+    // Ending a class IS marking it complete — that is the signal payroll counts.
+    // Clearing auto_marked_at matters: a trainer completing a class the system
+    // already auto-marked must not leave it looking system-decided.
+    if (action === 'class_ended') {
+      await client.query(
+        `UPDATE classes
+            SET ended_at = now(), completion_status = 'completed',
+                auto_marked_at = NULL, updated_at = now()
+          WHERE id = $1`,
+        [classId],
+      );
+    }
     await client.query(`INSERT INTO trainer_attendance (class_id, trainer_id, action) VALUES ($1,$2,$3)`, [classId, trainerId, action]);
     const { rows } = await client.query(`SELECT * FROM classes WHERE id = $1`, [classId]);
     return rows[0];
   });
+
+export const findClass = async (tenant, id) => {
+  const { rows } = await tenantQuery(
+    tenant, `SELECT * FROM classes WHERE id = $1 AND deleted_at IS NULL`, [id],
+  );
+  return rows[0] ?? null;
+};
+
+// Explicit completion, with a status the trainer chooses. Separate from the
+// lifecycle call because 'I did not conduct this' is a real answer, and the
+// trainer should be able to say so rather than staying silent and letting the
+// 24-hour sweep decide for them.
+export const setCompletion = async (tenant, classId, { status, note, billable, actorId, isOverride }) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE classes
+        SET completion_status = $2,
+            completion_note   = COALESCE($3, completion_note),
+            is_billable       = COALESCE($4, is_billable),
+            ended_at          = CASE WHEN $2 = 'completed' THEN COALESCE(ended_at, now()) ELSE NULL END,
+            auto_marked_at    = NULL,
+            override_by       = CASE WHEN $6 THEN $5 ELSE override_by END,
+            override_at       = CASE WHEN $6 THEN now() ELSE override_at END,
+            updated_at        = now()
+      WHERE id = $1 AND deleted_at IS NULL
+      RETURNING *`,
+    [classId, status, note ?? null, billable ?? null, actorId ?? null, !!isOverride],
+  );
+  return rows[0] ?? null;
+};
+
+// A trainer's outstanding confirmations, newest deadline first. `trainerId`
+// null means the manager view: everyone's.
+export const pendingCompletionsFor = async (tenant, { trainerId = null, limit = 200 } = {}) => {
+  const params = [limit];
+  let cond = '';
+  if (trainerId) { params.push(trainerId); cond = `AND c.trainer_id = $${params.length}`; }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT c.id, c.title, c.kind, c.starts_at, c.ends_at, c.completion_status,
+            c.completion_due_at, c.is_billable, c.auto_marked_at, c.completion_note,
+            c.trainer_id, u.name AS trainer_name,
+            b.name AS batch_name,
+            (c.completion_due_at < now()) AS overdue
+       FROM classes c
+       LEFT JOIN users u ON u.id = c.trainer_id
+       LEFT JOIN batches b ON b.id = c.batch_id
+      WHERE c.deleted_at IS NULL
+        AND c.ends_at <= now()
+        AND (c.completion_status = 'pending' OR c.auto_marked_at IS NOT NULL)
+        ${cond}
+      ORDER BY c.completion_due_at NULLS LAST
+      LIMIT $1`,
+    params,
+  );
+  return rows;
+};
+
+// Classes past their deadline that nobody has marked. The worker's input.
+export const overdueCompletions = async (tenant, { graceHours = 24, limit = 500 } = {}) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT c.id, c.title, c.trainer_id, c.ends_at, c.completion_due_at,
+            c.completion_reminded_at, u.name AS trainer_name, u.email AS trainer_email
+       FROM classes c
+       LEFT JOIN users u ON u.id = c.trainer_id
+      WHERE c.deleted_at IS NULL
+        AND c.completion_status = 'pending'
+        AND COALESCE(c.completion_due_at, c.ends_at + make_interval(hours => $1)) <= now()
+      ORDER BY c.completion_due_at
+      LIMIT $2`,
+    [graceHours, limit],
+  );
+  return rows;
+};
+
+// Pending classes whose window is still open — what the reminder targets.
+export const remindableClasses = async (tenant, { withinHours = 6 } = {}) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT c.id, c.title, c.trainer_id, c.ends_at, c.completion_due_at,
+            u.name AS trainer_name, u.email AS trainer_email
+       FROM classes c
+       LEFT JOIN users u ON u.id = c.trainer_id
+      WHERE c.deleted_at IS NULL
+        AND c.completion_status = 'pending'
+        AND c.completion_reminded_at IS NULL
+        AND c.ends_at <= now()
+        AND c.completion_due_at > now()
+        AND c.completion_due_at <= now() + make_interval(hours => $1)
+      ORDER BY c.completion_due_at`,
+    [withinHours],
+  );
+  return rows;
+};
+
+export const markReminded = (tenant, ids) =>
+  tenantQuery(tenant, `UPDATE classes SET completion_reminded_at = now() WHERE id = ANY($1::uuid[])`, [ids]);
+
+// The sweep itself. Marks not_conducted and, critically, never touches a class
+// a branch manager has already overridden.
+export const autoMarkNotConducted = async (tenant, ids) => {
+  if (!ids?.length) return [];
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE classes
+        SET completion_status = 'not_conducted',
+            auto_marked_at = now(),
+            completion_note = COALESCE(completion_note,
+              'Auto-marked: not confirmed within the allowed window'),
+            updated_at = now()
+      WHERE id = ANY($1::uuid[])
+        AND completion_status = 'pending'
+        AND override_by IS NULL
+      RETURNING id, trainer_id, title`,
+    [ids],
+  );
+  return rows;
+};
 
 // ---------- Question bank (per module) ----------
 export const listBank = async (tenant, moduleId) => {

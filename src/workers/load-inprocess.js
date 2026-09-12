@@ -35,6 +35,7 @@ const MODULES = [
   './followup-reminder-scheduler.js',
   './missed-followup-scanner.js',
   './lms-class-reminder.js',
+  './class-completion-sweeper.js',
 
   // Attendance + housekeeping. work-session-midnight-closer force-closes
   // sessions left open past the tenant's local midnight.

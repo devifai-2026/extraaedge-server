@@ -35,9 +35,11 @@ router.use(authRequired, tenantRequired, requireRole(
 ));
 
 router.get('/', controller.listClasses);
+// Literal path, declared before any ':id' route so it is not matched as an id.
+router.get('/pending-completions', controller.pendingCompletions);
 router.post('/', validate({ body: z.object({
   program_id: uuid, module_id: uuid.nullable().optional(), batch_id: uuid, trainer_id: uuid.nullable().optional(),
-  title: z.string().min(1).max(200), kind: z.enum(['lecture', 'mock_test']).optional(),
+  title: z.string().min(1).max(200), kind: z.enum(['lecture', 'mock_test', 'demo']).optional(),
   mode: z.enum(['online', 'offline']).optional(), meeting_url: z.string().max(1000).optional().nullable(),
   starts_at: z.string(), ends_at: z.string(),
 }) }), controller.createClass);
@@ -48,6 +50,17 @@ router.put('/:id', validate({ params: idParam, body: z.object({
 }).optional() }), controller.updateClass);
 router.delete('/:id', validate({ params: idParam }), controller.deleteClass);
 router.post('/:id/lifecycle', validate({ params: idParam, body: z.object({ action: z.enum(['class_started', 'class_ended', 'mock_test']) }) }), controller.markLifecycle);
+// Explicit completion. `not_conducted` is a real answer a trainer can give,
+// rather than staying silent and letting the 24-hour sweep decide. is_billable
+// is manager-only — see service.setCompletion.
+router.post('/:id/completion', validate({
+  params: idParam,
+  body: z.object({
+    status: z.enum(['completed', 'not_conducted']),
+    note: z.string().max(500).optional(),
+    is_billable: z.boolean().optional(),
+  }),
+}), controller.setCompletion);
 
 // Question bank (per module; programId via query for scope)
 router.get('/bank/:moduleId', validate({ params: z.object({ moduleId: uuid }) }), controller.listBank);
