@@ -87,17 +87,20 @@ const applyBranch = async (req, requested, col, conds, params) => {
 // this existed there was NO team filter here at all, so a sales_manager could
 // read every counsellor's scorecards tenant-wide.
 //
-// telecaller_lead is deliberately NOT narrowed here, because its cross-team
-// access is READ-ONLY rather than absent: it can see and listen to any call in
-// the tenant, but assertReviewableByActor stops it SCORING anything outside
-// its own telecallers. The queue returns can_review per row so the UI reflects
-// that split.
+// telecaller_lead IS narrowed here now. It used to be exempt so it could read
+// and listen tenant-wide while only scoring its own team (MoM 3.1.7), but the
+// current MoM says a telecaller lead may hear only its own team's calls — and
+// modules/device-recordings assertRecordingVisible now enforces that on
+// playback. Leaving the queue unscoped would hand back rows whose audio then
+// 403s, so the two must move together. Consequence: a telecaller lead can no
+// longer review another team's calls.
 //
 // `col` is the qualified column holding the reviewed user (dr.uploaded_by on
 // the queue, qr.counsellor_id on the scorecards).
 const applyReviewScope = async (req, col, conds, params) => {
   const role = req.user.role;
-  if (role !== SYSTEM_TENANT_ROLES.SALES_MANAGER) return;
+  if (role !== SYSTEM_TENANT_ROLES.SALES_MANAGER
+      && role !== SYSTEM_TENANT_ROLES.TELECALLER_LEAD) return;
   const team = await teamHierarchy(req.tenant, req.user.id);
   // teamHierarchy includes the actor; a lead with no reports still sees only
   // themselves rather than falling through to an unfiltered read.

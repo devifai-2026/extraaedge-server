@@ -470,7 +470,16 @@ const NO_BRANCH = '00000000-0000-0000-0000-000000000000';
 //                                handled via branchScopeId, not this list)
 //   super_admin / qa          -> everything
 const visibleUploaderIds = async (tenant, user) => {
-  if (LEAD_OWNER_ROLES.includes(user.role)) return [user.id];
+  // Team tiers are tested FIRST. telecaller_lead is in both LEAD_OWNER_ROLES
+  // (it carries a personal queue) and the manager tiers (it runs a team), so
+  // the owner check below would short-circuit it to [user.id] and make this
+  // branch dead code — which is exactly what happened when telecaller_lead was
+  // added to LEAD_OWNER_ROLES: a team lead saw only their own uploads, never
+  // their team's. constants.js states the rule: branch on the manager set first.
+  //
+  // Tested explicitly rather than via TEAM_SCOPED_MANAGER_ROLES because
+  // branch_manager is in that set too and must keep falling through to
+  // branchScopeId, which scopes it branch-wide rather than by subtree.
   if (user.role === SYSTEM_TENANT_ROLES.SALES_MANAGER
       || user.role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD) {
     const team = await teamHierarchy(tenant, user.id);
@@ -478,6 +487,7 @@ const visibleUploaderIds = async (tenant, user) => {
     // their own uploads rather than the whole tenant.
     return team.length ? team : [user.id];
   }
+  if (LEAD_OWNER_ROLES.includes(user.role)) return [user.id];
   return null;
 };
 
@@ -497,14 +507,16 @@ const branchScopeId = async (tenant, user) => {
 // forbidden — we don't confirm the row exists) when the recording's uploader
 // is outside the actor's scope.
 //
-// telecaller_lead is exempt: it reviews ANY recording in the tenant (see
-// modules/qa-reviews REVIEWER_ROLES / applyReviewScope), and the QA queue's
-// player fetches its audio through this very route — scoping it here would
-// 403 the review flow for every call outside its own team. Its team
-// restriction still governs the Call Recordings LIST below, which is that
-// team's upload history rather than a review surface.
+// telecaller_lead was previously exempt here so the QA queue's player could
+// fetch audio for any call in the tenant (MoM 3.1.7: listen tenant-wide, score
+// own team only). The current MoM REVERSES that — a telecaller lead may hear
+// only their own team's recordings — so the exemption is gone. This is a
+// deliberate reversal, not a regression.
+//
+// Paired change: modules/qa-reviews applyReviewScope now narrows the review
+// QUEUE for telecaller_lead to the same team set, so the queue cannot return a
+// row whose audio this guard would then refuse to play.
 const assertRecordingVisible = async (req, recording) => {
-  if (req.user.role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD) return;
   const allowed = await visibleUploaderIds(req.tenant, req.user);
   if (allowed && !allowed.includes(recording.uploaded_by)) throw notFound('Recording not found');
   const branchId = await branchScopeId(req.tenant, req.user);

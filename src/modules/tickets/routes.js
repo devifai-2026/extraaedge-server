@@ -49,8 +49,14 @@ const idParam = z.object({ id: z.string().uuid() });
 // POST validator. Always includes the caller's reporting chain.
 const allowedContactIds = async (tenant, actor) => {
   const ids = new Set();
+  // Manager tiers are tested FIRST — telecaller_lead is in both LEAD_OWNER_ROLES
+  // and TEAM_SCOPED_MANAGER_ROLES, so the front-line branch below would
+  // short-circuit it and a team lead would never be able to address their own
+  // telecallers. Same ordering rule as device-recordings visibleUploaderIds.
+  //
   // Front line (counsellor / telecaller): their managers + admins only.
-  if (LEAD_OWNER_ROLES.includes(actor.role)) {
+  if (LEAD_OWNER_ROLES.includes(actor.role)
+      && !TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
     const mgrs = await getManagerIds(tenant, actor.id);
     for (const m of mgrs) ids.add(m);
     const { rows: admins } = await tenantQuery(
