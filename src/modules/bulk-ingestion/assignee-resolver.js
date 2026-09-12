@@ -55,20 +55,51 @@ const lookupUserByEmail = async (tenant, cache, email) => {
 // manager. A telecaller_lead's reports are telecallers; a sales_manager's are
 // counsellors — the same query serves both because it filters on the report's
 // role, not the manager's.
-const loadOwnersFor = async (tenant, cache, manager_id) => {
-  if (cache.ownersByManager.has(manager_id)) return cache.ownersByManager.get(manager_id);
+// Front-line people a named manager can receive leads on behalf of.
+//
+// Two things this has to get right:
+//
+// 1. ROLE CLASS. A telecaller_lead runs telecallers, so naming one in the
+//    import must fan out across TELECALLERS only — never the counsellors who
+//    happen to share a manager. `roleFilter` narrows to that class; other
+//    manager tiers (sales/branch manager) keep the full front line.
+//    telecaller_lead is itself in LEAD_OWNER_ROLES now, so it is always
+//    excluded from the pool: a lead should land on a worker, not on another
+//    lead who would then have to redistribute it.
+//
+// 2. DEPTH. Matching only `manager_id = $1` finds DIRECT reports, which is
+//    wrong the moment an org has a tier in between (or, as on SpeedUp, the
+//    telecallers report to the branch manager rather than to their lead). We
+//    walk the whole downstream subtree instead, so a manager's pool is
+//    everyone actually under them.
+const loadOwnersFor = async (tenant, cache, manager_id, roleFilter = null) => {
+  const key = `${manager_id}:${roleFilter || 'all'}`;
+  if (cache.ownersByManager.has(key)) return cache.ownersByManager.get(key);
+  const roles = roleFilter
+    ? [roleFilter]
+    : LEAD_OWNER_ROLES.filter((r) => !TEAM_SCOPED_MANAGER_ROLES.includes(r));
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT id, manager_id
-       FROM users
-      WHERE manager_id = $1
-        AND role = ANY($2)
-        AND deleted_at IS NULL
-        AND is_active = true
-      ORDER BY id`,
-    [manager_id, LEAD_OWNER_ROLES],
+    `WITH RECURSIVE team AS (
+       SELECT id, manager_id FROM users
+        WHERE id = $1 AND deleted_at IS NULL
+       UNION
+       SELECT d.id, d.manager_id
+         FROM team t
+         JOIN users d ON d.manager_id = t.id
+        WHERE d.deleted_at IS NULL
+     )
+     SELECT u.id, u.manager_id
+       FROM team
+       JOIN users u ON u.id = team.id
+      WHERE u.id <> $1
+        AND u.role = ANY($2)
+        AND u.deleted_at IS NULL
+        AND u.is_active = true
+      ORDER BY u.id`,
+    [manager_id, roles],
   );
-  cache.ownersByManager.set(manager_id, rows);
+  cache.ownersByManager.set(key, rows);
   return rows;
 };
 
@@ -80,6 +111,9 @@ const loadAdminPool = async (tenant, cache, exclude_user_id) => {
   // land on a manager — violating the invariant and now rejected by the
   // insertLead sink guard. Restrict to owner roles so the round-robin produces
   // a valid owner every time.
+  // Workers only — telecaller_lead can hold leads but runs a team, so a
+  // tenant-wide round robin should land on the front line rather than on a
+  // team lead who would then redistribute.
   const { rows } = await tenantQuery(
     tenant,
     `SELECT id, role, manager_id
@@ -88,7 +122,7 @@ const loadAdminPool = async (tenant, cache, exclude_user_id) => {
         AND deleted_at IS NULL
         AND is_active = true
       ORDER BY id`,
-    [LEAD_OWNER_ROLES],
+    [LEAD_OWNER_ROLES.filter((r) => !TEAM_SCOPED_MANAGER_ROLES.includes(r))],
   );
   cache.adminPool = rows;
   return rows.filter((u) => u.id !== exclude_user_id);
@@ -133,7 +167,12 @@ export const resolveAssignee = async (tenant, cache, assigned_to_email) => {
   // A manager tier (sales_manager / branch_manager / telecaller_lead) fans the
   // lead out across their own front-line reports.
   if (TEAM_SCOPED_MANAGER_ROLES.includes(user.role)) {
-    const pool = await loadOwnersFor(tenant, cache, user.id);
+    // A telecaller lead's leads stay with telecallers; a sales/branch manager
+    // may spread across the whole front line under them.
+    const roleFilter = user.role === SYSTEM_TENANT_ROLES.TELECALLER_LEAD
+      ? SYSTEM_TENANT_ROLES.TELECALLER
+      : null;
+    const pool = await loadOwnersFor(tenant, cache, user.id, roleFilter);
     const picked = pickNext(cache, `mgr:${user.id}`, pool);
     if (!picked) return { assigned_to: null, manager_id: user.id };
     return { assigned_to: picked.id, manager_id: user.id };
