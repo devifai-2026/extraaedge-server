@@ -286,6 +286,168 @@ const main = async () => {
   }
   summary.recordings_created = recordings;
 
+  // ---- 9. batch placement + a MERGED batch --------------------------------
+  // Batch merge is a real trainer workflow (merged_into_batch_id), so the seed
+  // leaves one batch actually merged rather than pretending the feature is
+  // untested data.
+  const { rows: allBatches } = await tenantQuery(
+    tenant,
+    `SELECT id, program_id, name FROM batches WHERE deleted_at IS NULL ORDER BY created_at`,
+  );
+  const { rows: seededStudents } = await tenantQuery(
+    tenant,
+    `SELECT id, program_id FROM students WHERE email LIKE 'student%@demo.local' AND deleted_at IS NULL ORDER BY created_at`,
+  );
+  let placed = 0;
+  for (let i = 0; i < seededStudents.length; i += 1) {
+    const st = seededStudents[i];
+    const batch = allBatches.find((b) => b.program_id === st.program_id) ?? allBatches[0];
+    if (!batch) continue;
+    const { rows } = await tenantQuery(
+      tenant,
+      `INSERT INTO batch_students (batch_id, student_id, joined_at)
+       SELECT $1, $2, now() - interval '20 days'
+        WHERE NOT EXISTS (
+          SELECT 1 FROM batch_students WHERE batch_id = $1 AND student_id = $2 AND deleted_at IS NULL
+        )
+       RETURNING id`,
+      [batch.id, st.id],
+    );
+    if (rows[0]) placed += 1;
+  }
+  summary.batch_placements = placed;
+
+  // Merge the last batch into the first of the same program, so the Trainer
+  // batch screen has a real merged row to render.
+  let merged = 0;
+  if (allBatches.length >= 2) {
+    const target = allBatches[0];
+    const source = allBatches.find((b) => b.program_id === target.program_id && b.id !== target.id);
+    if (source) {
+      const { rows } = await tenantQuery(
+        tenant,
+        `UPDATE batches SET merged_into_batch_id = $2, status = 'merged'
+          WHERE id = $1 AND merged_into_batch_id IS NULL AND deleted_at IS NULL
+          RETURNING id`,
+        [source.id, target.id],
+      );
+      if (rows[0]) {
+        await tenantQuery(
+          tenant,
+          `UPDATE batch_students SET batch_id = $2 WHERE batch_id = $1 AND deleted_at IS NULL`,
+          [source.id, target.id],
+        );
+        merged = 1;
+      }
+    }
+  }
+  summary.batches_merged = merged;
+
+  // ---- 10. classes + attendance -------------------------------------------
+  // Past classes carry real attendance rows (present / absent / late) so the
+  // student's Attendance calendar and the trainer's register both have data.
+  const trainerId = byEmail['trainer@demo.local']?.id ?? null;
+  const primaryBatch = allBatches[0];
+  let classes = 0;
+  const classIds = [];
+  if (primaryBatch && trainerId) {
+    for (let d = 14; d >= 2; d -= 4) {
+      const { rows } = await tenantQuery(
+        tenant,
+        `INSERT INTO classes (program_id, batch_id, title, kind, mode, starts_at, ends_at, started_at, ended_at, trainer_id, created_by)
+         SELECT $1, $2, $3, 'lecture', 'online',
+                now() - ($4 || ' days')::interval,
+                now() - ($4 || ' days')::interval + interval '90 minutes',
+                now() - ($4 || ' days')::interval,
+                now() - ($4 || ' days')::interval + interval '90 minutes',
+                $5, $6
+          WHERE NOT EXISTS (SELECT 1 FROM classes WHERE batch_id = $2 AND title = $3 AND deleted_at IS NULL)
+         RETURNING id`,
+        [primaryBatch.program_id, primaryBatch.id, `Demo Session ${d}`, String(d), trainerId, admin?.id ?? null],
+      );
+      if (rows[0]) { classes += 1; classIds.push(rows[0].id); }
+    }
+    // One upcoming class, so "next class" surfaces are not empty either.
+    await tenantQuery(
+      tenant,
+      `INSERT INTO classes (program_id, batch_id, title, kind, mode, starts_at, ends_at, trainer_id, created_by)
+       SELECT $1, $2, 'Demo Session (upcoming)', 'lecture', 'online',
+              now() + interval '2 days', now() + interval '2 days' + interval '90 minutes', $3, $4
+        WHERE NOT EXISTS (SELECT 1 FROM classes WHERE batch_id = $2 AND title = 'Demo Session (upcoming)' AND deleted_at IS NULL)`,
+      [primaryBatch.program_id, primaryBatch.id, trainerId, admin?.id ?? null],
+    );
+  }
+  summary.classes_created = classes;
+
+  let attendance = 0;
+  if (classIds.length) {
+    const { rows: batchRoster } = await tenantQuery(
+      tenant,
+      `SELECT student_id FROM batch_students WHERE batch_id = $1 AND deleted_at IS NULL`,
+      [primaryBatch.id],
+    );
+    // A deterministic mix so the calendar shows all three states.
+    const MIX = ['present', 'present', 'absent', 'present', 'late', 'present'];
+    for (let ci = 0; ci < classIds.length; ci += 1) {
+      for (let si = 0; si < batchRoster.length; si += 1) {
+        const status = MIX[(ci + si) % MIX.length];
+        const { rows } = await tenantQuery(
+          tenant,
+          `INSERT INTO attendance (class_id, student_id, status, join_mode)
+           SELECT $1, $2, $3, 'online'
+            WHERE NOT EXISTS (SELECT 1 FROM attendance WHERE class_id = $1 AND student_id = $2)
+           RETURNING id`,
+          [classIds[ci], batchRoster[si].student_id, status],
+        );
+        if (rows[0]) attendance += 1;
+      }
+    }
+  }
+  summary.attendance_rows = attendance;
+
+  // ---- 11. placement: openings + student applications ---------------------
+  const { rows: companies } = await tenantQuery(
+    tenant,
+    `SELECT id, name FROM companies WHERE deleted_at IS NULL ORDER BY created_at LIMIT 3`,
+  );
+  let openings = 0;
+  const openingIds = [];
+  for (let i = 0; i < companies.length; i += 1) {
+    const c = companies[i];
+    const title = `${['Junior Developer', 'Data Analyst', 'Support Engineer'][i % 3]} — ${c.name}`;
+    const { rows } = await tenantQuery(
+      tenant,
+      `INSERT INTO job_openings (company_id, title, description, ctc, location, job_type, status, criteria, program_id, created_by)
+       SELECT $1, $2, 'Seeded demo opening', $3, 'Pune', 'full_time', 'open', '{}'::jsonb, $4, $5
+        WHERE NOT EXISTS (SELECT 1 FROM job_openings WHERE company_id = $1 AND title = $2 AND deleted_at IS NULL)
+       RETURNING id`,
+      [c.id, title, `${4 + i}.5 LPA`, programs[i % programs.length]?.id ?? null, admin?.id ?? null],
+    );
+    if (rows[0]) { openings += 1; openingIds.push(rows[0].id); }
+  }
+  summary.job_openings_created = openings;
+
+  let applications = 0;
+  const { rows: placementStages } = await tenantQuery(
+    tenant,
+    `SELECT id FROM placement_stages WHERE deleted_at IS NULL ORDER BY order_index LIMIT 3`,
+  ).catch(() => ({ rows: [] }));
+  for (let i = 0; i < openingIds.length; i += 1) {
+    for (let j = 0; j < Math.min(3, seededStudents.length); j += 1) {
+      const st = seededStudents[(i + j) % seededStudents.length];
+      const { rows } = await tenantQuery(
+        tenant,
+        `INSERT INTO job_applications (opening_id, student_id, status, stage_id, fired_by)
+         SELECT $1, $2, 'applied', $3, $4
+          WHERE NOT EXISTS (SELECT 1 FROM job_applications WHERE opening_id = $1 AND student_id = $2)
+         RETURNING id`,
+        [openingIds[i], st.id, placementStages[j % Math.max(placementStages.length, 1)]?.id ?? null, admin?.id ?? null],
+      );
+      if (rows[0]) applications += 1;
+    }
+  }
+  summary.job_applications_created = applications;
+
   logger.info({ slug, ...summary }, 'seed-demo-full: done');
   return { tenant, hash, roleId, branchId, admin, byEmail, summary };
 };
