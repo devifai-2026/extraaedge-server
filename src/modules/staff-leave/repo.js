@@ -26,9 +26,28 @@ const LEAVE_COLS = `
   l.id, l.user_id, l.leave_type_id, l.from_date, l.to_date, l.day_count,
   l.half_day, l.reason, l.status, l.decision_note, l.applied_via,
   l.attachment_r2_key, l.decided_at, l.cancelled_at, l.created_at,
+  l.is_lop, l.lop_days, l.lop_note,
   u.name AS user_name, u.email AS user_email, u.role AS user_role,
-  t.code AS type_code, t.name AS type_name, t.is_paid
+  t.code AS type_code, t.name AS type_name, t.is_paid,
+  t.is_paid AS type_is_paid
 `;
+
+// Record the approver's loss-of-pay decision. Separate from setLeaveStatus so
+// the money decision is its own auditable write, and so a later correction to
+// LOP does not have to re-run the whole approval transition.
+export const setLeaveLop = async (tenant, id, { isLop, lopDays, lopNote }, client) => {
+  const runner = client
+    ? (text, params) => client.query(text, params)
+    : (text, params) => tenantQuery(tenant, text, params);
+  const { rows } = await runner(
+    `UPDATE staff_leave
+        SET is_lop = $2, lop_days = $3, lop_note = $4, updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL
+      RETURNING id, is_lop, lop_days, lop_note`,
+    [id, isLop, lopDays, lopNote ?? null],
+  );
+  return rows[0] ?? null;
+};
 
 export const findLeave = async (tenant, id) => {
   const { rows } = await tenantQuery(
@@ -62,6 +81,34 @@ export const listLeaves = async (tenant, { userIds, status, from, to, limit = 20
       WHERE ${conds.join(' AND ')}
       ORDER BY l.from_date DESC
       LIMIT $${params.length}`,
+    params,
+  );
+  return rows;
+};
+
+// Calendar projection: WHO is away and WHEN, and nothing else.
+//
+// Deliberately NOT LEAVE_COLS — no reason, no attachment, no decision note, no
+// LOP figure. "Is Priya in on the 14th?" is ordinary team information; why she
+// is away is not. That narrower shape is what lets this be readable by every
+// staff role rather than approvers only.
+export const calendarRows = async (tenant, { from, to, branchId = null }) => {
+  const params = [from, to];
+  let branchCond = '';
+  if (branchId) { params.push(branchId); branchCond = `AND u.branch_id = $${params.length}`; }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.id, l.user_id, l.from_date, l.to_date, l.day_count, l.half_day, l.status,
+            u.name AS user_name, u.role AS user_role,
+            t.code AS type_code, t.name AS type_name
+       FROM staff_leave l
+       JOIN users u ON u.id = l.user_id AND u.deleted_at IS NULL
+       LEFT JOIN leave_types t ON t.id = l.leave_type_id
+      WHERE l.deleted_at IS NULL
+        AND l.status IN ('pending','approved')
+        AND l.to_date >= $1::date AND l.from_date <= $2::date
+        ${branchCond}
+      ORDER BY u.name, l.from_date`,
     params,
   );
   return rows;

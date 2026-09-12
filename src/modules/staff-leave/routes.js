@@ -39,6 +39,12 @@ const applySchema = z.object({
 const decideSchema = z.object({
   approve: z.boolean(),
   note: z.string().max(500).optional(),
+  // Loss of pay is the approver's call, not the applicant's. Omitting mark_lop
+  // follows the leave type (LWP unpaid, everything else paid); lop_days lets a
+  // 3-day leave be approved with only 1 day docked, in 0.5 steps for half days.
+  mark_lop: z.boolean().optional(),
+  lop_days: z.number().min(0).max(366).optional(),
+  lop_note: z.string().max(500).optional(),
 });
 
 const listQuery = z.object({
@@ -46,6 +52,15 @@ const listQuery = z.object({
   from: isoDate.optional(),
   to: isoDate.optional(),
   user_id: z.string().uuid().optional(),
+});
+
+// The calendar takes a month window and an optional branch, and no status
+// filter — it always shows pending AND approved, because a half-approved day
+// still has to be planned around.
+const calendarQuery = z.object({
+  from: isoDate,
+  to: isoDate,
+  branch_id: z.string().uuid().optional(),
 });
 
 // ---- self-service ---------------------------------------------------------
@@ -101,19 +116,6 @@ router.post('/:id/cancel', validate({ params: idParam }), async (req, res, next)
   } catch (err) { next(err); }
 });
 
-router.get('/:id', validate({ params: idParam }), async (req, res, next) => {
-  try {
-    const leave = await repo.findLeave(req.tenant, req.params.id);
-    if (!leave) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Leave request not found' } });
-    // Own request, or an approver/admin surface.
-    const mayView = leave.user_id === req.user.id
-      || APPROVER_ROLES.includes(req.user.role);
-    if (!mayView) return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Not your leave request' } });
-    const steps = await repo.approvalSteps(req.tenant, req.params.id);
-    return res.json({ data: { ...leave, steps }, meta: { requestId: req.id } });
-  } catch (err) { next(err); }
-});
-
 // ---- approver -------------------------------------------------------------
 router.get('/queue/pending', requireRole(...APPROVER_ROLES), async (req, res, next) => {
   try {
@@ -133,6 +135,21 @@ router.post('/:id/decide', requireRole(...APPROVER_ROLES), validate({ params: id
       afterJson: { final: out.final, status: out.status },
     });
     res.json({ data: out, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// ---- shared calendar ------------------------------------------------------
+// No requireRole: knowing who is away is ordinary team information, and the
+// projection carries name/date/status only — never the reason, the note or the
+// LOP figure. The full register below stays approver-gated.
+router.get('/calendar', validate({ query: calendarQuery }), async (req, res, next) => {
+  try {
+    res.json({
+      data: await service.calendar(req.tenant, {
+        from: req.query.from, to: req.query.to, branchId: req.query.branch_id ?? null,
+      }),
+      meta: { requestId: req.id },
+    });
   } catch (err) { next(err); }
 });
 
@@ -198,6 +215,24 @@ router.delete('/holidays/:id', requireRole(...LEAVE_ADMIN), validate({ params: i
   try {
     await service.removeHoliday(req.tenant, req.params.id);
     res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// ---- single request (LAST) -------------------------------------------------
+// Declared after every literal path on purpose. Express matches in declaration
+// order, so while this sat above them '/policies' and '/queue/pending' were
+// swallowed by ':id' and failed uuid validation with a 400 — the policy admin
+// route was unreachable for everyone, HR included.
+router.get('/:id', validate({ params: idParam }), async (req, res, next) => {
+  try {
+    const leave = await repo.findLeave(req.tenant, req.params.id);
+    if (!leave) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Leave request not found' } });
+    // Own request, or an approver/admin surface.
+    const mayView = leave.user_id === req.user.id
+      || APPROVER_ROLES.includes(req.user.role);
+    if (!mayView) return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Not your leave request' } });
+    const steps = await repo.approvalSteps(req.tenant, req.params.id);
+    return res.json({ data: { ...leave, steps }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 

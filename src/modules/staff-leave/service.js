@@ -159,7 +159,12 @@ export const applyLeave = async (tenant, actor, input) => {
 
 // Approve or decline ONE step. The request only flips to approved when every
 // step has, which is what makes a two-level chain real.
-export const decide = async (tenant, actor, leaveId, { approve, note }) => {
+// `mark_lop` / `lop_days` let the APPROVER decide the absence is unpaid, which
+// is a separate judgement from which leave type was requested: a counsellor may
+// apply as Casual Leave and the lead still approves it as loss of pay.
+// Payroll reads `lop_days` off approved rows, so this is the single switch that
+// moves money.
+export const decide = async (tenant, actor, leaveId, { approve, note, mark_lop, lop_days, lop_note }) => {
   const leave = await repo.findLeave(tenant, leaveId);
   if (!leave) throw notFound('Leave request not found');
   if (leave.status !== 'pending') throw conflict(`This request is already ${leave.status}`);
@@ -176,6 +181,23 @@ export const decide = async (tenant, actor, leaveId, { approve, note }) => {
     throw validationError({ note: 'A note is required when declining' });
   }
 
+  // Resolve loss of pay. Default follows the leave TYPE (LWP is unpaid); an
+  // explicit mark_lop from the approver overrides it either way.
+  const fullDays = Number(leave.day_count ?? 0);
+  const typeUnpaid = leave.type_is_paid === false;
+  const isLop = mark_lop === undefined || mark_lop === null ? typeUnpaid : Boolean(mark_lop);
+  let lopDays = 0;
+  if (isLop) {
+    lopDays = lop_days === undefined || lop_days === null ? fullDays : Number(lop_days);
+    if (!Number.isFinite(lopDays) || lopDays < 0 || lopDays > fullDays) {
+      throw validationError({ lop_days: `Unpaid days must be between 0 and ${fullDays}` });
+    }
+    // Half-days only ever move in 0.5 steps; anything else is a typo.
+    if (Math.round(lopDays * 2) !== lopDays * 2) {
+      throw validationError({ lop_days: 'Unpaid days must be in steps of 0.5' });
+    }
+  }
+
   return tenantTx(tenant, async (client) => {
     await repo.decideStep(tenant, mine.id, approve ? 'approved' : 'declined', note, client);
 
@@ -190,7 +212,8 @@ export const decide = async (tenant, actor, leaveId, { approve, note }) => {
       return { ...leave, status: 'pending', final: false, awaiting: after.filter((s) => s.status === 'pending').length };
     }
     const out = await repo.setLeaveStatus(tenant, leaveId, 'approved', note, client);
-    return { ...out, final: true };
+    await repo.setLeaveLop(tenant, leaveId, { isLop, lopDays, lopNote: lop_note ?? null }, client);
+    return { ...out, is_lop: isLop, lop_days: lopDays, final: true };
   });
 };
 
@@ -199,11 +222,16 @@ export const decide = async (tenant, actor, leaveId, { approve, note }) => {
 export const commitBalance = async (tenant, leave, actorId) => {
   if (leave.status !== 'approved' || !leave.leave_type_id) return;
   const year = new Date(leave.from_date).getUTCFullYear();
+  // Days the approver marked as loss of pay do NOT consume paid quota —
+  // charging the balance AND docking the salary would penalise twice for one
+  // absence. Only the paid remainder comes off the balance.
+  const chargeable = Math.max(0, Number(leave.day_count ?? 0) - Number(leave.lop_days ?? 0));
+  if (chargeable <= 0) return;
   await repo.adjustBalance(tenant, {
     userId: leave.user_id,
     leaveTypeId: leave.leave_type_id,
     year,
-    delta: Number(leave.day_count),
+    delta: chargeable,
     reason: 'approved',
     leaveId: leave.id,
     actorId,
@@ -245,6 +273,10 @@ export const listForActor = async (tenant, actor, filters) => {
   }
   return repo.listLeaves(tenant, { ...filters, userIds: [actor.id] });
 };
+
+// The shared org calendar. Every staff role may read it — see repo.calendarRows
+// for why that is safe (name/date/status only, never the reason).
+export const calendar = (tenant, filters) => repo.calendarRows(tenant, filters);
 
 export const listPolicies = (tenant) => repo.listPolicies(tenant);
 export const setPolicy = (tenant, scope, mode) => repo.setPolicy(tenant, scope, mode);
