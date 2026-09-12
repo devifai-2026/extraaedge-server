@@ -157,6 +157,19 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       // some of these roles during applyMigrations, so a plain INSERT collides
       // on the UNIQUE(name) constraint. Upsert instead, refreshing the bundle's
       // description/scope/tabs and always returning the id for the FK map below.
+      // tab_permissions MERGES, it does not replace. provisionTenantDatabase
+      // runs applyMigrations BEFORE this seed, and several migrations grant
+      // tabs to roles they do not define (account_manager picks up its 13
+      // accounts.* keys that way). A plain overwrite wiped all of them, and
+      // because those migrations guard themselves against re-running, they
+      // never restored it -- so a newly provisioned tenant got an Accounts
+      // team with full API access and no navigation to reach it. Observed on
+      // learn-synaptic: 2 of 13 accounts tabs, exactly the two whose
+      // migrations happened to run after it was provisioned.
+      //
+      // The seed is the BASE grant, so an existing value wins on any key both
+      // sides define. That also preserves a per-tenant customisation an admin
+      // made in Roles & Tabs.
       const { rows } = await client.query(
         `INSERT INTO custom_roles (name, description, scope, is_system, tab_permissions)
          VALUES ($1,$2,$3,$4,$5)
@@ -164,7 +177,7 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
            SET description = EXCLUDED.description,
                scope = EXCLUDED.scope,
                is_system = EXCLUDED.is_system,
-               tab_permissions = EXCLUDED.tab_permissions
+               tab_permissions = EXCLUDED.tab_permissions || COALESCE(custom_roles.tab_permissions, '{}'::jsonb)
          RETURNING id`,
         [r.name, r.description, r.scope, r.is_system, r.tab_permissions],
       );
