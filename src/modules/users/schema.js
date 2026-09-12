@@ -21,6 +21,9 @@ const roleBucket = z.enum([
   'telecaller_lead', 'telecaller',
   'account_manager',
   'head_trainer', 'trainer', 'hr', 'placement', 'qa',
+  // MoM HR/placement tiers. Missing from this enum means a 400 on user create
+  // AND on GET /users?role=, since roleBucketList validates against it too.
+  'hr_team_lead', 'hr_recruiter', 'placement_officer',
 ]);
 
 // A phone/whatsapp must be digits only (7–15). Optional/blank is allowed; a

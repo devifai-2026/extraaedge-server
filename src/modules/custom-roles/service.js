@@ -17,13 +17,36 @@ import { logger } from '../../lib/logger.js';
 //   - every other scope (sales_manager, counsellor) → any tab EXCEPT
 //     'accounts.*'.
 const ALL_TABS_SCOPES = ['super_admin', 'branch_manager'];
+
+// Scopes confined to their own prefixes. Without this a placement officer could
+// be granted `leads` from the Roles & Tabs editor — the UI would show the tab
+// and every lead route would then 403, which reads as a broken product rather
+// than a misconfiguration. Keys outside the allowed prefixes are dropped, the
+// same way an accounts key is dropped from a counsellor.
+const PREFIX_SCOPES = {
+  account_manager: ['accounts.'],
+  qa: ['qa.'],
+  hr: ['hr.'],
+  hr_recruiter: ['hr.'],
+  hr_team_lead: ['hr.', 'placement.', 'lms.'],
+  placement: ['placement.'],
+  placement_officer: ['placement.', 'hr.interviews'],
+  trainer: ['trainer.', 'courses.'],
+  head_trainer: ['trainer.', 'courses.', 'lms.'],
+  student: ['student.'],
+};
+
 const sanitizeTabPermissions = (scope, tabPermissions) => {
   if (!tabPermissions || typeof tabPermissions !== 'object') return tabPermissions;
   if (ALL_TABS_SCOPES.includes(scope)) return tabPermissions;
+  const prefixes = PREFIX_SCOPES[scope];
   const out = {};
   for (const [k, v] of Object.entries(tabPermissions)) {
-    const isAccounts = k.startsWith('accounts.');
-    const applicable = scope === 'account_manager' ? isAccounts : !isAccounts;
+    // A prefix-scoped role keeps only its own keys; everyone else keeps
+    // anything that is not an Accounts key.
+    const applicable = prefixes
+      ? prefixes.some((pre) => k.startsWith(pre))
+      : !k.startsWith('accounts.');
     if (applicable) out[k] = v;
   }
   return out;

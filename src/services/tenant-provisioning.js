@@ -9,6 +9,7 @@ import {
   DEFAULT_BUSINESS_HOURS, DEFAULT_TAB_KEYS, CALL_DISPOSITIONS,
   HEAD_TRAINER_TAB_KEYS, TRAINER_TAB_KEYS, STUDENT_TAB_KEYS,
   HR_TAB_KEYS, PLACEMENT_TAB_KEYS, QA_TAB_KEYS,
+  HR_TEAM_LEAD_TAB_KEYS, HR_RECRUITER_TAB_KEYS, PLACEMENT_OFFICER_TAB_KEYS,
 } from '../config/constants.js';
 
 const { Client } = pg;
@@ -149,6 +150,11 @@ const seedTenantDefaults = async ({ tenant, first_admin, db_password }) => {
       // Call-quality reviewer. Only the review queue — the qa.feedback report
       // belongs to the manager tiers, which get it via DEFAULT_TAB_KEYS.
       { name: 'qa', description: 'QA — reviews and rates counsellor call recordings', scope: 'qa', is_system: true, tab_permissions: Object.fromEntries(QA_TAB_KEYS.map((t) => [t, 'full'])) },
+      // MoM HR/placement tiers. hr_team_lead runs both HR and placement and
+      // reports to the branch manager; the other two report to it.
+      { name: 'hr_team_lead', description: 'HR Team Lead — HR operations, placement oversight, manpower', scope: 'hr_team_lead', is_system: true, tab_permissions: Object.fromEntries(HR_TEAM_LEAD_TAB_KEYS.map((t) => [t, 'full'])) },
+      { name: 'hr_recruiter', description: 'HR Recruiter — hiring, interviews, onboarding', scope: 'hr_recruiter', is_system: true, tab_permissions: Object.fromEntries(HR_RECRUITER_TAB_KEYS.map((t) => [t, 'full'])) },
+      { name: 'placement_officer', description: 'Placement Officer — student placement and employer coordination', scope: 'placement_officer', is_system: true, tab_permissions: Object.fromEntries(PLACEMENT_OFFICER_TAB_KEYS.map((t) => [t, 'full'])) },
     ];
     const roleIds = {};
     for (const r of roleBundles) {

@@ -105,6 +105,27 @@ export const MANAGER_TIER_ROLES = Object.freeze([
 // the count and the copy all follow. Nothing about telecalling is special-cased
 // in the detector itself.
 export const EXPECTED_SUPERVISOR = Object.freeze([
+  // The three MoM roles. Safe to declare because they have ZERO users on day
+  // one — assertSupervisorExists is a hard write block, so adding a pair for an
+  // existing role would 400 every future edit of those users.
+  {
+    role: 'hr_team_lead',
+    supervisor: 'branch_manager',
+    label: 'HR team lead',
+    supervisorLabel: 'branch manager',
+  },
+  {
+    role: 'hr_recruiter',
+    supervisor: 'hr_team_lead',
+    label: 'HR recruiter',
+    supervisorLabel: 'HR team lead',
+  },
+  {
+    role: 'placement_officer',
+    supervisor: 'hr_team_lead',
+    label: 'placement officer',
+    supervisorLabel: 'HR team lead',
+  },
   {
     role: SYSTEM_TENANT_ROLES.TELECALLER,
     supervisor: SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
@@ -377,6 +398,18 @@ export const LMS_TENANT_ROLES = Object.freeze({
   STUDENT: 'student',
   HR: 'hr',
   PLACEMENT: 'placement',
+  // The MoM's HR/Placement tiers. Declared HERE and not in SYSTEM_TENANT_ROLES
+  // on purpose: that object is spread into LEAD_OWNER_ROLES,
+  // TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES and ADMIN_TIER_ROLES, so
+  // adding them there would silently hand them lead scope and manager gates.
+  // Living here, they fall through computeScope to { user_ids: [actor.id] } —
+  // they see nothing they were not explicitly granted.
+  //
+  // "Trainer Team Lead" in the MoM maps to the EXISTING head_trainer; a second
+  // role for the same job would split the course roster in two.
+  HR_TEAM_LEAD: 'hr_team_lead',
+  HR_RECRUITER: 'hr_recruiter',
+  PLACEMENT_OFFICER: 'placement_officer',
 });
 
 // Tab bundles per LMS role — used by provisioning + the seed migration so the
@@ -403,4 +436,18 @@ export const PLACEMENT_TAB_KEYS = Object.freeze([
 ]);
 // QA: the review queue is the reviewer's working surface; the feedback report
 // is the manager read-back, so the two are granted separately.
-export const QA_TAB_KEYS = Object.freeze(['qa.reviews']);
+export const QA_TAB_KEYS = Object.freeze(['qa.reviews', 'qa.feedback']);
+
+// HR Team Lead owns HR *and* placement per the MoM ("full access to HR
+// recruiters + placement officers"), so its bundle is the union plus the LMS
+// analytics it needs for student/drop reports.
+export const HR_TEAM_LEAD_TAB_KEYS = Object.freeze([
+  ...HR_TAB_KEYS, ...PLACEMENT_TAB_KEYS, 'lms.analytics',
+]);
+// Recruiter works the hiring side only. No placement, no analytics.
+export const HR_RECRUITER_TAB_KEYS = Object.freeze([...HR_TAB_KEYS]);
+// Placement officer runs companies/openings/applications and is the one who
+// assigns mock interviews, hence hr.interviews on top of the placement set.
+export const PLACEMENT_OFFICER_TAB_KEYS = Object.freeze([
+  ...PLACEMENT_TAB_KEYS, 'hr.interviews',
+]);
