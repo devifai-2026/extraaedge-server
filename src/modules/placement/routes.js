@@ -21,6 +21,11 @@ router.use('/student', s);
 // ---- Placement team / admin / branch_manager ----
 router.use(authRequired, tenantRequired, requireRole(
   SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER, LMS_TENANT_ROLES.PLACEMENT,
+  // placement_officer runs this module day to day; hr_team_lead has placement
+  // oversight per the MoM ("full access to HR recruiters + placement officers").
+  // Both hold the placement.* tabs, so the gate has to admit them or the tab
+  // renders a page that 403s — which reads as broken rather than unauthorised.
+  LMS_TENANT_ROLES.PLACEMENT_OFFICER, LMS_TENANT_ROLES.HR_TEAM_LEAD,
 ));
 
 const criteriaSchema = z.object({

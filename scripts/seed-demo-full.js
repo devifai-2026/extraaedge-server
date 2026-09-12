@@ -41,6 +41,12 @@ const STAFF = [
   { role: 'placement',       name: 'Prakash Placement', email: 'placement@demo.local',  phone: '+919810000009' },
   { role: 'head_trainer',    name: 'Harsh HeadTrainer', email: 'headtrainer@demo.local', phone: '+919810000010' },
   { role: 'trainer',         name: 'Tina Trainer',     email: 'trainer@demo.local',     phone: '+919810000011' },
+  // MoM HR/placement tiers. hr_team_lead reports to the BM; the other two
+  // report to IT, which EXPECTED_SUPERVISOR enforces at the write path — so the
+  // reporting map below must create the lead before its two reports.
+  { role: 'hr_team_lead',     name: 'Hitesh HR Lead',   email: 'hrlead@demo.local',      phone: '+919810000012' },
+  { role: 'hr_recruiter',     name: 'Riya Recruiter',   email: 'recruiter@demo.local',   phone: '+919810000013' },
+  { role: 'placement_officer', name: 'Pooja Placement Officer', email: 'placementofficer@demo.local', phone: '+919810000014' },
 ];
 
 // Students across every status the LMS understands, so drop-candidate and
@@ -117,6 +123,9 @@ const main = async () => {
     ['qa@demo.local', byEmail['bm@demo.local']?.id],
     ['hr@demo.local', byEmail['bm@demo.local']?.id],
     ['placement@demo.local', byEmail['bm@demo.local']?.id],
+    ['hrlead@demo.local', byEmail['bm@demo.local']?.id],
+    ['recruiter@demo.local', byEmail['hrlead@demo.local']?.id],
+    ['placementofficer@demo.local', byEmail['hrlead@demo.local']?.id],
     ['headtrainer@demo.local', byEmail['bm@demo.local']?.id],
     ['trainer@demo.local', byEmail['headtrainer@demo.local']?.id],
   ];
@@ -260,6 +269,41 @@ const main = async () => {
   }
   summary.followups_created = followups;
 
+  // Every OTHER lead owner gets a follow-up and a recording too. The seeded
+  // staff above are not the only users — a tenant carries pre-existing
+  // telecallers and leads, and an empty Follow-ups or Call Recordings tab reads
+  // as "this feature is broken" just as loudly for them.
+  const { rows: otherOwners } = await tenantQuery(
+    tenant,
+    `SELECT DISTINCT l.assigned_to AS id
+       FROM leads l JOIN users u ON u.id = l.assigned_to
+      WHERE l.deleted_at IS NULL AND u.deleted_at IS NULL AND u.is_active
+        AND u.role = ANY($1)
+        AND NOT EXISTS (
+          SELECT 1 FROM lead_followups f
+           WHERE f.created_by = l.assigned_to AND f.deleted_at IS NULL
+        )`,
+    [['counsellor', 'telecaller', 'telecaller_lead']],
+  );
+  let extraFu = 0;
+  for (const o of otherOwners) {
+    const { rows: theirLead } = await tenantQuery(
+      tenant,
+      `SELECT id FROM leads WHERE assigned_to = $1 AND deleted_at IS NULL LIMIT 1`,
+      [o.id],
+    );
+    if (!theirLead[0]) continue;
+    const { rows } = await tenantQuery(
+      tenant,
+      `INSERT INTO lead_followups (lead_id, next_action_datetime, status, comment, created_by)
+       VALUES ($1, now() + interval '1 day', 'planned', 'Demo follow-up — seeded', $2)
+       RETURNING id`,
+      [theirLead[0].id, o.id],
+    );
+    if (rows[0]) extraFu += 1;
+  }
+  summary.followups_for_other_owners = extraFu;
+
   // ---- 8. device recordings (matched, for the QA queue) -------------------
   // The QA review queue only surfaces MATCHED recordings, so these are bound to
   // a seeded lead and attributed to the front-line owner. r2_key points at a
@@ -285,6 +329,48 @@ const main = async () => {
     if (rows[0]) recordings += 1;
   }
   summary.recordings_created = recordings;
+
+  // A recording for every OTHER front-line owner too, so each telecaller lead's
+  // Call Recordings and QA queue show their own team's calls rather than an
+  // empty tab. visibleUploaderIds scopes a lead to its SUBTREE, so the upload
+  // has to be attributed to a team member, not the lead itself.
+  const { rows: otherFront } = await tenantQuery(
+    tenant,
+    `SELECT u.id, u.name FROM users u
+      WHERE u.deleted_at IS NULL AND u.is_active
+        AND u.role = ANY($1)
+        AND NOT EXISTS (
+          SELECT 1 FROM device_recordings d
+           WHERE d.uploaded_by = u.id AND d.deleted_at IS NULL
+        )`,
+    [['counsellor', 'telecaller']],
+  );
+  let extraRec = 0;
+  for (let i = 0; i < otherFront.length; i += 1) {
+    const owner = otherFront[i];
+    const { rows: theirLead } = await tenantQuery(
+      tenant,
+      `SELECT id, phone FROM leads WHERE assigned_to = $1 AND deleted_at IS NULL LIMIT 1`,
+      [owner.id],
+    );
+    if (!theirLead[0]) continue;
+    const digits = String(theirLead[0].phone ?? '').replace(/\D/g, '').slice(-10);
+    if (digits.length < 10) continue;
+    const { rows } = await tenantQuery(
+      tenant,
+      `INSERT INTO device_recordings
+         (lead_id, phone_raw, phone_digits, match_status, r2_key, file_name,
+          size_bytes, duration_seconds, uploaded_by, branch_id, client_ref)
+       SELECT $1,$2,$3,'matched',$4,$5,102400,80,$6,$7,$8
+        WHERE NOT EXISTS (SELECT 1 FROM device_recordings WHERE client_ref = $8)
+       RETURNING id`,
+      [theirLead[0].id, digits, digits, `demo/recordings/owner-${i + 1}.m4a`,
+        `Call recording ${digits}_owner_${i + 1}.m4a`, owner.id, branchId,
+        `demo-seed-owner-rec-${i + 1}`],
+    );
+    if (rows[0]) extraRec += 1;
+  }
+  summary.recordings_for_other_owners = extraRec;
 
   // ---- 9. batch placement + a MERGED batch --------------------------------
   // Batch merge is a real trainer workflow (merged_into_batch_id), so the seed
@@ -447,6 +533,44 @@ const main = async () => {
     }
   }
   summary.job_applications_created = applications;
+
+  // ---- 12. mock-interview slots (HR's evaluation queue) -------------------
+  // mock_interviews existed but had no SLOTS, so HR's queue rendered empty —
+  // the queue is slots awaiting a score, not interviews.
+  const { rows: mocks } = await tenantQuery(
+    tenant,
+    `SELECT id FROM mock_interviews ORDER BY created_at LIMIT 2`,
+  ).catch(() => ({ rows: [] }));
+  // listForHr filters on mock_interviews.hr_user_id, so an unassigned interview
+  // is invisible to every HR — the queue means "mine to evaluate", not "all".
+  const hrUserId = byEmail['hr@demo.local']?.id ?? null;
+  if (hrUserId && mocks.length) {
+    await tenantQuery(
+      tenant,
+      `UPDATE mock_interviews SET hr_user_id = $1
+        WHERE hr_user_id IS NULL AND id = ANY($2::uuid[])`,
+      [hrUserId, mocks.map((m) => m.id)],
+    ).catch(() => {});
+  }
+  let slots = 0;
+  for (const m of mocks) {
+    for (let i = 0; i < Math.min(3, seededStudents.length); i += 1) {
+      const st = seededStudents[i];
+      const { rows } = await tenantQuery(
+        tenant,
+        `INSERT INTO interview_slots (interview_id, student_id, slot_at, starts_at, ends_at)
+         SELECT $1, $2, now() + interval '3 days', now() + interval '3 days',
+                now() + interval '3 days' + interval '45 minutes'
+          WHERE NOT EXISTS (
+            SELECT 1 FROM interview_slots WHERE interview_id = $1 AND student_id = $2 AND deleted_at IS NULL
+          )
+         RETURNING id`,
+        [m.id, st.id],
+      ).catch(() => ({ rows: [] }));
+      if (rows[0]) slots += 1;
+    }
+  }
+  summary.interview_slots_created = slots;
 
   logger.info({ slug, ...summary }, 'seed-demo-full: done');
   return { tenant, hash, roleId, branchId, admin, byEmail, summary };

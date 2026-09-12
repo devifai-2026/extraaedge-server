@@ -31,6 +31,10 @@ const hit = async (u, path) => {
 };
 
 // The surface each role actually opens on. Expect 200 AND a non-zero count.
+// Self-service surfaces EVERY role must be able to open — an empty portal for
+// any of these is the failure this catches.
+const SELF_SERVICE = [['/staff-leave/types'], ['/staff-leave/mine/balances']];
+
 const CHECKS = {
   branch_manager:  [['/analytics/summary'], ['/leads?limit=5'], ['/users?limit=5']],
   sales_manager:   [['/analytics/summary'], ['/leads?limit=5'], ['/users/team']],
@@ -42,6 +46,9 @@ const CHECKS = {
   hr:              [['/interviews/hr/queue'], ['/learning/hr/counts']],
   placement:       [['/placement/counts'], ['/placement/companies'], ['/placement/openings']],
   head_trainer:    [['/courses'], ['/courses/insights']],
+  hr_team_lead:    [['/learning/hr/counts'], ['/placement/counts'], ['/staff-leave/types']],
+  hr_recruiter:    [['/learning/hr/counts'], ['/staff-leave/types']],
+  placement_officer: [['/placement/counts'], ['/placement/openings'], ['/placement/companies']],
   trainer:         [['/courses'], ['/classes?limit=5']],
 };
 

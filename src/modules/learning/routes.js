@@ -43,6 +43,10 @@ router.use('/student', s);
 router.use(authRequired, tenantRequired, requireRole(
   SYSTEM_TENANT_ROLES.SUPER_ADMIN, SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   LMS_TENANT_ROLES.HEAD_TRAINER, LMS_TENANT_ROLES.TRAINER, LMS_TENANT_ROLES.HR,
+  // The HR tiers hold the hr.* tabs, so they must reach the HR surfaces.
+  // placement_officer is here for hr.interviews only — it assigns and reviews
+  // mock interviews, which lives on the HR side.
+  LMS_TENANT_ROLES.HR_TEAM_LEAD, LMS_TENANT_ROLES.HR_RECRUITER, LMS_TENANT_ROLES.PLACEMENT_OFFICER,
 ));
 // HR certificate management (HR/admin; not course-roster gated).
 router.get('/hr/counts', controller.hrCounts);

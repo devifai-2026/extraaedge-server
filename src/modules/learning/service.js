@@ -14,7 +14,15 @@ import { notifyBatch, pushStudentNotification } from '../student-notifications/s
 const MIN_ATTENDANCE_PCT = 50; // certificate threshold — enforced by auto-issue (all modules complete AND attendance ≥ this)
 
 const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
-const isHrOrAdmin = (actor) => isAdmin(actor) || actor?.role === LMS_TENANT_ROLES.HR;
+// Every HR tier, not just the flat `hr` role. hr_team_lead and hr_recruiter
+// hold the hr.* tabs, so the tab would render a page that then 403s — which
+// reads as a broken product rather than a permission boundary.
+const HR_TIER_ROLES = [
+  LMS_TENANT_ROLES.HR,
+  LMS_TENANT_ROLES.HR_TEAM_LEAD,
+  LMS_TENANT_ROLES.HR_RECRUITER,
+];
+const isHrOrAdmin = (actor) => isAdmin(actor) || HR_TIER_ROLES.includes(actor?.role);
 const assertProgramTrainer = async (tenant, programId, actor) => {
   if (isAdmin(actor)) return;
   const m = await coursesRepo.isCourseTrainer(tenant, programId, actor?.id);
