@@ -50,8 +50,21 @@ export const update = async (req, res, next) => {
 
 export const remove = async (req, res, next) => {
   try {
-    await service.deleteUser(req.tenant, req.params.id, req.user);
+    // reassign_to rides in the body — DELETE with a body is unusual, but the
+    // alternative is a second endpoint for what is one atomic action.
+    await service.deleteUser(req.tenant, req.params.id, req.user, {
+      reassign_to: req.body?.reassign_to,
+    });
     res.status(204).end();
+  } catch (err) { next(err); }
+};
+
+// What this user still owns, so the offboarding dialog can show the blockers
+// and the eligible successors BEFORE anyone clicks delete.
+export const offboardingPreview = async (req, res, next) => {
+  try {
+    const data = await service.offboardingPreview(req.tenant, req.params.id, req.user);
+    res.json({ data, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
 

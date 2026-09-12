@@ -4,7 +4,7 @@ import * as roleRepo from '../custom-roles/repo.js';
 import * as phoneDirectory from './phone-directory.js';
 import { appError, conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR, RESPONSE_CODES } from '../../config/constants.js';
-import { tenantQuery } from '../../db/tenant.js';
+import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
 import { sendPhoneOtp } from '../../lib/providers/whatsapp-wabridge.js';
@@ -459,6 +459,153 @@ export const updateUser = async (tenant, id, updates, actor) => {
 
 // Open (unconverted, live) leads this user currently owns. The blocker for
 // moving someone OUT of a lead-owning role — their queue has to go somewhere.
+// Everything a departing user still OWNS that somebody else has to pick up.
+//
+// Deliberately only "live work", not history: a lead they own, a follow-up they
+// still have to make, a student they guide, a course they teach. Historical
+// stamps (created_by on a closed record, who logged an activity, an audit row)
+// are left pointing at the deleted user on purpose — rewriting them would
+// falsify the record of who did what.
+//
+// Soft delete is why this matters. deleteUser sets deleted_at rather than
+// removing the row, so the FKs never fire and every one of these columns keeps
+// pointing at somebody who no longer exists. On the live SpeedUp tenant that is
+// 19,888 leads and 10,097 follow-ups per counsellor-shaped user.
+//
+// Each entry returns { key, label, count, reassignable } so one generic UI can
+// render the blocker list for ANY role — counsellor, trainer, HR or placement —
+// without a per-role branch.
+const pendingWorkFor = async (tenant, user_id) => {
+  const q = async (sql, params = [user_id]) => {
+    const { rows } = await tenantQuery(tenant, sql, params).catch(() => ({ rows: [{ c: 0 }] }));
+    return Number(rows[0]?.c ?? 0);
+  };
+
+  const [openLeads, openFollowups, guidedStudents, courses, liveClasses, poolMemberships, directReports] =
+    await Promise.all([
+      q(`SELECT count(*) c FROM leads
+          WHERE assigned_to = $1 AND deleted_at IS NULL AND converted_at IS NULL`),
+      q(`SELECT count(*) c FROM lead_followups f
+          JOIN leads l ON l.id = f.lead_id AND l.deleted_at IS NULL
+         WHERE f.created_by = $1 AND f.deleted_at IS NULL AND f.status = 'planned'`),
+      q(`SELECT count(*) c FROM admissions
+          WHERE guided_by_counsellor_id = $1 AND deleted_at IS NULL
+            AND status NOT IN ('dropped', 'completed')`),
+      q(`SELECT count(*) c FROM course_trainers
+          WHERE user_id = $1 AND deleted_at IS NULL`),
+      q(`SELECT count(*) c FROM classes
+          WHERE trainer_id = $1 AND deleted_at IS NULL AND starts_at >= now()`),
+      // Routing pools store members in a uuid[], so a departing member silently
+      // shrinks the rotation instead of erroring.
+      q(`SELECT count(*) c FROM lead_routing_pools
+          WHERE deleted_at IS NULL AND $1 = ANY(member_ids)`),
+      q(`SELECT count(*) c FROM users
+          WHERE manager_id = $1 AND deleted_at IS NULL`),
+    ]);
+
+  return [
+    { key: 'open_leads', label: 'open leads', count: openLeads, reassignable: true },
+    { key: 'planned_followups', label: 'planned follow-ups', count: openFollowups, reassignable: true },
+    { key: 'guided_admissions', label: 'students they guide', count: guidedStudents, reassignable: true },
+    { key: 'courses', label: 'courses they teach', count: courses, reassignable: true },
+    { key: 'upcoming_classes', label: 'upcoming classes', count: liveClasses, reassignable: true },
+    { key: 'routing_pools', label: 'lead-distribution pools', count: poolMemberships, reassignable: true },
+    { key: 'direct_reports', label: 'people reporting to them', count: directReports, reassignable: true },
+  ].filter((w) => w.count > 0);
+};
+
+// The successor must be able to actually do the job being handed over.
+//
+// Leads and follow-ups can only sit with a LEAD_OWNER_ROLES user (the same
+// invariant assertLeadOwnerTarget enforces on every other write path), and a
+// course needs somebody who teaches. Checked here so offboarding fails with a
+// clear message instead of writing rows that a later guard rejects.
+const assertSuccessorValid = async (tenant, successorId, work, departingId) => {
+  if (successorId === departingId) {
+    throw conflict('Pick somebody other than the person being removed');
+  }
+  const { rows: [succ] } = await tenantQuery(
+    tenant,
+    `SELECT id, name, role, is_active FROM users WHERE id = $1 AND deleted_at IS NULL`,
+    [successorId],
+  );
+  if (!succ) throw notFound('Successor not found');
+  if (!succ.is_active) throw conflict(`${succ.name} is deactivated — pick an active user`);
+
+  const needsOwner = work.some((w) => ['open_leads', 'planned_followups', 'guided_admissions'].includes(w.key));
+  if (needsOwner && !LEAD_OWNER_ROLES.includes(succ.role)) {
+    throw conflict(
+      `${succ.name} is a ${String(succ.role).replace(/_/g, ' ')} and cannot hold leads. Pick a counsellor, telecaller or telecaller lead.`,
+      { successor_role: succ.role },
+    );
+  }
+  const needsTrainer = work.some((w) => ['courses', 'upcoming_classes'].includes(w.key));
+  if (needsTrainer && !['trainer', 'head_trainer'].includes(succ.role)) {
+    throw conflict(
+      `${succ.name} is a ${String(succ.role).replace(/_/g, ' ')} and cannot take over courses. Pick a trainer or head trainer.`,
+      { successor_role: succ.role },
+    );
+  }
+  return succ;
+};
+
+// Move every piece of live work from one user to another, in a transaction.
+//
+// Used by offboarding. The successor must already be able to do the job — a
+// counsellor's leads cannot go to a trainer — which the caller validates via
+// assertSuccessorValid before we get here.
+//
+// Deliberately NOT touched: lead_activities, audit_log, message_log, and any
+// created_by on a closed record. Those are history, and history keeps the name
+// of whoever actually did it.
+const transferOwnedWork = async (tenant, fromId, toId, actorId) => {
+  return tenantTx(tenant, async (client) => {
+    const moved = {};
+    const run = async (key, sql) => {
+      const { rowCount } = await client.query(sql, [fromId, toId]);
+      if (rowCount) moved[key] = rowCount;
+    };
+
+    await run('leads', `UPDATE leads SET assigned_to = $2, manager_id = (SELECT manager_id FROM users WHERE id = $2), last_activity_at = now()
+                         WHERE assigned_to = $1 AND deleted_at IS NULL AND converted_at IS NULL`);
+    await run('followups', `UPDATE lead_followups SET created_by = $2
+                             WHERE created_by = $1 AND deleted_at IS NULL AND status = 'planned'`);
+    await run('admissions', `UPDATE admissions SET guided_by_counsellor_id = $2
+                              WHERE guided_by_counsellor_id = $1 AND deleted_at IS NULL
+                                AND status NOT IN ('dropped', 'completed')`);
+    // A course the successor already teaches would violate the uniqueness the
+    // roster assumes, so skip those rather than erroring the whole offboard.
+    await run('courses', `UPDATE course_trainers ct SET user_id = $2
+                           WHERE ct.user_id = $1 AND ct.deleted_at IS NULL
+                             AND NOT EXISTS (
+                               SELECT 1 FROM course_trainers x
+                                WHERE x.program_id = ct.program_id AND x.user_id = $2 AND x.deleted_at IS NULL
+                             )`);
+    await run('classes', `UPDATE classes SET trainer_id = $2
+                           WHERE trainer_id = $1 AND deleted_at IS NULL AND starts_at >= now()`);
+    // uuid[] membership: swap in place so the pool keeps its rotation order.
+    await run('routing_pools', `UPDATE lead_routing_pools
+                                   SET member_ids = array_replace(member_ids, $1::uuid, $2::uuid)
+                                 WHERE deleted_at IS NULL AND $1 = ANY(member_ids)
+                                   AND NOT ($2 = ANY(member_ids))`);
+    // Re-parent the team so nobody is left reporting to a deleted manager.
+    await run('direct_reports', `UPDATE users SET manager_id = $2
+                                  WHERE manager_id = $1 AND deleted_at IS NULL`);
+    await client.query(
+      `UPDATE user_managers SET manager_id = $2
+        WHERE manager_id = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM user_managers x WHERE x.user_id = user_managers.user_id AND x.manager_id = $2
+          )`,
+      [fromId, toId],
+    );
+    // Drop any row the swap above would have duplicated.
+    await client.query(`DELETE FROM user_managers WHERE manager_id = $1`, [fromId]);
+
+    return moved;
+  });
+};
+
 const openLeadsOwnedBy = async (tenant, user_id) => {
   const { rows } = await tenantQuery(
     tenant,
@@ -637,7 +784,54 @@ export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_le
   };
 };
 
-export const deleteUser = async (tenant, id, actor) => {
+// Offboarding. `reassign_to` names the person who inherits the departing
+// user's live work; omit it and the call fails with the full blocker list so
+// the UI can show "X owns 412 leads and 9 students — who takes them?".
+//
+// Before this, delete was a bare soft-delete: deleted_at was set and every one
+// of ~122 FK columns kept pointing at a user who no longer exists. FKs never
+// fire on a soft delete, so nothing surfaced — leads, follow-ups, guided
+// students, courses and whole reporting lines simply became invisible work.
+// Read-only view of what a user still owns plus who could take it, so the
+// offboarding dialog can be filled in one round trip.
+export const offboardingPreview = async (tenant, id, actor) => {
+  const existing = await repo.findById(tenant, id);
+  if (!existing) throw notFound('User not found');
+  await assertBranchManagerScope(tenant, actor, {
+    targetRole: existing.role,
+    targetUserId: id,
+    managerId: null,
+  });
+
+  const work = await pendingWorkFor(tenant, id);
+
+  // Eligible successors depend on WHAT is being handed over, so the dialog
+  // never offers somebody the transfer would then reject.
+  const needsOwner = work.some((w) => ['open_leads', 'planned_followups', 'guided_admissions'].includes(w.key));
+  const needsTrainer = work.some((w) => ['courses', 'upcoming_classes'].includes(w.key));
+  let roles = null;
+  if (needsOwner && needsTrainer) roles = [...LEAD_OWNER_ROLES, 'trainer', 'head_trainer'];
+  else if (needsOwner) roles = [...LEAD_OWNER_ROLES];
+  else if (needsTrainer) roles = ['trainer', 'head_trainer'];
+
+  const { rows: candidates } = await tenantQuery(
+    tenant,
+    `SELECT id, name, email, role FROM users
+      WHERE deleted_at IS NULL AND is_active = true AND id <> $1
+        ${roles ? 'AND role = ANY($2)' : ''}
+      ORDER BY name`,
+    roles ? [id, roles] : [id],
+  );
+
+  return {
+    user: { id: existing.id, name: existing.name, role: existing.role, email: existing.email },
+    pending_work: work,
+    requires_reassignment: work.length > 0,
+    candidates,
+  };
+};
+
+export const deleteUser = async (tenant, id, actor, { reassign_to } = {}) => {
   const existing = await repo.findById(tenant, id);
   if (!existing) throw notFound('User not found');
   if (existing.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
@@ -652,7 +846,31 @@ export const deleteUser = async (tenant, id, actor) => {
     targetUserId: id,
     managerId: null,
   });
+
+  // ---- handover ---------------------------------------------------------
+  const work = await pendingWorkFor(tenant, id);
+  let moved = {};
+  if (work.length) {
+    if (!reassign_to) {
+      const detail = work.map((w) => `${w.count} ${w.label}`).join(', ');
+      throw conflict(
+        `${existing.name} still owns ${detail}. Choose who should take this over before removing them.`,
+        { pending_work: work, requires: 'reassign_to' },
+      );
+    }
+    await assertSuccessorValid(tenant, reassign_to, work, id);
+    moved = await transferOwnedWork(tenant, id, reassign_to, actor?.id ?? null);
+  }
+
   await repo.softDelete(tenant, id);
+  await writeAuditLog(tenant, {
+    userId: actor?.id ?? null,
+    action: 'user.offboarded',
+    entityType: 'user',
+    entityId: id,
+    beforeJson: { name: existing.name, role: existing.role, email: existing.email },
+    afterJson: { reassigned_to: reassign_to ?? null, moved },
+  });
   // Free the number platform-wide so it can be reused.
   if (existing.phone) await phoneDirectory.releasePhone(existing.phone).catch(() => {});
 };

@@ -102,6 +102,12 @@ export const listUsersQuery = z.object({
 // Switch Role — POST /users/:id/switch-role.
 // `role_id` (a custom_roles row) is the only required field; the role bucket
 // is derived from that row's scope, exactly as create/update do it.
+// Offboarding body. Optional because the first call is deliberately allowed to
+// fail — that failure is what returns the blocker list the dialog renders.
+export const offboardSchema = z.object({
+  reassign_to: z.string().uuid().optional(),
+}).optional().default({});
+
 export const switchRoleSchema = z.object({
   role_id: z.string().uuid(),
   // Omitted => keep the current primary manager. Pass [] to clear reporting

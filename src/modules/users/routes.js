@@ -7,7 +7,7 @@ import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES, MANAGER_TIER_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
-import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema, sendPhoneOtpSchema, verifyPhoneOtpSchema, switchRoleSchema } from './schema.js';
+import { createUserSchema, updateUserSchema, idParam, listUsersQuery, resetPasswordSchema, changeUserPermissionsSchema, updateThemeSchema, updateAvatarSchema, updateMyPhoneSchema, sendPhoneOtpSchema, verifyPhoneOtpSchema, switchRoleSchema, offboardSchema } from './schema.js';
 import { otpLimiter } from '../../middleware/rateLimit.js';
 
 const router = express.Router();
@@ -94,10 +94,20 @@ router.put(
   controller.update,
 );
 
+// What a user still owns. Drives the offboarding dialog; read-only.
+router.get(
+  '/:id/offboarding-preview',
+  requireRole(...ADMIN_TIER_ROLES),
+  validate({ params: idParam }),
+  controller.offboardingPreview,
+);
+
+// Offboarding. Fails with the blocker list + `requires: 'reassign_to'` when the
+// user still owns live work and no successor was named.
 router.delete(
   '/:id',
   requireRole(...ADMIN_TIER_ROLES),
-  validate({ params: idParam }),
+  validate({ params: idParam, body: offboardSchema }),
   controller.remove,
 );
 
