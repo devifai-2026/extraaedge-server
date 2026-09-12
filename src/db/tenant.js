@@ -81,13 +81,29 @@ export const getTenantPool = async (tenant) => {
   // open transaction. A leaked/stuck txn (the "idle in transaction" slot we
   // saw pinning a connection during the outage) is then reaped by Postgres
   // instead of consuming a pool slot indefinitely.
-  if (env.TENANT_DB_IDLE_TXN_TIMEOUT_MS > 0) {
-    pool.on('connect', (client) => {
+  // Pin every connection to the tenant's timezone.
+  //
+  // Postgres evaluates current_date, now()::date, date_trunc('day', ...) and
+  // every `::date` cast in the SESSION timezone. The server runs UTC, so at
+  // 01:23 IST on the 13th `current_date` returned the 12th — a silent off-by-one
+  // on every date the server derives. That is wrong for leave (a day applied
+  // for), attendance (which day was worked) and payroll (which month a joining
+  // date falls in), and it only misfires between midnight and 05:30 IST, which
+  // is exactly when nobody is watching.
+  //
+  // Timestamps are unaffected either way: timestamptz is stored as an absolute
+  // instant, and this only changes how it is rendered and how DATES are derived.
+  const sessionTz = tenant.timezone || 'Asia/Kolkata';
+  pool.on('connect', (client) => {
+    client
+      .query(`SET TIME ZONE '${sessionTz.replace(/'/g, "''")}'`)
+      .catch((err) => logger.warn({ tenantId: tenant.id, err: err.message }, 'set session time zone failed'));
+    if (env.TENANT_DB_IDLE_TXN_TIMEOUT_MS > 0) {
       client
         .query(`SET idle_in_transaction_session_timeout = ${env.TENANT_DB_IDLE_TXN_TIMEOUT_MS}`)
         .catch((err) => logger.warn({ tenantId: tenant.id, err: err.message }, 'set idle_in_transaction_session_timeout failed'));
-    });
-  }
+    }
+  });
   pool.on('error', (err) => logger.error({ tenantId: tenant.id, err: err.message }, 'tenant pg pool error'));
   pools.set(tenant.id, pool);
   return pool;
