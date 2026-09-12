@@ -383,8 +383,13 @@ export const updateUser = async (tenant, id, updates, actor) => {
   // the role is actually changing to / staying branch_manager AND the caller
   // touched the role or manager fields, so we don't clobber on unrelated edits.
   const effectiveRole = updates.role ?? existing.role;
-  if (effectiveRole === SYSTEM_TENANT_ROLES.BRANCH_MANAGER
-      && ('role' in updates || 'manager_id' in updates || 'manager_ids' in updates)) {
+  // Unconditional for a branch_manager: the rule is "a BM reports to the admin",
+  // not "a BM reports to the admin whenever someone happens to edit their role
+  // or manager". Previously this only fired when role/manager_id/manager_ids was
+  // in the patch, so a BM whose reporting line had been corrupted elsewhere was
+  // never repaired by an ordinary edit. It recomputes the same admin id every
+  // time, so making it unconditional costs one query and cannot drift.
+  if (effectiveRole === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
     updates = await forceBranchManagerReporting(tenant, effectiveRole, updates);
   }
   // Branch assignment enforcement, mirroring createUser. Only evaluated when
@@ -499,12 +504,29 @@ export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_le
     if (others.total <= 1) throw forbidden('Cannot demote the last super_admin');
   }
 
+  // A branch_manager reports to the tenant admin, period — the same invariant
+  // createUser and updateUser enforce via forceBranchManagerReporting. Without
+  // this, switch-role was a way straight around that rule: promoting someone to
+  // branch_manager with an arbitrary manager_ids[] re-parented them anywhere.
+  //
+  // Resolved HERE, before the three things that read the reporting line below
+  // (assertBranchManagerScope, assertSupervisorExists and nextManagerIds), so
+  // all of them see the forced value rather than what the client sent.
+  const isBecomingBranchManager = scope === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
+  let effectiveManagerIds = Array.isArray(manager_ids) ? manager_ids : null;
+  if (isBecomingBranchManager) {
+    const adminId = await primarySuperAdminId(tenant);
+    // A tenant mid-provisioning may have no super_admin yet; an empty list is
+    // the honest answer there, exactly as forceBranchManagerReporting does.
+    effectiveManagerIds = adminId ? [adminId] : [];
+  }
+
   // A branch_manager may only move people inside their own branch, and never
   // into an admin / branch-head role. Same guard the create/update paths use.
   await assertBranchManagerScope(tenant, actor, {
     targetRole: scope,
     targetUserId: id,
-    managerId: Array.isArray(manager_ids) ? manager_ids[0] ?? null : null,
+    managerId: Array.isArray(effectiveManagerIds) ? effectiveManagerIds[0] ?? null : null,
   });
 
   // Same structural rule as creation: switching INTO a front-line role still
@@ -512,8 +534,8 @@ export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_le
   // becomes a way around the create-time guard.
   await assertSupervisorExists(tenant, {
     role: scope,
-    managerIds: Array.isArray(manager_ids) && manager_ids.length
-      ? manager_ids
+    managerIds: Array.isArray(effectiveManagerIds) && effectiveManagerIds.length
+      ? effectiveManagerIds
       : (existing.manager_id ? [existing.manager_id] : []),
   });
 
@@ -550,8 +572,10 @@ export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_le
   // ---- Flip the role ---------------------------------------------------
   // manager_ids defaults to keeping the current primary manager, so a switch
   // that doesn't mention reporting lines doesn't quietly orphan the user.
-  const nextManagerIds = Array.isArray(manager_ids)
-    ? manager_ids
+  // For a branch_manager this is the forced [admin] list resolved above — the
+  // client's manager_ids is deliberately ignored for that role.
+  const nextManagerIds = Array.isArray(effectiveManagerIds)
+    ? effectiveManagerIds
     : (existing.manager_id ? [existing.manager_id] : []);
   await repo.setManagers(tenant, id, nextManagerIds);
   const updated = await repo.update(tenant, id, {

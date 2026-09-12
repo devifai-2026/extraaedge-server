@@ -126,18 +126,6 @@ export const TENANT_STATUS = Object.freeze({
   PROVISIONING: 'provisioning',
 });
 
-export const LEAD_STAGE_CODES = Object.freeze({
-  NEW: '01-New',
-  CONTACTED: '02-Contacted',
-  FOLLOWUP: '03-Followup',
-  QUALIFIED: '05-Qualified',
-  REQUIREMENT_MATCH: '07-Requirement-Match',
-  INTERESTED: '08-Interested',
-  VISITED: '09-Visited',
-  ENROLLED: '10-Enrolled',
-  JUNK: '11-Junk',
-  COLD: '12-Cold',
-});
 
 // Discount workflow on the Qualified stage. A counsellor may self-apply a
 // discount up to COUNSELLOR_MAX_PERCENT with no approval; anything above that

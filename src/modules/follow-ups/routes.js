@@ -284,8 +284,16 @@ router.post('/', validate({ body: createSchema }), async (req, res, next) => {
     // action happens on it.
     //
     // Scope is intentionally narrow:
-    //   • Only fires when the lead is currently in '01-New'.
-    //   • Targets '04-Followup' (with the default sub-stage if one exists).
+    //   • Only fires when the lead is currently in the ENTRY stage.
+    //   • Targets the tenant's Followup stage (with its default sub-stage).
+    //
+    // Both are resolved FROM THE DATABASE, never from a hardcoded code. Stage
+    // codes are tenant-editable and have drifted badly: the live SpeedUp tenant
+    // runs '03-Followup' (and also has a second, unused '04-Followup'), so the
+    // old `code = '04-Followup'` lookup silently matched nothing and this
+    // auto-move never fired there. Entry stage = lowest order_index; Followup =
+    // matched on the normalised NAME, the same way the admin's leadFlags.js
+    // norm() strips the leading 'NN-' prefix.
     //   • Other stages are left alone — a counsellor scheduling a follow-up
     //     from Contacted / Qualified / etc. is normal and shouldn't churn.
     //
@@ -295,18 +303,33 @@ router.post('/', validate({ body: createSchema }), async (req, res, next) => {
     try {
       const { rows: leadRows } = await tenantQuery(
         req.tenant,
-        `SELECT l.id, l.stage_id, s.code AS stage_code
+        `SELECT l.id, l.stage_id
            FROM leads l
-           LEFT JOIN lead_stages s ON s.id = l.stage_id
           WHERE l.id = $1 AND l.deleted_at IS NULL
           LIMIT 1`,
         [req.body.lead_id],
       );
       const lead = leadRows[0];
-      if (lead && lead.stage_code === '01-New') {
+      // "Untouched" means the lead sits in the first stage of the pipeline,
+      // which is an ordering fact rather than a code fact.
+      const { rows: entryRows } = await tenantQuery(
+        req.tenant,
+        `SELECT id FROM lead_stages
+          WHERE is_active AND deleted_at IS NULL
+          ORDER BY order_index ASC, name ASC
+          LIMIT 1`,
+      );
+      const entryStageId = entryRows[0]?.id ?? null;
+      if (lead && entryStageId && lead.stage_id === entryStageId) {
+        // ORDER BY order_index resolves a tenant that has more than one
+        // Followup-named stage deterministically to the earliest.
         const { rows: targetRows } = await tenantQuery(
           req.tenant,
-          `SELECT id FROM lead_stages WHERE code = '04-Followup' AND deleted_at IS NULL AND is_active LIMIT 1`,
+          `SELECT id FROM lead_stages
+            WHERE is_active AND deleted_at IS NULL
+              AND lower(regexp_replace(name, '^[0-9]+-', '')) IN ('followup', 'follow up')
+            ORDER BY order_index ASC
+            LIMIT 1`,
         );
         const targetStageId = targetRows[0]?.id;
         if (targetStageId) {
