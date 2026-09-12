@@ -62,6 +62,7 @@ import workflowsRouter from './modules/workflows/routes.js';
 import campaignsBulkRouter from './modules/campaigns-bulk/routes.js';
 import campaignsDripRouter from './modules/campaigns-drip/routes.js';
 import slaRouter from './modules/sla/routes.js';
+import staffLeaveRouter from './modules/staff-leave/routes.js';
 import referralsRouter from './modules/referrals/routes.js';
 import feedbackRouter from './modules/feedback/routes.js';
 import platformFeedbackRouter from './modules/platform-feedback/routes.js';
@@ -224,6 +225,7 @@ export const mountRoutes = (app) => {
   api.use('/campaigns/bulk', campaignsBulkRouter);
   api.use('/campaigns/drip', campaignsDripRouter);
   api.use('/sla-policies', slaRouter);
+  api.use('/staff-leave', staffLeaveRouter);
   api.use('/referrals', referralsRouter);
   // In-app feedback popup (tenant users).
   api.use('/feedback', feedbackRouter);
