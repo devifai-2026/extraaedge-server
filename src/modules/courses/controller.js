@@ -49,6 +49,12 @@ export const myBranches = async (req, res, next) => {
 export const createTrainer = async (req, res, next) => {
   try { ok(res, req, await service.createTrainer(req.tenant, req.user, req.params.programId, req.body), 201); } catch (e) { next(e); }
 };
+export const deleteBatch = async (req, res, next) => {
+  try { ok(res, req, await service.deleteBatch(req.tenant, req.user, req.params.programId, req.params.batchId)); } catch (e) { next(e); }
+};
+export const batchUsage = async (req, res, next) => {
+  try { ok(res, req, await service.batchUsage(req.tenant, req.user, req.params.programId, req.params.batchId)); } catch (e) { next(e); }
+};
 export const completeBatch = async (req, res, next) => {
   try { ok(res, req, await service.completeBatch(req.tenant, req.user, req.params.programId, req.params.batchId)); } catch (e) { next(e); }
 };

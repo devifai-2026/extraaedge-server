@@ -14,7 +14,7 @@ import * as usersRepo from '../users/repo.js';
 import * as studentAuthService from '../student-auth/service.js';
 import * as studentAuthRepo from '../student-auth/repo.js';
 import { pushStudentNotification } from '../student-notifications/service.js';
-import { notFound, forbidden, validationError } from '../../lib/errors.js';
+import { notFound, forbidden, validationError, conflict } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
 import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
@@ -217,6 +217,54 @@ export const completeBatch = async (tenant, actor, programId, batchId) => {
   const batch = await repo.getBatch(tenant, batchId);
   if (!batch || batch.program_id !== programId) throw notFound('Batch not in this course');
   return repo.setBatchCompleted(tenant, batchId);
+};
+
+// Read-only counts, so the UI can decide whether to offer deletion at all.
+export const batchUsage = async (tenant, actor, programId, batchId) => {
+  await assertCanManage(tenant, programId, actor);
+  const batch = await repo.getBatch(tenant, batchId);
+  if (!batch || batch.program_id !== programId) throw notFound('Batch not in this course');
+  const usage = await repo.batchUsage(tenant, batchId);
+  const total = Object.values(usage).reduce((a, n) => a + Number(n || 0), 0);
+  return { ...usage, deletable: total === 0 };
+};
+
+// Delete a batch — only when nothing is attached to it.
+//
+// A batch created by mistake (wrong name, wrong course) should be removable, but
+// deleting one that holds students, classes or capstones would orphan
+// attendance, recordings and payroll history. So this refuses unless every
+// dependant count is zero, and names what is blocking it rather than failing
+// with a bare "cannot delete".
+//
+// Soft delete, like every other destructive action in the product: the row stays
+// for audit, it simply leaves every query (all of which filter deleted_at).
+export const deleteBatch = async (tenant, actor, programId, batchId) => {
+  await assertCanManage(tenant, programId, actor);
+  const batch = await repo.getBatch(tenant, batchId);
+  if (!batch || batch.program_id !== programId) throw notFound('Batch not in this course');
+
+  const usage = await repo.batchUsage(tenant, batchId);
+  const blockers = [];
+  if (usage.students) blockers.push(`${usage.students} student(s)`);
+  if (usage.classes) blockers.push(`${usage.classes} class(es)`);
+  if (usage.capstones) blockers.push(`${usage.capstones} capstone project(s)`);
+  if (usage.announcements) blockers.push(`${usage.announcements} announcement(s)`);
+  if (usage.module_links) blockers.push(`${usage.module_links} linked module(s)`);
+  // A batch that others were merged INTO is the surviving record of those
+  // cohorts; removing it would strand their history.
+  if (usage.merged_in) blockers.push(`${usage.merged_in} merged batch(es) pointing here`);
+
+  if (blockers.length) {
+    throw conflict(
+      `This batch still has ${blockers.join(', ')}. Move or remove them first — or mark the batch complete instead.`,
+      { usage },
+    );
+  }
+
+  const out = await repo.softDeleteBatch(tenant, batchId);
+  if (!out) throw notFound('Batch not found');
+  return out;
 };
 
 // ---------- Students management (admin + head trainer, course-scoped) ----------

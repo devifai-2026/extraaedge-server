@@ -85,6 +85,11 @@ router.post('/:programId/batches/place', validate({ params: programParam, body: 
   batch_id: uuid, student_id: uuid.optional(), student_ids: z.array(uuid).optional(), share_recordings: z.boolean().optional(),
 }) }), controller.placeStudent);
 router.post('/:programId/batches/:batchId/complete', validate({ params: z.object({ programId: uuid, batchId: uuid }) }), controller.completeBatch);
+// What is attached to a batch — lets the UI hide or explain the delete button
+// instead of offering one that always fails.
+router.get('/:programId/batches/:batchId/usage', validate({ params: z.object({ programId: uuid, batchId: uuid }) }), controller.batchUsage);
+// Only removable while nothing is attached; see service.deleteBatch.
+router.delete('/:programId/batches/:batchId', validate({ params: z.object({ programId: uuid, batchId: uuid }) }), controller.deleteBatch);
 router.post('/:programId/batches/merge', validate({ params: programParam, body: z.object({
   source_batch_id: uuid, target_batch_id: uuid, share_recordings: z.boolean().optional(),
 }) }), controller.mergeBatches);

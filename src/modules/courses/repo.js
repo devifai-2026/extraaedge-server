@@ -221,6 +221,35 @@ export const branchesForUser = async (tenant, userId) => {
   return rows;
 };
 
+// What is still attached to a batch. Deleting is only safe when every count is
+// zero — "no students" alone is not enough: a batch can hold classes (which
+// carry attendance and feed payroll), capstones, announcements, or be the
+// target of an earlier merge, and dropping it would orphan all of that.
+export const batchUsage = async (tenant, batchId) => {
+  const { rows: [r] } = await tenantQuery(
+    tenant,
+    `SELECT
+       (SELECT count(*)::int FROM batch_students   WHERE batch_id = $1 AND deleted_at IS NULL) AS students,
+       (SELECT count(*)::int FROM classes          WHERE batch_id = $1 AND deleted_at IS NULL) AS classes,
+       (SELECT count(*)::int FROM capstone_projects WHERE batch_id = $1 AND deleted_at IS NULL) AS capstones,
+       (SELECT count(*)::int FROM announcements    WHERE batch_id = $1 AND deleted_at IS NULL) AS announcements,
+       (SELECT count(*)::int FROM module_batches   WHERE batch_id = $1 AND deleted_at IS NULL) AS module_links,
+       (SELECT count(*)::int FROM batches          WHERE merged_into_batch_id = $1 AND deleted_at IS NULL) AS merged_in`,
+    [batchId],
+  );
+  return r;
+};
+
+export const softDeleteBatch = async (tenant, batchId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE batches SET deleted_at = now(), updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL RETURNING id, name`,
+    [batchId],
+  );
+  return rows[0] ?? null;
+};
+
 export const setBatchCompleted = async (tenant, batchId) => {
   const { rows } = await tenantQuery(
     tenant,
