@@ -1,8 +1,10 @@
 // Courses / modules / trainers / batches.
 //
 // Access model:
-//   - super_admin: full write on any course (creates courses, names heads).
-//   - head_trainer: manages modules/trainers/batches of courses they HEAD.
+//   - super_admin / branch_manager: full write on any course, without being on
+//     its roster. Only these two may appoint a course HEAD.
+//   - head_trainer: manages modules/trainers/batches of courses they are on,
+//     but NOT org-wide — heading one course is no licence over another.
 //   - trainer: read-only on courses they're on the roster of.
 // Scope is enforced here via course_trainers membership (the trainer-scope
 // key), mirroring the admissions guided_by_counsellor_id pattern.
@@ -17,21 +19,38 @@ import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { env } from '../../config/env.js';
 import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 
-const isSuperAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN;
+// Org-wide reach: sees and manages every course without being on its roster.
+// branch_manager is admin tier throughout the rest of the product, and the
+// admin UI has always offered it these controls — previously the server checked
+// super_admin alone, so a BM saw the buttons and got a 403 on click.
+const isAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN
+  || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
 
-// Throw unless the actor may READ this course (super_admin, or on the roster).
+// A head trainer manages courses, but ONLY those they are on the roster of —
+// deliberately not org-wide. Being the head of one course is no reason to
+// administer another department's.
+const isHeadTrainer = (actor) => actor?.role === LMS_TENANT_ROLES.HEAD_TRAINER;
+
+// Throw unless the actor may READ this course (admin, or on the roster).
 const assertCanRead = async (tenant, programId, actor) => {
-  if (isSuperAdmin(actor)) return;
+  if (isAdmin(actor)) return;
   const membership = await repo.isCourseTrainer(tenant, programId, actor?.id);
   if (!membership) throw forbidden('You are not assigned to this course.');
   return membership;
 };
 
-// Throw unless the actor may MANAGE this course (super_admin or its head_trainer).
+// Throw unless the actor may MANAGE this course (admin, or its head trainer).
+//
+// A head_trainer qualifies via EITHER their roster role or their user role, so
+// the two can never disagree again: users/service.js keeps them in step on a
+// role switch, and this accepts a head_trainer whose roster row still says
+// 'trainer' — the failure that locked a promoted head trainer out of his own
+// course.
 const assertCanManage = async (tenant, programId, actor) => {
-  if (isSuperAdmin(actor)) return;
+  if (isAdmin(actor)) return;
   const membership = await repo.isCourseTrainer(tenant, programId, actor?.id);
-  if (!membership || membership.role !== 'head') {
+  if (!membership) throw forbidden('You are not assigned to this course.');
+  if (membership.role !== 'head' && !isHeadTrainer(actor)) {
     throw forbidden('Only the course head trainer (or an admin) can do this.');
   }
 };
@@ -39,7 +58,7 @@ const assertCanManage = async (tenant, programId, actor) => {
 // ---------- Courses ----------
 export const listCourses = async (tenant, actor) => {
   // Admins see all; trainers see only their own.
-  const trainerId = isSuperAdmin(actor) ? undefined : actor?.id;
+  const trainerId = isAdmin(actor) ? undefined : actor?.id;
   return repo.listCourses(tenant, { trainerId });
 };
 
@@ -82,7 +101,9 @@ export const listTrainers = async (tenant, actor, programId) => {
 // Adding a HEAD is admin-only; the head then adds module trainers.
 export const addTrainer = async (tenant, actor, programId, input) => {
   if (input.role === 'head') {
-    if (!isSuperAdmin(actor)) throw forbidden('Only an admin can assign the course head trainer.');
+    // Appointing the course HEAD stays admin-only: a head trainer must not be
+    // able to hand their own course to somebody else.
+    if (!isAdmin(actor)) throw forbidden('Only an admin can assign the course head trainer.');
   } else {
     await assertCanManage(tenant, programId, actor);
   }
@@ -108,7 +129,7 @@ export const attendanceHistory = async (tenant, actor, programId, branchId = nul
 // Trainer-dashboard insights: totals + a student roster (avatars) across the
 // courses the actor teaches (admins see all).
 export const trainerInsights = async (tenant, actor, branchId = null) => {
-  const courses = await repo.listCourses(tenant, { trainerId: isSuperAdmin(actor) ? undefined : actor?.id });
+  const courses = await repo.listCourses(tenant, { trainerId: isAdmin(actor) ? undefined : actor?.id });
   const programIds = courses.map((c) => c.id);
   const zero = { courses: courses.length, modules: 0, batches: 0, students: 0, active_students: 0 };
   if (!programIds.length) return { totals: zero, students: [] };
@@ -200,14 +221,14 @@ export const completeBatch = async (tenant, actor, programId, batchId) => {
 
 // ---------- Students management (admin + head trainer, course-scoped) ----------
 const actorProgramIds = async (tenant, actor) => {
-  const courses = await repo.listCourses(tenant, { trainerId: isSuperAdmin(actor) ? undefined : actor?.id });
+  const courses = await repo.listCourses(tenant, { trainerId: isAdmin(actor) ? undefined : actor?.id });
   return courses.map((c) => c.id);
 };
 
 // Branches the actor can switch between: admins → all; teaching staff → their
 // primary branch + user_branches memberships.
 export const myBranches = async (tenant, actor) => {
-  if (isSuperAdmin(actor)) return repo.allBranches(tenant);
+  if (isAdmin(actor)) return repo.allBranches(tenant);
   return repo.branchesForUser(tenant, actor?.id);
 };
 
@@ -215,7 +236,7 @@ export const myBranches = async (tenant, actor) => {
 // (returns null = no branch filter). Admins may scope to any branch.
 const resolveBranchScope = async (tenant, actor, branchId) => {
   if (!branchId) return null;
-  if (isSuperAdmin(actor)) return branchId;
+  if (isAdmin(actor)) return branchId;
   const allowed = await repo.branchesForUser(tenant, actor?.id);
   return allowed.some((b) => b.id === branchId) ? branchId : null;
 };
@@ -231,7 +252,7 @@ export const listCourseStudents = async (tenant, actor, branchId = null) => {
 const assertStudentInScope = async (tenant, actor, studentId) => {
   const student = await studentAuthRepo.findById(tenant, studentId);
   if (!student) throw notFound('Student not found');
-  if (isSuperAdmin(actor)) return student;
+  if (isAdmin(actor)) return student;
   const membership = student.program_id ? await repo.isCourseTrainer(tenant, student.program_id, actor?.id) : null;
   if (!membership) throw forbidden('This student is not in one of your courses.');
   return student;

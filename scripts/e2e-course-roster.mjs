@@ -89,6 +89,76 @@ await tenantQuery(t, `DELETE FROM course_trainers WHERE user_id=$1`, [tmp.id]);
 await tenantQuery(t, `DELETE FROM user_managers WHERE user_id=$1 OR manager_id=$1`, [tmp.id]);
 await tenantQuery(t, `DELETE FROM users WHERE id=$1`, [tmp.id]);
 
+console.log('\n4. Branch manager can manage courses without being on the roster');
+const { rows: [bm] } = await tenantQuery(t, `SELECT id, role, name FROM users WHERE role='branch_manager' AND deleted_at IS NULL LIMIT 1`);
+const { rows: [anyProg] } = await tenantQuery(t, `SELECT id, name FROM programs WHERE deleted_at IS NULL LIMIT 1`);
+const { rows: [onRoster] } = await tenantQuery(t,
+  `SELECT 1 AS x FROM course_trainers WHERE program_id=$1 AND user_id=$2 AND deleted_at IS NULL`, [anyProg.id, bm.id]);
+step(6, !onRoster, `the BM is NOT on this course's roster — so this tests org-wide reach`);
+
+const bmList = await api(bm, '/courses');
+step(7, bmList.status === 200 && (bmList.data || []).length > 0,
+  `BM sees every course, not just their own (${bmList.status}, ${(bmList.data || []).length})`);
+
+const { rows: [someTrainer] } = await tenantQuery(t, `SELECT id FROM users WHERE role='trainer' AND deleted_at IS NULL LIMIT 1`);
+const bmAdd = await api(bm, `/courses/${anyProg.id}/trainers`, {
+  method: 'POST', body: JSON.stringify({ user_id: someTrainer.id, role: 'trainer' }),
+});
+step(8, bmAdd.status === 201, `BM can add a trainer (${bmAdd.status}) ${bmAdd.error?.message || ''}`);
+if (bmAdd.status === 201 && bmAdd.data?.id) {
+  await tenantQuery(t, `DELETE FROM course_trainers WHERE id=$1`, [bmAdd.data.id]);
+}
+
+const bmMod = await api(bm, `/courses/${anyProg.id}/modules`, {
+  method: 'POST', body: JSON.stringify({ name: 'zz-bm-module' }),
+});
+step(9, bmMod.status === 201, `BM can create a module (${bmMod.status}) ${bmMod.error?.message || ''}`);
+if (bmMod.status === 201 && bmMod.data?.id) {
+  await tenantQuery(t, `DELETE FROM course_modules WHERE id=$1`, [bmMod.data.id]);
+}
+
+console.log('\n5. The widening stops where it should');
+// A plain trainer on a roster still cannot manage.
+const { rows: [plainTrainer] } = await tenantQuery(t, `
+  SELECT us.id, us.role FROM users us
+    JOIN course_trainers ct ON ct.user_id = us.id AND ct.deleted_at IS NULL AND ct.role = 'trainer'
+   WHERE us.role = 'trainer' AND us.deleted_at IS NULL LIMIT 1`);
+if (plainTrainer) {
+  const { rows: [tp] } = await tenantQuery(t,
+    `SELECT program_id FROM course_trainers WHERE user_id=$1 AND role='trainer' AND deleted_at IS NULL LIMIT 1`, [plainTrainer.id]);
+  const tMod = await api(plainTrainer, `/courses/${tp.program_id}/modules`, {
+    method: 'POST', body: JSON.stringify({ name: 'zz-should-fail' }),
+  });
+  step(10, tMod.status === 403, `a plain trainer still cannot create a module (${tMod.status})`);
+}
+// A head_trainer gets no org-wide reach: a course they are not on stays closed.
+const { rows: [htUser] } = await tenantQuery(t, `SELECT id, role FROM users WHERE role='head_trainer' AND deleted_at IS NULL LIMIT 1`);
+const { rows: [foreign] } = await tenantQuery(t, `
+  SELECT p.id FROM programs p
+   WHERE p.deleted_at IS NULL
+     AND NOT EXISTS (SELECT 1 FROM course_trainers ct
+                      WHERE ct.program_id = p.id AND ct.user_id = $1 AND ct.deleted_at IS NULL)
+   LIMIT 1`, [htUser?.id]);
+if (htUser && foreign) {
+  const hMod = await api(htUser, `/courses/${foreign.id}/modules`, {
+    method: 'POST', body: JSON.stringify({ name: 'zz-should-fail' }),
+  });
+  step(11, hMod.status === 403, `a head trainer cannot manage a course they are NOT on (${hMod.status})`);
+} else {
+  console.log('  SKIP  11. no course exists that this head trainer is off');
+}
+// Appointing a course head stays admin-only.
+if (htUser) {
+  const { rows: [ownProg] } = await tenantQuery(t,
+    `SELECT program_id FROM course_trainers WHERE user_id=$1 AND deleted_at IS NULL LIMIT 1`, [htUser.id]);
+  if (ownProg) {
+    const hHead = await api(htUser, `/courses/${ownProg.program_id}/trainers`, {
+      method: 'POST', body: JSON.stringify({ user_id: someTrainer.id, role: 'head' }),
+    });
+    step(12, hHead.status === 403, `a head trainer still cannot appoint a course head (${hHead.status})`);
+  }
+}
+
 console.log(fail ? `\n${fail} FAILED` : '\nall green');
 await closeAllTenantPools(); await closeSystemPool();
 process.exit(fail ? 1 : 0);
