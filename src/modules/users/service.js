@@ -90,6 +90,30 @@ const forceBranchManagerReporting = async (tenant, role, obj) => {
   return { ...obj, manager_id: adminId, manager_ids: adminId ? [adminId] : [] };
 };
 
+// Keep a teaching user's COURSE ROSTER entries in step with their user role.
+//
+// Authority over a course is read from course_trainers.role ('head'), not from
+// users.role — see courses/service.js assertCanManage. So promoting somebody to
+// head_trainer without touching the roster left them unable to manage the very
+// courses they now lead, while the person demoted under them kept the power.
+// That is exactly what happened when two trainers swapped roles.
+//
+// Only rosters the user is ALREADY on are touched: this syncs authority, it
+// never adds somebody to a course they do not teach.
+const syncCourseRosterRole = async (tenant, userId, role) => {
+  const isTeaching = role === LMS_TENANT_ROLES.HEAD_TRAINER || role === LMS_TENANT_ROLES.TRAINER;
+  if (!isTeaching) return { updated: 0 };
+  const rosterRole = role === LMS_TENANT_ROLES.HEAD_TRAINER ? 'head' : 'trainer';
+  const { rowCount } = await tenantQuery(
+    tenant,
+    `UPDATE course_trainers
+        SET role = $2, updated_at = now()
+      WHERE user_id = $1 AND deleted_at IS NULL AND role <> $2`,
+    [userId, rosterRole],
+  );
+  return { updated: rowCount };
+};
+
 // Validate a branch_id references a live branch in this tenant. Throws if not.
 const assertBranchExists = async (tenant, branch_id) => {
   if (!branch_id) return;
@@ -483,6 +507,12 @@ export const updateUser = async (tenant, id, updates, actor) => {
     await repo.setUserBranches(tenant, id, branchIds);
   }
 
+  // Same rule as switchRole: course authority is read off the roster, so a role
+  // change made from the edit form has to move it too.
+  if (updates.role && updates.role !== existing.role) {
+    await syncCourseRosterRole(tenant, id, effRole);
+  }
+
   // After a successful write, release the old number (if it changed / cleared).
   if (phoneChanging && existing.phone) {
     await phoneDirectory.releasePhone(existing.phone).catch(() => {});
@@ -764,6 +794,11 @@ export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_le
     manager_id: nextManagerIds[0] ?? null,
   });
 
+  // Course authority lives on the roster, not on users.role, so a promotion or
+  // demotion has to move it too — otherwise a new head trainer cannot manage
+  // their own courses.
+  const roster = await syncCourseRosterRole(tenant, id, scope);
+
   // ---- Make it take effect + leave a trail -----------------------------
   await writeAuditLog(tenant, {
     userId: actor?.id ?? null,
@@ -779,6 +814,8 @@ export const switchRole = async (tenant, id, { role_id, manager_ids, reassign_le
       manager_id: nextManagerIds[0] ?? null,
       reassigned_lead_count: movedLeadIds.length,
       reassigned_leads_to: movedLeadIds.length ? reassign_leads_to : null,
+      // Recorded so a later "why can this person manage a course?" is answerable.
+      course_roster_rows_updated: roster.updated,
     },
   });
 

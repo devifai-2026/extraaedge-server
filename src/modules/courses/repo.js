@@ -129,11 +129,21 @@ export const listTrainers = async (tenant, programId) => {
   return rows;
 };
 
+// Idempotent. Adding somebody who is already on the roster used to violate
+// course_trainers_user_role_module_uq and surface as a raw 500; re-adding
+// somebody previously removed hit the same index against the soft-deleted row
+// and could never succeed. Both now resolve to the same live binding.
+//
+// The conflict target must match that index exactly, COALESCE included.
 export const addTrainer = async (tenant, programId, { user_id, role = 'trainer', module_id = null }, actorId) => {
   const { rows } = await tenantQuery(
     tenant,
     `INSERT INTO course_trainers (program_id, user_id, role, module_id, created_by)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (program_id, user_id, role, (COALESCE(module_id, '00000000-0000-0000-0000-000000000000'::uuid)))
+       WHERE deleted_at IS NULL
+       DO UPDATE SET deleted_at = NULL, updated_at = now()
+     RETURNING *`,
     [programId, user_id, role, module_id, actorId ?? null],
   );
   return rows[0];
