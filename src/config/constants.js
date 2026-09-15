@@ -296,6 +296,13 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // flagged, what moved to whom, and what was held because nobody else in the
   // same role class was free. Admin + manager tiers.
   'stale_handovers',
+  // Missed Leads — every lead whose follow-up was promised and not kept.
+  // Leads carrying a follow-up are exempt from the stale-lead rotation
+  // (including missed ones: a broken promise means the OWNER needs chasing,
+  // not that the lead should be taken off them), so this tab is the
+  // counterweight that keeps them visible. Front line AND manager tiers: the
+  // route scopes a lead owner to their own rows and a manager to their team's.
+  'missed_leads',
   // Unmatched call recordings uploaded from the mobile app whose number
   // matched no lead — counsellors review their own, managers see scope, and
   // can create a lead from the number.
