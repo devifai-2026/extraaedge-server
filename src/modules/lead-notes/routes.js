@@ -78,6 +78,15 @@ router.put(
         `UPDATE lead_notes SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
         params,
       );
+      // Editing a comment is a person working the lead, so it has to keep the
+      // lead out of the 6-day stale rotation. Unlike note CREATE this writes no
+      // lead_activities row, so the trigger that normally maintains this column
+      // never fires — bump it directly.
+      await tenantQuery(
+        req.tenant,
+        `UPDATE leads SET last_activity_at = now() WHERE id = $1`,
+        [rows[0].lead_id],
+      );
       res.json({ data: rows[0], meta: { requestId: req.id } });
     } catch (err) { next(err); }
   },

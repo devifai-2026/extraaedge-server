@@ -51,10 +51,14 @@ const handoverQuery = z.object({
   date_to: z.string().optional(),
   from_user_id: z.string().uuid().optional(),
   to_user_id: z.string().uuid().optional(),
-  outcome: z.enum(['pending', 'moved', 'held', 'resolved']).optional(),
+  outcome: z.enum(['pending', 'moved', 'held', 'resolved', 'saved']).optional(),
+  // Find one lead in a list thousands of rows long: matches lead name or
+  // phone. Trimmed so a stray space from the search box doesn't kill every
+  // match, and capped to keep the ILIKE bounded.
+  search: z.string().trim().max(100).optional(),
   // 'history' (default) = what already happened. 'upcoming' = the pipeline:
   // open leads still inside the window, ordered by how soon they go stale.
-  view: z.enum(['history', 'upcoming']).optional().default('history'),
+  view: z.enum(['history', 'upcoming', 'criteria']).optional().default('history'),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(500).default(100),
 });
@@ -65,11 +69,157 @@ const handoverQuery = z.object({
 router.get('/handovers', requireRole(...MANAGER_TIER_ROLES, ...LEAD_OWNER_ROLES), validate({ query: handoverQuery }), async (req, res, next) => {
   try {
     const q = req.query;
-    // A lead owner may only ever see their own handovers; ignore any
-    // from_user_id they send rather than trusting the client.
+    // A lead owner sees only their OWN rows, and cannot widen that by sending
+    // a from_user_id — the client is never trusted here.
+    //
+    // "Their own" deliberately means BOTH directions: a lead taken away from
+    // them (they were the owner when it was flagged) AND a lead handed to them
+    // (they are the current owner, or received it in the handover). A
+    // counsellor who only saw what they lost would have no way to see the
+    // leads that landed on their desk from someone else's inactivity.
     const selfOnly = LEAD_OWNER_ROLES.includes(req.user.role)
       && !MANAGER_TIER_ROLES.includes(req.user.role);
-    if (selfOnly) q.from_user_id = req.user.id;
+    if (selfOnly) delete q.from_user_id;
+
+    // ---- Criteria: the rule itself, with live counts -------------------
+    // Every gate below is copied from the scanner's own stale-lead SELECT
+    // (workers/sla-scanner.js) and the seeded policy's condition_json, and each
+    // one is COUNTED against live data rather than described in prose. Prose
+    // drifts from behaviour; a count cannot. This is the tab that answers
+    // "which leads will move, and why is this one not in the list?".
+    if (q.view === 'criteria') {
+      const { rows: [policy] } = await tenantQuery(
+        req.tenant,
+        `SELECT id, name, no_activity_hours, escalate_after_hours, created_at, condition_json
+           FROM sla_policies
+          WHERE is_active AND deleted_at IS NULL
+          ORDER BY created_at
+          LIMIT 1`,
+      );
+      if (!policy) {
+        return res.json({
+          data: [],
+          meta: { requestId: req.id, view: 'criteria', policy: null, active: false },
+        });
+      }
+
+      // One pass over leads, counting how many are EXCLUDED by each gate.
+      // Deliberately independent of each other (not cumulative) so a row reads
+      // as "N leads are out because of this rule".
+      const { rows: [c] } = await tenantQuery(
+        req.tenant,
+        `SELECT
+           count(*)::int AS total,
+           count(*) FILTER (WHERE assigned_to IS NULL)::int AS unassigned,
+           count(*) FILTER (WHERE converted_at IS NOT NULL)::int AS converted,
+           count(*) FILTER (WHERE is_cold)::int AS cold,
+           count(*) FILTER (WHERE last_activity_at < $2)::int AS before_policy,
+           count(*) FILTER (WHERE EXISTS (SELECT 1 FROM lead_followups f WHERE f.lead_id = leads.id AND f.deleted_at IS NULL))::int AS has_followup,
+           count(*) FILTER (
+             WHERE assigned_to IS NOT NULL AND converted_at IS NULL AND NOT is_cold
+               AND last_activity_at >= $2
+               AND last_activity_at < now() - ($1 * interval '1 hour')
+               AND NOT EXISTS (SELECT 1 FROM lead_followups f WHERE f.lead_id = leads.id AND f.deleted_at IS NULL)
+           )::int AS due_now,
+           count(*) FILTER (
+             WHERE assigned_to IS NOT NULL AND converted_at IS NULL AND NOT is_cold
+               AND last_activity_at >= $2
+               AND last_activity_at >= now() - ($1 * interval '1 hour')
+               AND NOT EXISTS (SELECT 1 FROM lead_followups f WHERE f.lead_id = leads.id AND f.deleted_at IS NULL)
+           )::int AS in_window
+          FROM leads
+         WHERE deleted_at IS NULL${selfOnly ? ' AND assigned_to = $3::uuid' : ''}`,
+        selfOnly
+          ? [policy.no_activity_hours, policy.created_at, req.user.id]
+          : [policy.no_activity_hours, policy.created_at],
+      );
+
+      const days = Math.round(policy.no_activity_hours / 24);
+      const moveDays = Math.round((policy.no_activity_hours + (policy.escalate_after_hours ?? 0)) / 24);
+
+      // include=true  -> this is a condition a lead must MEET to be eligible.
+      // include=false -> this is an exemption that keeps a lead OUT.
+      const data = [
+        {
+          key: 'no_activity',
+          include: true,
+          rule: `No activity for ${days} days`,
+          detail: `Counted from the lead's last human touch. Completing or rescheduling a follow-up, adding a comment, logging a call or changing the stage all reset this clock. Automatic events (missed follow-up, overdue reminder, the handover itself) do NOT — they are the system noticing, not a person working the lead.`,
+          count: c.due_now,
+          count_label: 'past the window right now',
+        },
+        {
+          key: 'assigned',
+          include: true,
+          rule: 'Has an owner',
+          detail: 'An unassigned lead has nobody to take it from, so it is never in the rotation.',
+          count: c.unassigned,
+          count_label: 'excluded — unassigned',
+        },
+        {
+          key: 'open',
+          include: false,
+          rule: 'Not already converted',
+          detail: 'A converted lead is finished and is left alone.',
+          count: c.converted,
+          count_label: 'excluded — converted',
+        },
+        {
+          key: 'not_cold',
+          include: false,
+          rule: 'Not parked as cold',
+          detail: 'Leads explicitly marked cold are deliberately out of the rotation.',
+          count: c.cold,
+          count_label: 'excluded — cold',
+        },
+        {
+          key: 'has_followup',
+          include: false,
+          rule: 'No follow-up on the lead',
+          detail: 'A lead with a follow-up of any kind — booked, missed, completed or cancelled — is never auto-reassigned. Someone has engaged with it and owns the next step. A MISSED follow-up means the owner needs chasing, not that the lead should be taken away: those appear under Sales → Missed Leads.',
+          count: c.has_followup,
+          count_label: 'excluded — have a follow-up',
+        },
+        {
+          key: 'backlog_guard',
+          include: false,
+          rule: 'Last touched after the rule was switched on',
+          detail: `A lead whose last activity predates the policy (${new Date(policy.created_at).toLocaleDateString()}) is never swept up by it, so turning the rule on cannot redistribute the whole historical database at once. Touch such a lead once and it joins the rotation normally.`,
+          count: c.before_policy,
+          count_label: 'excluded — pre-date the rule',
+        },
+        {
+          key: 'one_alert',
+          include: false,
+          rule: 'Not already flagged',
+          detail: 'A lead with an open alert is not flagged again; it is waiting on day 7 or on its owner.',
+          count: null,
+          count_label: null,
+        },
+      ];
+
+      return res.json({
+        data,
+        meta: {
+          requestId: req.id,
+          view: 'criteria',
+          active: true,
+          policy: {
+            name: policy.name,
+            no_activity_hours: policy.no_activity_hours,
+            escalate_after_hours: policy.escalate_after_hours,
+            created_at: policy.created_at,
+            flag_days: days,
+            move_days: moveDays,
+          },
+          totals: {
+            total: c.total,
+            due_now: c.due_now,
+            in_window: c.in_window,
+          },
+        },
+      });
+    }
 
     // ---- Upcoming: leads heading TOWARD a move -------------------------
     // Same predicate the scanner flags on (workers/sla-scanner.js), just
@@ -112,10 +262,31 @@ router.get('/handovers', requireRole(...MANAGER_TIER_ROLES, ...LEAD_OWNER_ROLES)
         'l.last_activity_at >= $2',                                 // backlog guard
         "l.last_activity_at >= now() - ($1 * interval '1 hour')",   // not yet due
         'NOT EXISTS (SELECT 1 FROM sla_alerts a WHERE a.lead_id = l.id AND a.policy_id = $3 AND a.resolved_at IS NULL)',
+        // Mirrors the scanner: any follow-up at all (planned, missed, done,
+        // cancelled) takes the lead out of the rotation.
+        'NOT EXISTS (SELECT 1 FROM lead_followups f WHERE f.lead_id = l.id AND f.deleted_at IS NULL)',
       ];
-      if (q.from_user_id) {
+      if (selfOnly) {
+        // "Coming up" is about leads that could move AWAY from you, so it is
+        // by definition the ones you currently hold.
+        uParams.push(req.user.id);
+        uConds.push(`l.assigned_to = $${uParams.length}::uuid`);
+      } else if (q.from_user_id) {
         uParams.push(q.from_user_id);
         uConds.push(`l.assigned_to = $${uParams.length}::uuid`);
+      }
+      // Same name-or-phone search as the history view, so the box behaves
+      // identically on both tabs.
+      if (q.search) {
+        const digits = q.search.replace(/\D/g, '');
+        uParams.push(`%${q.search.replace(/([%_\\])/g, '\\$1')}%`);
+        const nameP = `$${uParams.length}`;
+        if (digits.length >= 3) {
+          uParams.push(`%${digits}%`);
+          uConds.push(`(l.name ILIKE ${nameP} ESCAPE '\\' OR regexp_replace(coalesce(l.phone,''), '\\D', '', 'g') LIKE $${uParams.length})`);
+        } else {
+          uConds.push(`(l.name ILIKE ${nameP} ESCAPE '\\')`);
+        }
       }
       const uWhere = uConds.join(' AND ');
 
@@ -185,11 +356,41 @@ router.get('/handovers', requireRole(...MANAGER_TIER_ROLES, ...LEAD_OWNER_ROLES)
     if (q.date_to) {
       add('a.flagged_at <= $$::timestamptz', /^\d{4}-\d{2}-\d{2}$/.test(q.date_to) ? `${q.date_to}T23:59:59.999` : q.date_to);
     }
-    if (q.from_user_id) add('a.assigned_to = $$::uuid', q.from_user_id);
+    if (selfOnly) {
+      // Flagged on them, currently theirs, or handed to them.
+      params.push(req.user.id);
+      conds.push(`(a.assigned_to = $${params.length}::uuid OR l.assigned_to = $${params.length}::uuid OR mv.assigned_to = $${params.length}::uuid)`);
+    } else if (q.from_user_id) {
+      add('a.assigned_to = $$::uuid', q.from_user_id);
+    }
+    // Name OR phone in one box. Phone is matched on digits only so a search
+    // for "9545747384" still finds a lead stored as "+91 95457 47384", and
+    // name uses a plain contains match. ESCAPE guards a literal % or _ typed
+    // by the user from turning into a wildcard.
+    if (q.search) {
+      const digits = q.search.replace(/\D/g, '');
+      const like = `%${q.search.replace(/([%_\\])/g, '\\$1')}%`;
+      params.push(like);
+      const nameP = `$${params.length}`;
+      if (digits.length >= 3) {
+        params.push(`%${digits}%`);
+        conds.push(`(l.name ILIKE ${nameP} ESCAPE '\\' OR regexp_replace(coalesce(l.phone,''), '\\D', '', 'g') LIKE $${params.length})`);
+      } else {
+        conds.push(`(l.name ILIKE ${nameP} ESCAPE '\\')`);
+      }
+    }
 
     // Outcome maps onto the alert's own lifecycle columns.
     if (q.outcome === 'pending') conds.push('a.escalated_at IS NULL AND a.resolved_at IS NULL');
-    else if (q.outcome === 'resolved') conds.push('a.resolved_at IS NOT NULL AND a.escalated_at IS NULL');
+    // 'saved' = flagged on day 6, then the owner touched the lead (completed or
+    // rescheduled a follow-up, added a comment, logged a call) before day 7, so
+    // the handover never happened. The scanner stamps exactly this case as
+    // resolution_reason='activity_logged'. Split out from 'resolved' because
+    // "the owner rescued it" and "a manager closed the alert by hand" are
+    // different stories, and this is the one that answers "which leads were
+    // ABOUT to move but didn't?".
+    else if (q.outcome === 'saved') conds.push("a.resolved_at IS NOT NULL AND a.escalated_at IS NULL AND a.resolution_reason = 'activity_logged'");
+    else if (q.outcome === 'resolved') conds.push("a.resolved_at IS NOT NULL AND a.escalated_at IS NULL AND a.resolution_reason IS DISTINCT FROM 'activity_logged'");
     else if (q.outcome === 'moved') conds.push('a.escalated_at IS NOT NULL AND mv.id IS NOT NULL');
     else if (q.outcome === 'held') conds.push('a.escalated_at IS NOT NULL AND mv.id IS NULL');
 
@@ -226,9 +427,21 @@ router.get('/handovers', requireRole(...MANAGER_TIER_ROLES, ...LEAD_OWNER_ROLES)
               CASE
                 WHEN a.escalated_at IS NOT NULL AND mv.id IS NOT NULL THEN 'moved'
                 WHEN a.escalated_at IS NOT NULL                        THEN 'held'
+                WHEN a.resolved_at IS NOT NULL
+                 AND a.resolution_reason = 'activity_logged'           THEN 'saved'
                 WHEN a.resolved_at  IS NOT NULL                        THEN 'resolved'
                 ELSE 'pending'
-              END                   AS outcome
+              END                   AS outcome,
+              -- For a 'saved' row: WHICH human action rescued it. The first
+              -- activity by a real person between the flag and the resolve is
+              -- the one that moved last_activity_at past flagged_at and so
+              -- stopped the handover. user_id IS NOT NULL keeps out the
+              -- system's own rows ('follow_up_missed', 'followup_overdue'),
+              -- which are never a rescue.
+              sv.type               AS saved_by_type,
+              sv.summary            AS saved_by_summary,
+              sv.created_at         AS saved_at,
+              sv.actor_name         AS saved_by_name
          FROM sla_alerts a
          JOIN leads l  ON l.id = a.lead_id
          LEFT JOIN users f ON f.id = a.assigned_to
@@ -248,28 +461,49 @@ router.get('/handovers', requireRole(...MANAGER_TIER_ROLES, ...LEAD_OWNER_ROLES)
             LIMIT 1
          ) mv ON true
          LEFT JOIN users t ON t.id = mv.assigned_to
+         LEFT JOIN LATERAL (
+           SELECT act.type, act.summary, act.created_at, au.name AS actor_name
+             FROM lead_activities act
+             LEFT JOIN users au ON au.id = act.user_id
+            WHERE act.lead_id = a.lead_id
+              AND act.user_id IS NOT NULL
+              AND act.created_at >= a.flagged_at
+              AND (a.resolved_at IS NULL OR act.created_at <= a.resolved_at)
+            ORDER BY act.created_at
+            LIMIT 1
+         ) sv ON a.resolved_at IS NOT NULL AND a.resolution_reason = 'activity_logged'
         WHERE ${conds.join(' AND ')}
         ORDER BY COALESCE(mv.created_at, a.escalated_at, a.flagged_at) DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
 
-    // Headline counts for the whole tenant (unfiltered) so the tab can show
-    // "N moved / N held / N pending" without a second round trip.
+    // Headline counts so the tab can show "N moved / N held / N pending"
+    // without a second round trip. Tenant-wide for managers, but a lead owner
+    // must only ever be counted on their OWN rows — otherwise the tiles would
+    // leak the tenant's totals to someone whose table shows six leads.
+    const totWhere = selfOnly
+      ? `WHERE l.deleted_at IS NULL AND (a.assigned_to = $1::uuid OR l.assigned_to = $1::uuid OR mv.assigned_to = $1::uuid)`
+      : `WHERE l.deleted_at IS NULL`;
     const { rows: [tot] } = await tenantQuery(
       req.tenant,
       `SELECT count(*) FILTER (WHERE a.escalated_at IS NULL AND a.resolved_at IS NULL)::int AS pending,
               count(*) FILTER (WHERE a.escalated_at IS NOT NULL AND mv.id IS NOT NULL)::int AS moved,
-              count(*) FILTER (WHERE a.escalated_at IS NOT NULL AND mv.id IS NULL)::int     AS held
+              count(*) FILTER (WHERE a.escalated_at IS NOT NULL AND mv.id IS NULL)::int     AS held,
+              -- Flagged, then rescued by a human touch before the handover.
+              count(*) FILTER (WHERE a.escalated_at IS NULL AND a.resolved_at IS NOT NULL
+                                 AND a.resolution_reason = 'activity_logged')::int          AS saved
          FROM sla_alerts a
-         JOIN leads l ON l.id = a.lead_id AND l.deleted_at IS NULL
+         JOIN leads l ON l.id = a.lead_id
          LEFT JOIN LATERAL (
-           SELECT la.id FROM lead_assignments la
+           SELECT la.id, la.assigned_to FROM lead_assignments la
             WHERE la.lead_id = a.lead_id AND la.from_user_id = a.assigned_to
               AND la.reason ILIKE 'SLA:%' AND a.escalated_at IS NOT NULL
               AND la.created_at >= a.escalated_at - interval '1 minute'
             LIMIT 1
-         ) mv ON true`,
+         ) mv ON true
+        ${totWhere}`,
+      selfOnly ? [req.user.id] : [],
     );
 
     return res.json({

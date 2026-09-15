@@ -257,6 +257,109 @@ router.get('/overdue', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ---- Missed Leads ------------------------------------------------------
+// Every lead whose follow-up was promised and not kept, scoped to who is
+// asking: a counsellor / telecaller sees their own, a sales manager /
+// telecaller lead / branch manager sees their whole team's, a super admin sees
+// the tenant's.
+//
+// Why this exists: leads with a follow-up are deliberately exempt from the
+// 6-day auto-rotation (see workers/sla-scanner.js), INCLUDING missed ones — a
+// broken promise means the OWNER needs chasing, not that the lead should be
+// taken off them. That exemption would be a place for leads to go quiet, so
+// this tab is the counterweight: it makes every broken commitment visible to
+// the owner and to everyone above them.
+//
+// Grouped by lead rather than by follow-up row: one lead with four missed
+// follow-ups is one problem to solve, not four. missed_count carries the
+// repetition, which is the signal worth acting on.
+const missedQuery = z.object({
+  user_id: z.string().uuid().optional(),   // filter to one owner (managers only)
+  q: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+router.get('/missed', validate({ query: missedQuery }), async (req, res, next) => {
+  try {
+    const conds = [
+      'f.deleted_at IS NULL',
+      "f.status = 'missed'",
+      'l.deleted_at IS NULL',
+      'l.converted_at IS NULL',
+    ];
+    const params = [];
+
+    // Same role scoping as the main list, so nobody sees beyond their remit.
+    if (LEAD_OWNER_ROLES.includes(req.user.role)) {
+      params.push(req.user.id);
+      conds.push(`l.assigned_to = $${params.length}`);
+    } else if (TEAM_SCOPED_MANAGER_ROLES.includes(req.user.role)) {
+      const team = await teamHierarchyMulti(req.tenant, req.user.id);
+      params.push(team);
+      conds.push(`l.assigned_to = ANY($${params.length}::uuid[])`);
+    }
+    // A manager narrowing to one of their people. Ignored for lead owners,
+    // whose scope is already themselves.
+    if (req.query.user_id && !LEAD_OWNER_ROLES.includes(req.user.role)) {
+      params.push(req.query.user_id);
+      conds.push(`l.assigned_to = $${params.length}`);
+    }
+    if (req.query.q) {
+      const digits = req.query.q.replace(/\D/g, '');
+      params.push(`%${req.query.q.replace(/([%_\\])/g, '\\$1')}%`);
+      const nameP = `$${params.length}`;
+      if (digits.length >= 3) {
+        params.push(`%${digits}%`);
+        conds.push(`(l.name ILIKE ${nameP} ESCAPE '\\' OR regexp_replace(coalesce(l.phone,''), '\\D', '', 'g') LIKE $${params.length})`);
+      } else {
+        conds.push(`(l.name ILIKE ${nameP} ESCAPE '\\')`);
+      }
+    }
+
+    params.push(req.query.limit, (req.query.page - 1) * req.query.limit);
+    const { rows } = await tenantQuery(
+      req.tenant,
+      `SELECT l.id                      AS lead_id,
+              l.name                    AS lead_name,
+              l.phone                   AS lead_phone,
+              l.assigned_to             AS owner_id,
+              u.name                    AS owner_name,
+              u.role                    AS owner_role,
+              count(f.id)::int          AS missed_count,
+              max(f.next_action_datetime) AS last_missed_at,
+              min(f.next_action_datetime) AS first_missed_at,
+              l.last_activity_at,
+              -- The most recent missed follow-up's own note, so the row says
+              -- what was promised without opening the lead.
+              (ARRAY_AGG(f.comment ORDER BY f.next_action_datetime DESC)
+                 FILTER (WHERE f.comment IS NOT NULL))[1] AS last_comment
+         FROM lead_followups f
+         JOIN leads l ON l.id = f.lead_id
+         LEFT JOIN users u ON u.id = l.assigned_to
+        WHERE ${conds.join(' AND ')}
+        GROUP BY l.id, l.name, l.phone, l.assigned_to, u.name, u.role, l.last_activity_at
+        ORDER BY max(f.next_action_datetime) DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+
+    // Totals for the tab header, over the same scope but unpaginated.
+    const totalParams = params.slice(0, params.length - 2);
+    const { rows: [tot] } = await tenantQuery(
+      req.tenant,
+      `SELECT count(DISTINCT l.id)::int AS leads,
+              count(f.id)::int          AS missed_followups
+         FROM lead_followups f
+         JOIN leads l ON l.id = f.lead_id
+        WHERE ${conds.join(' AND ')}`,
+      totalParams,
+    );
+
+    res.json({ data: rows, meta: { requestId: req.id, totals: tot, page: req.query.page, limit: req.query.limit } });
+  } catch (err) { next(err); }
+});
+
 router.post('/', validate({ body: createSchema }), async (req, res, next) => {
   try {
     if (req.body.recurrence_rule && !isValidRRule(req.body.recurrence_rule)) {
@@ -413,6 +516,14 @@ router.put(
       }
       params.push(req.params.id);
       const { rows } = await tenantQuery(req.tenant, `UPDATE lead_followups SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`, params);
+      // Editing a follow-up (its notes, due date, outcome) is real work on the
+      // lead and must keep it out of the 6-day stale rotation. This route writes
+      // no lead_activities row, so the trigger never fires here — bump directly.
+      await tenantQuery(
+        req.tenant,
+        `UPDATE leads SET last_activity_at = now() WHERE id = $1`,
+        [rows[0].lead_id],
+      );
       res.json({ data: rows[0], meta: { requestId: req.id } });
     } catch (err) { next(err); }
   },

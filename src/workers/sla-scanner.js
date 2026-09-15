@@ -169,6 +169,22 @@ const tick = async () => {
               AND converted_at IS NULL
               AND last_activity_at < now() - ($1 * interval '1 hour')
               AND last_activity_at >= $3
+              -- A lead that has a follow-up on it is NOT abandoned, whatever
+              -- the follow-up's state. Booked (planned), broken (missed),
+              -- already worked (done) or called off (cancelled) — in every case
+              -- a person has engaged with this lead and owns the next step.
+              --
+              -- This closes a real backwards case: scheduling a follow-up 10
+              -- days out set last_activity_at at the moment of BOOKING, so the
+              -- 6-day clock could expire before the follow-up's own due date
+              -- and reassign a lead the counsellor had actively committed to.
+              -- 'missed' is deliberately included: a missed follow-up means the
+              -- OWNER needs chasing, not that the lead should be taken from
+              -- them — that is what the Missed Leads tab is for.
+              AND NOT EXISTS (
+                SELECT 1 FROM lead_followups f
+                 WHERE f.lead_id = leads.id AND f.deleted_at IS NULL
+              )
               AND NOT EXISTS (SELECT 1 FROM sla_alerts a WHERE a.lead_id = leads.id AND a.policy_id = $2 AND a.resolved_at IS NULL)
             ORDER BY last_activity_at
             LIMIT 500`,
