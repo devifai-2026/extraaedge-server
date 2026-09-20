@@ -388,6 +388,14 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'hr.dashboard',
   'hr.interviews',
   'hr.certificates',
+  // Speedup Hiring — internal staff recruitment. hr_recruiter + hr_team_lead
+  // only: candidate rows carry salary expectations and personal contact
+  // details for people who do not work here.
+  'hiring.dashboard',
+  'hiring.positions',
+  'hiring.candidates',
+  'hiring.interviews',
+  'hiring.statuses',
   // Placement department (companies, job openings, applications).
   'placement.dashboard',
   'placement.companies',
@@ -551,14 +559,22 @@ export const QA_TAB_KEYS = Object.freeze(['qa.reviews', 'qa.feedback']);
 // HR Team Lead owns HR *and* placement per the MoM ("full access to HR
 // recruiters + placement officers"), so its bundle is the union plus the LMS
 // analytics it needs for student/drop reports.
+// Speedup Hiring surfaces. Declared before the role bundles that spread it —
+// a const used above its declaration throws on module load (temporal dead
+// zone), which takes the whole server down rather than failing gracefully.
+export const HIRING_TAB_KEYS = Object.freeze([
+  'hiring.dashboard', 'hiring.positions', 'hiring.candidates',
+  'hiring.interviews', 'hiring.statuses',
+]);
 export const HR_TEAM_LEAD_TAB_KEYS = Object.freeze([
-  ...HR_TAB_KEYS, ...PLACEMENT_TAB_KEYS, 'lms.analytics',
+  ...HR_TAB_KEYS, ...PLACEMENT_TAB_KEYS, ...HIRING_TAB_KEYS, 'lms.analytics',
 ]);
 // Recruiter owns recruitment AND staffing: hiring pipeline, onboarding the
 // people they hire, then the leave and payroll admin for that workforce.
 // No placement (that is the placement officer's) and no LMS analytics.
 export const HR_RECRUITER_TAB_KEYS = Object.freeze([
   ...HR_TAB_KEYS,
+  ...HIRING_TAB_KEYS,
   // Leave administration — approve/decline requests plus quotas and holidays.
   'hr.leave_approvals', 'hr.leave_admin',
   // Payroll administration. NOTE this exposes every employee's salary; it is
