@@ -520,13 +520,6 @@ export const BRANCH_MANAGER_TAB_KEYS = Object.freeze([
   'placement.companies',
   'placement.openings',
   'placement.applications',
-  // Post-conversion pipeline: who is pending approval, attending, on break,
-  // completed. Status counts and student names — no rupee figure anywhere on
-  // the page, and the endpoint behind it (lead-status-snapshot) strips the
-  // per-row total_fees for this role. It was withheld in an earlier pass for
-  // sitting under an "admissions" key; that was wrong. Tracking where their
-  // branch's converted leads are sitting is core branch oversight.
-  'admissions.pipeline',
   // The admission approvals queue, and with it the admission DETAIL page
   // (/accounts/admission/:id) which is the only place a registration receipt
   // can be viewed, downloaded or share-linked. Withholding this left the role
@@ -536,7 +529,9 @@ export const BRANCH_MANAGER_TAB_KEYS = Object.freeze([
   // already withheld per-field (stripAdmissionMoney + the showFees gate), so
   // granting the route exposes no course money.
   'accounts.approvals',
-  // DELIBERATELY ABSENT — the remaining accounts.* keys, 'payments',
+  // DELIBERATELY ABSENT — 'admissions.pipeline' (the branch manager has no
+  // use for a post-conversion pipeline; that is the accounts team's surface),
+  // the remaining accounts.* keys, 'payments',
   // and the whole payroll group ('payroll.runs',
   // 'payroll.structures', 'payroll.my_payslips'). These are the money
   // surfaces. Registration-amount approval happens on the discount/fee-offer
