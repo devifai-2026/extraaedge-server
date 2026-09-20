@@ -15,24 +15,29 @@ const router = express.Router();
 router.use(authRequired, tenantRequired);
 
 // Accounts-owned actions (approve/reject/drop/dashboard/reports/receipts/…):
-// account_manager + super_admin, plus branch_manager (scoped to their branch)
-// and sales_manager (scoped to their team subtree) — full workflow parity,
-// enforced server-side via admissions/service.assertAdmissionInScope +
-// resolveAdmissionScope so neither can act on/see admissions outside their
-// own branch/team.
+// account_manager + super_admin, plus sales_manager (scoped to their team
+// subtree) — enforced server-side via admissions/service.assertAdmissionInScope
+// + resolveAdmissionScope so they cannot act on/see admissions outside their
+// own team.
+//
+// branch_manager was REMOVED from this gate. Every route behind it exposes
+// real money — collection totals, per-student installment amounts, the pay
+// schedule, receipts. The rule is that a branch manager approves registration
+// amounts and nothing beyond that; real money belongs to super_admin and the
+// accounts team. Withdrawing the tab alone would not have been enough, because
+// the endpoints answer regardless of what the sidebar renders.
 const acctRole = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
-  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
 // Read-only dashboard/analytics — same audience as acctRole. Kept as a
 // separate gate (identical today) so a future narrowing of one doesn't
-// silently narrow the other.
+// silently narrow the other. branch_manager excluded for the same reason:
+// the accounts dashboard is almost entirely rupee figures.
 const acctOrBranch = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
-  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
 // Counsellor-facing subset (their own converted students): counsellors may
@@ -54,7 +59,6 @@ const acctOrCounsellorOrBranch = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.COUNSELLOR,
-  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
 // NOTE: gating is now PER-ROUTE (no blanket router.use) so counsellors can

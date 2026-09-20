@@ -8,14 +8,22 @@
 // Segregation of duties: HR computes and approves a run, but only super_admin
 // can mark money as paid.
 import { conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES, ADMIN_TIER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 import { tenantQuery } from '../../db/tenant.js';
 import * as repo from './repo.js';
 import { computePayslip } from './calc.js';
 import { unitsFor, workingDays } from './units.js';
 
 // Who may compute payroll and see everybody's numbers.
-export const PAYROLL_ADMIN_ROLES = [...ADMIN_TIER_ROLES, LMS_TENANT_ROLES.HR_TEAM_LEAD];
+//
+// NOT ADMIN_TIER_ROLES: that set includes branch_manager, and salary is money.
+// A branch manager approves registration amounts and nothing else — they keep
+// their own payslip (handled by the self-service path below), but the whole
+// org's salaries are for super_admin and the HR lead.
+export const PAYROLL_ADMIN_ROLES = [
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  LMS_TENANT_ROLES.HR_TEAM_LEAD,
+];
 // Who may release money. Narrower on purpose — the person who computes a run
 // must not also be the person who pays it.
 export const DISBURSE_ROLES = [SYSTEM_TENANT_ROLES.SUPER_ADMIN];

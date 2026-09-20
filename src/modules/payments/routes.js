@@ -121,7 +121,15 @@ router.get('/links', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/', async (req, res, next) => {
+// The payments ledger is raw money. Gated to super_admin + the accounts team;
+// branch_manager and the manager tiers are deliberately excluded — a branch
+// manager approves registration amounts and sees no other figures.
+const moneyReadRole = requireRole(
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
+);
+
+router.get('/', moneyReadRole, async (req, res, next) => {
   try {
     const conds = [];
     const params = [];

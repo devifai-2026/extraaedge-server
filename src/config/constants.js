@@ -459,6 +459,79 @@ export const PLACEMENT_TAB_KEYS = Object.freeze([
 ]);
 // QA: the review queue is the reviewer's working surface; the feedback report
 // is the manager read-back, so the two are granted separately.
+// Branch manager tabs — EXPLICIT, deliberately NOT the '*' wildcard.
+//
+// The wildcard used to be handed out here "so the sidebar isn't starved", and
+// it silently granted every money surface in the product: the Accounts module
+// (collection totals, overdue installments with per-student rupee amounts, the
+// pay schedule, the receipt-wise collection report, the payment-details
+// ledger), the standalone Payments Ledger, payroll runs and salary structures,
+// and the revenue tiles/charts on the analytics dashboard.
+//
+// The rule from the business is narrow: a branch manager approves registration
+// amounts and nothing more. Real money belongs to super_admin and the accounts
+// team. So the role gets an explicit list, and anything new added to
+// DEFAULT_TAB_KEYS later is withheld until someone decides it belongs here —
+// the opposite of the wildcard's fail-open behaviour, and the whole point of
+// listing it out.
+//
+// Their remaining lead/CRM oversight is unchanged; only money is withdrawn.
+export const BRANCH_MANAGER_TAB_KEYS = Object.freeze([
+  // Lead + CRM oversight (their actual job).
+  'dashboard',
+  'leads',
+  'lead_pool',
+  'raw_data',
+  'failed_leads',
+  'bulk_upload',
+  'followups',
+  'whatsapp',
+  'bulk_marketing',
+  'drip_marketing',
+  'remarketing',
+  'automation',
+  'connected_accounts',
+  'third_party_integration',
+  'settings.email_templates',
+  'settings.sms_templates',
+  'settings.whatsapp_templates',
+  'settings.lead_score',
+  'settings.assignment_rules',
+  'advanced.dropdowns',
+  'advanced.users_roles',
+  'advanced.communications',
+  // Reporting on people and leads — no rupee figures on these surfaces.
+  'reports',
+  'analytics',
+  'lead_transfer_report',
+  'stale_handovers',
+  'missed_leads',
+  'unmatched_recordings',
+  'qa.feedback',
+  'lms.analytics',
+  // HR/placement oversight. Deliberately excludes payroll.* — salary is money.
+  'hr.dashboard',
+  'hr.interviews',
+  'hr.certificates',
+  'hr.my_leave',
+  'hr.leave_calendar',
+  'hr.leave_approvals',
+  'placement.dashboard',
+  'placement.companies',
+  'placement.openings',
+  'placement.applications',
+  // DELIBERATELY ABSENT — every accounts.* key, 'payments',
+  // 'admissions.pipeline', and the whole payroll group ('payroll.runs',
+  // 'payroll.structures', 'payroll.my_payslips'). These are the money
+  // surfaces. Registration-amount approval happens on the discount/fee-offer
+  // approval flow, not from the Accounts module.
+  //
+  // payroll.my_payslips is only the role's OWN salary, which most staff roles
+  // do get — it is withheld here because the ask was to take payroll off a
+  // branch manager's sidebar entirely. Their payslip reaches them by whatever
+  // route HR already uses off-platform.
+]);
+
 export const QA_TAB_KEYS = Object.freeze(['qa.reviews', 'qa.feedback']);
 
 // HR Team Lead owns HR *and* placement per the MoM ("full access to HR

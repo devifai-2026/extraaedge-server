@@ -7,7 +7,7 @@ import { resolveTenantBySlug, tenantQuery } from '../../db/tenant.js';
 import { signAccessToken, signRefreshToken, verifyToken, ACCESS_TTL_SECONDS, REFRESH_TTL_SECONDS } from '../../lib/jwt.js';
 import { sha256Hex } from '../../lib/crypto.js';
 import { forbidden, unauthenticated, sessionIdle, tenantSuspended, notFound, conflict, validationError } from '../../lib/errors.js';
-import { PLATFORM_ROLES } from '../../config/constants.js';
+import { PLATFORM_ROLES, BRANCH_MANAGER_TAB_KEYS } from '../../config/constants.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
 import { last10Digits } from '../../lib/phone.js';
@@ -26,14 +26,33 @@ const safeAvatarUrl = async (key) => {
 const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
 
 // ---------- helpers ----------
-// Returns the tab keys this user can see. super_admin and branch_manager
-// always get a wildcard so any tab added to the codebase later (without
-// re-seeding the role row) shows up immediately without forcing a re-login.
-// branch_manager is admin-like for TAB access; its two carve-outs (lead CSV
-// export, sudo-login) are enforced at the route layer, not via tab keys, so a
-// tab wildcard is still safe.
+// Returns the tab keys this user can see. super_admin gets a wildcard so any
+// tab added to the codebase later (without re-seeding the role row) shows up
+// immediately without forcing a re-login.
+//
+// branch_manager USED to share that wildcard on the reasoning that it is
+// "admin-like for TAB access". That was wrong: the wildcard handed the role
+// every money surface in the product — the whole Accounts module, the Payments
+// Ledger, payroll runs and salary structures. A branch manager approves
+// registration amounts and nothing more; real money is for super_admin and the
+// accounts team. It now gets an explicit list (BRANCH_MANAGER_TAB_KEYS), which
+// also means a newly added tab is withheld from the role until someone decides
+// it belongs there, rather than being granted silently.
+//
+// An explicit per-user tab_permissions row still wins over the default, so a
+// tenant can hide more — but it cannot hand back a money tab, because the list
+// below is intersected over it.
 const buildAllowedTabs = (tab_permissions, role) => {
-  if (role === 'super_admin' || role === 'branch_manager') return ['*'];
+  if (role === 'super_admin') return ['*'];
+  if (role === 'branch_manager') {
+    if (!tab_permissions) return [...BRANCH_MANAGER_TAB_KEYS];
+    // Intersect: a custom role row may narrow the set, never widen it back
+    // onto a money surface.
+    const granted = Object.entries(tab_permissions)
+      .filter(([, level]) => level && level !== 'hidden')
+      .map(([k]) => k);
+    return BRANCH_MANAGER_TAB_KEYS.filter((k) => granted.includes(k));
+  }
   if (!tab_permissions) return null;
   return Object.entries(tab_permissions)
     .filter(([, level]) => level && level !== 'hidden')
