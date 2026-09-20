@@ -41,8 +41,10 @@ const ALLOWED = [
   // the kind of write this role should not have. Deliberately NOT allowlisted.
   // If the business wants BMs to approve fee offers, that needs its own
   // approve/reject endpoint first.
-  // Admission approvals — the accounts/admissions decision points only.
-  { method: 'POST', re: /^\/admissions\/[^/]+\/(approve|reject)\/?$/ },
+  // NOTE: admission approve/reject is deliberately NOT here. The brief is
+  // discount approvals + bulk upload only. The admissions module has its own
+  // gate (acctRole) which still lists branch_manager, but this middleware runs
+  // first and blocks it — one place to change if that decision is revisited.
 
   // ---- Bulk write -------------------------------------------------------
   // Bulk lead import: dry-run, commit, retry the rows that failed, and the
@@ -50,6 +52,8 @@ const ALLOWED = [
   { method: 'POST', re: /^\/bulk\/leads\/(preview|commit|download|imports\/[^/]+\/retry-failures)\/?$/ },
   // Bulk admissions import + clearing out failure/duplicate staging rows.
   { method: 'POST', re: /^\/bulk\/admissions\/(preview|commit|failures\/bulk-delete|duplicates\/bulk-delete)\/?$/ },
+  // Uploading the spreadsheet itself — bulk upload is useless without it.
+  { method: 'POST', re: /^\/uploads\/(presign|confirm)\/?$/ },
 
   // ---- Their own session / personal state ------------------------------
   // Signing in and out, refreshing a token, changing YOUR OWN password and
@@ -62,7 +66,6 @@ const ALLOWED = [
   { method: 'PUT', re: /^\/notification-preferences\/?$/ },
   // Their own leave requests + profile photo, same reasoning.
   { method: 'POST', re: /^\/staff-leave\/(requests|my)\b/ },
-  { method: 'POST', re: /^\/uploads\// },
   // Raising a support ticket about a problem they can see but not fix.
   { method: 'POST', re: /^\/tickets\/?$/ },
   { method: 'POST', re: /^\/platform-feedback\/?$/ },
@@ -98,7 +101,7 @@ export const branchManagerReadOnly = (req, _res, next) => {
   // e.g. '/leads/123' — not the full URL.
   if (isAllowed(req.method, req.path)) return next();
   return next(forbidden(
-    'Branch managers have read-only access. You can approve discount requests and admissions, and run bulk imports, but cannot create, edit, reassign or delete records.',
+    'Branch managers have read-only access. You can approve discount requests and run bulk uploads — everything else, including creating, editing, reassigning and deleting, is not permitted for this role.',
   ));
 };
 
