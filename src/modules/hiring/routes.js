@@ -69,6 +69,29 @@ router.post('/positions/:id/postings', validate({
 }), controller.createPosting);
 router.delete('/postings/:id', validate({ params: idParam }), controller.deletePosting);
 
+// ---------- spreadsheet reading ----------
+// Which tabs does this workbook have? Asked after the file is uploaded and
+// before the import is queued, so a multi-tab book can offer a sheet picker.
+router.post('/workbook/sheets', validate({
+  body: z.object({ file_key: z.string().min(1).max(500) }),
+}), controller.workbookSheets);
+
+// ---------- async import (file already uploaded via /uploads/presign) ----------
+// Queued, not inline: a real workbook is hundreds of rows, and the global JSON
+// body limit is 200kb so the file itself can never travel through the API.
+router.post('/imports', validate({
+  body: z.object({
+    kind: z.enum(['candidate', 'interview']),
+    file_key: z.string().min(1).max(500),
+    file_name: z.string().max(300).optional(),
+    sheet_name: z.string().max(200).optional(),
+    position_id: uuid.optional(),
+  }),
+}), controller.queueImport);
+router.get('/imports', controller.listImports);
+router.get('/imports/:id', validate({ params: idParam }), controller.getImport);
+router.get('/imports/:id/rows', validate({ params: idParam }), controller.importRows);
+
 // ---------- bulk import ----------
 // Declared BEFORE /candidates/:id so "import" is not swallowed as an id.
 const importBody = z.object({

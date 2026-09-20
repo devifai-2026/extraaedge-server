@@ -25,6 +25,8 @@ const MODULES = [
   // The Accounts historical-admission importer. Its own queue, so it needs its
   // own entry — sharing BULK_IMPORT would hand every lead job to it too.
   './bulk-admission-import-worker.js',
+  // Speedup Hiring candidate/interview sheet importer. Own queue, so own entry.
+  './hiring-import-worker.js',
   './bulk-export-worker.js',
 
   // Follow-ups + notifications. notification-worker turns queued events into

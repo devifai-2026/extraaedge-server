@@ -457,3 +457,46 @@ export const dashboard = async (tenant) => {
     candidates_30d: recent.rows[0].n,
   };
 };
+
+// ---------- import jobs ----------
+export const createImport = async (tenant, b, userId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO hiring_imports (kind, file_key, file_name, sheet_name, position_id, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [b.kind, b.file_key ?? null, b.file_name ?? null, b.sheet_name ?? null,
+      b.position_id ?? null, userId ?? null],
+  );
+  return rows[0];
+};
+
+export const listImports = async (tenant, { limit = 30 } = {}) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT i.*, u.name AS created_by_name, p.title AS position_title
+       FROM hiring_imports i
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN hiring_positions p ON p.id = i.position_id
+      ORDER BY i.created_at DESC LIMIT $1`,
+    [Math.min(Number(limit) || 30, 100)],
+  );
+  return rows;
+};
+
+export const getImport = async (tenant, id) => {
+  const { rows } = await tenantQuery(tenant, `SELECT * FROM hiring_imports WHERE id = $1`, [id]);
+  return rows[0] ?? null;
+};
+
+// Rejected + duplicate rows for one import, for the review tabs.
+export const importRows = async (tenant, id, outcome) => {
+  const params = [id];
+  let cond = 'import_id = $1';
+  if (outcome) { params.push(outcome); cond += ` AND outcome = $${params.length}`; }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT * FROM hiring_import_rows WHERE ${cond} ORDER BY row_no LIMIT 2000`,
+    params,
+  );
+  return rows;
+};

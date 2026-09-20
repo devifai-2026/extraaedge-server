@@ -1,6 +1,10 @@
 // Speedup Hiring — business rules. Internal staff recruitment.
 import * as repo from './repo.js';
 import { notFound, validationError } from '../../lib/errors.js';
+import { listXlsxSheets } from '../../lib/csv.js';
+import { getDownloadSignedUrl } from '../../lib/r2.js';
+import { publish } from '../../lib/queue.js';
+import { QUEUE_NAMES } from '../../config/constants.js';
 
 export * from './repo.js';
 
@@ -72,6 +76,20 @@ const statusResolver = (statuses) => {
   };
 };
 
+// ---------- spreadsheet reading ----------
+// Sheet picker for a multi-tab workbook. Reads the file that was already
+// uploaded to storage — base64 through the API is not an option, the global
+// JSON body limit is 200kb.
+export const sheetsInWorkbook = async (fileKey) => {
+  const url = await getDownloadSignedUrl({ key: fileKey, expiresIn: 120 });
+  const res = await fetch(url);
+  if (!res.ok) throw validationError('Could not read that upload. Try uploading it again.');
+  const buf = Buffer.from(await res.arrayBuffer());
+  const sheets = await listXlsxSheets(buf);
+  if (!sheets.length) throw validationError('No sheets found in that workbook.');
+  return { sheets };
+};
+
 // ---------- candidate import ----------
 // Returns a per-row verdict rather than throwing: the recruiter needs to see
 // which rows are bad and why, the same as the lead importer's failure report.
@@ -128,6 +146,9 @@ export const previewCandidates = async (tenant, { rows, position_id }) => {
       status_id: st.id,
       remark: String(raw.remark ?? '').trim() || null,
       remark_2: String(raw.remark_2 ?? '').trim() || null,
+      // Source row number, kept so the import report can point at the line in
+      // the sheet rather than an index into the filtered set.
+      _row_no: rowNo,
     });
   });
 
@@ -223,4 +244,16 @@ export const setCandidateStatus = async (tenant, actor, id, { status_id, note })
     changed_by: actor?.id ?? null,
   });
   return repo.getCandidate(tenant, id);
+};
+
+// ---------- async import ----------
+// Queue and return immediately. The file is already in storage (presigned
+// upload), so nothing large travels through the API and the recruiter is not
+// blocked while several hundred rows are validated and written.
+export const queueImport = async (tenant, actor, body) => {
+  const job = await repo.createImport(tenant, body, actor?.id);
+  await publish(QUEUE_NAMES.HIRING_IMPORT, 'import', {
+    tenantId: tenant.id, import_id: job.id,
+  });
+  return job;
 };

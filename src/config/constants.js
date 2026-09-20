@@ -239,6 +239,10 @@ export const QUEUE_NAMES = Object.freeze({
   // registers handlers with jobName '*', so a second registerWorker on the
   // same queue would hand every lead job to the admissions worker too.
   BULK_ADMISSION_IMPORT: 'bulk-admission-import',
+  // Speedup Hiring candidate/interview sheet import. Its own queue, not a
+  // second job name on BULK_IMPORT: in in-process mode registerWorker binds
+  // jobName '*', so sharing a queue hands every lead-import job here too.
+  HIRING_IMPORT: 'hiring-import',
   BULK_EXPORT: 'bulk-export',
   CAMPAIGN: 'campaign-run',
   DRIP: 'drip-step',
@@ -396,6 +400,7 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   'hiring.candidates',
   'hiring.interviews',
   'hiring.statuses',
+  'hiring.imports',
   // Placement department (companies, job openings, applications).
   'placement.dashboard',
   'placement.companies',
@@ -564,7 +569,7 @@ export const QA_TAB_KEYS = Object.freeze(['qa.reviews', 'qa.feedback']);
 // zone), which takes the whole server down rather than failing gracefully.
 export const HIRING_TAB_KEYS = Object.freeze([
   'hiring.dashboard', 'hiring.positions', 'hiring.candidates',
-  'hiring.interviews', 'hiring.statuses',
+  'hiring.interviews', 'hiring.statuses', 'hiring.imports',
 ]);
 export const HR_TEAM_LEAD_TAB_KEYS = Object.freeze([
   ...HR_TAB_KEYS, ...PLACEMENT_TAB_KEYS, ...HIRING_TAB_KEYS, 'lms.analytics',

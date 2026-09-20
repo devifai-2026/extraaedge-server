@@ -123,6 +123,32 @@ export const commitInterviewImport = async (req, res, next) => {
   try { ok(res, req, await service.importInterviews(req.tenant, req.user, req.body)); } catch (e) { next(e); }
 };
 
+// ---------- spreadsheet reading ----------
+export const workbookSheets = async (req, res, next) => {
+  try { ok(res, req, await service.sheetsInWorkbook(req.body.file_key)); } catch (e) { next(e); }
+};
+
+// ---------- async import ----------
+export const queueImport = async (req, res, next) => {
+  try {
+    const job = await service.queueImport(req.tenant, req.user, req.body);
+    res.status(202).json({ data: job, meta: { requestId: req.id } });
+  } catch (e) { next(e); }
+};
+export const listImports = async (req, res, next) => {
+  try { ok(res, req, await service.listImports(req.tenant, req.query)); } catch (e) { next(e); }
+};
+export const getImport = async (req, res, next) => {
+  try {
+    const r = await service.getImport(req.tenant, req.params.id);
+    if (!r) throw notFound('Import not found');
+    ok(res, req, r);
+  } catch (e) { next(e); }
+};
+export const importRows = async (req, res, next) => {
+  try { ok(res, req, await service.importRows(req.tenant, req.params.id, req.query.outcome)); } catch (e) { next(e); }
+};
+
 // ---------- dashboard ----------
 export const dashboard = async (req, res, next) => {
   try { ok(res, req, await service.dashboard(req.tenant)); } catch (e) { next(e); }

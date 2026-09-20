@@ -114,6 +114,53 @@ const extractRows = (ws, headers) => {
   return rows;
 };
 
+// Multi-sheet reader. parseXlsxBuffer above takes worksheet[0] and ignores the
+// rest, which is right for a downloaded single-sheet template but wrong for a
+// workbook people actually keep — a recruitment log with one tab per month, or
+// a candidate tab beside an interview tab. This lists every sheet so the
+// importer can ask which one, and reads just that sheet.
+//
+// Sheet names are returned with their row counts so the picker can say
+// "Sept (42 rows)" rather than making someone guess which tab is which.
+export const listXlsxSheets = async (buffer, { maxBytes = MAX_XLSX_BYTES } = {}) => {
+  if (buffer && buffer.length > maxBytes) {
+    const err = new Error(`Spreadsheet too large to parse (${(buffer.length / (1024 * 1024)).toFixed(1)} MB; max ${Math.round(maxBytes / (1024 * 1024))} MB).`);
+    err.code = 'XLSX_TOO_LARGE';
+    throw err;
+  }
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer);
+  return wb.worksheets.map((ws) => ({
+    name: ws.name,
+    // rowCount includes the header and any trailing blank rows Excel kept, so
+    // this is an indication rather than the row count the import will report.
+    approx_rows: Math.max(0, (ws.rowCount || 0) - 1),
+  }));
+};
+
+// Read ONE named sheet. Falls back to the first sheet when no name is given,
+// so callers that do not care keep working.
+export const parseXlsxSheet = async (buffer, sheetName, { maxBytes = MAX_XLSX_BYTES } = {}) => {
+  if (buffer && buffer.length > maxBytes) {
+    const err = new Error(`Spreadsheet too large to parse (${(buffer.length / (1024 * 1024)).toFixed(1)} MB; max ${Math.round(maxBytes / (1024 * 1024))} MB).`);
+    err.code = 'XLSX_TOO_LARGE';
+    throw err;
+  }
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer);
+  const ws = sheetName ? wb.worksheets.find((w) => w.name === sheetName) : wb.worksheets[0];
+  if (!ws) {
+    const err = new Error(`Sheet "${sheetName}" not found in that workbook.`);
+    err.code = 'SHEET_NOT_FOUND';
+    throw err;
+  }
+  const headers = [];
+  ws.getRow(1).eachCell({ includeEmpty: true }, (cell, colNumber) => {
+    headers[colNumber - 1] = String(cell.value ?? '').trim();
+  });
+  return { headers, rows: extractRows(ws, headers) };
+};
+
 export const parseXlsxBuffer = async (buffer, { maxBytes = MAX_XLSX_BYTES } = {}) => {
   const { ws, headers } = await loadWorksheet(buffer, maxBytes);
   if (!ws) return [];
