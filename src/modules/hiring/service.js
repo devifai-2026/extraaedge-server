@@ -90,6 +90,78 @@ export const sheetsInWorkbook = async (fileKey) => {
   return { sheets };
 };
 
+// ---------- header mapping ----------
+// Header text → API field. Lives here because the background worker reads the
+// uploaded file itself and never sees any client-side mapping. Matching
+// ignores case, spaces and punctuation, so "Contact No.", "contact no" and
+// "CONTACT_NO" all land on `phone` — and the real sheet's
+// "Interview Done ( Yes/No", unclosed bracket and all, still matches.
+const norm = (h) => String(h).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const CANDIDATE_HEADERS = {
+  dateofcontact: 'contacted_on',
+  positionappliedfor: 'position',
+  position: 'position',
+  name: 'name',
+  contactno: 'phone',
+  contactnumber: 'phone',
+  phone: 'phone',
+  emailid: 'email',
+  email: 'email',
+  location: 'location',
+  highestqualification: 'highest_qualification',
+  qualification: 'highest_qualification',
+  stream: 'stream',
+  workexperience: 'experience_level',
+  experience: 'experience_level',
+  currentlocationwitharea: 'current_area',
+  currentlocation: 'current_area',
+  currentsalary: 'current_salary',
+  expectedsalary: 'expected_salary',
+  noticeperiod: 'notice_period',
+  interviewdate: 'interview_date',
+  interviewdone: 'status',
+  interviewdoneyesno: 'status',
+  status: 'status',
+  remark: 'remark',
+  remarks: 'remark',
+  '1stremark': 'remark',
+  '2ndremark': 'remark_2',
+};
+
+const INTERVIEW_HEADERS = {
+  srno: null,
+  position: 'position',
+  positionappliedfor: 'position',
+  name: 'name',
+  contactno: 'phone',
+  contactnumber: 'phone',
+  phone: 'phone',
+  interviewdate: 'interview_date',
+  interviewtime: 'interview_time',
+  interviewmode: 'mode',
+  mode: 'mode',
+  interviewstatus: 'status',
+  status: 'status',
+  '1stremark': 'remark_1',
+  '2ndremark': 'remark_2',
+  remark: 'remark_1',
+};
+
+// Unrecognised columns are dropped rather than passed through: a stray
+// "Sr. No" should not fail an otherwise good import.
+export const mapSheetRows = (rows, kind) => {
+  const map = kind === 'interview' ? INTERVIEW_HEADERS : CANDIDATE_HEADERS;
+  return rows.map((r) => {
+    const out = {};
+    for (const [header, value] of Object.entries(r)) {
+      const field = map[norm(header)];
+      if (field) out[field] = value;
+    }
+    return out;
+  }).filter((r) => Object.values(r).some((v) => String(v ?? '').trim() !== ''));
+};
+
 // ---------- candidate import ----------
 // Returns a per-row verdict rather than throwing: the recruiter needs to see
 // which rows are bad and why, the same as the lead importer's failure report.
