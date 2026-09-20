@@ -15,6 +15,42 @@ import { SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from
 // scoping leads/discounts already use for this role. account_manager → null
 // (tenant-wide, unchanged — they're the dedicated Accounts team).
 // Returns { branchId, teamIds } — at most one of the two is ever non-null.
+// Roles allowed to see real rupee figures: the institute owner and the
+// dedicated accounts team. Everyone else gets the same rows with the money
+// columns nulled out.
+//
+// A branch manager keeps full LEAD and ADMISSION-STATUS oversight — pipeline
+// counts, who is attending, who is pending approval — because that is their
+// job. What they do not get is the amounts. Stripping the fields from the
+// response (rather than refusing the request) is deliberate: an earlier pass
+// blocked these endpoints outright and blanked the whole analytics dashboard,
+// which was never the intent.
+const MONEY_ROLES = new Set([
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
+]);
+export const canSeeMoney = (actor) => MONEY_ROLES.has(actor?.role);
+
+// Money columns that must never reach a non-money role. Registration amount is
+// deliberately NOT in this list — approving it is the one money decision a
+// branch manager is allowed to make.
+const MONEY_FIELDS = [
+  'total_fees', 'paid_till_date', 'pending_fees', 'due_amount', 'due_this_month',
+  'amount', 'payment_amount', 'course_fees', 'collection', 'total_amount',
+  'this_month_collection', 'old_collection', 'new_collection', 'registration_due',
+];
+
+// Null out every money field on a row / array of rows for actors who may not
+// see amounts. Shallow by design: these are flat SQL result rows.
+export const stripMoney = (data, actor) => {
+  if (canSeeMoney(actor) || data == null) return data;
+  if (Array.isArray(data)) return data.map((r) => stripMoney(r, actor));
+  if (typeof data !== 'object') return data;
+  const out = { ...data };
+  for (const f of MONEY_FIELDS) if (f in out) out[f] = null;
+  return out;
+};
+
 const NO_BRANCH = '00000000-0000-0000-0000-000000000000';
 const resolveAdmissionScope = async (tenant, actor, branchId) => {
   if (actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
@@ -456,12 +492,22 @@ export const listReceipts = async (tenant, q, actor) => {
 
 // Admin Payment Details ledger (paginated/filterable/sortable/searchable).
 export const listPaymentDetails = async (tenant, q, actor) => {
+  // Unlike the dashboard, this endpoint is money and nothing else — every row
+  // is a payment. There is no non-money content to preserve, so a role that
+  // may not see amounts gets an empty ledger rather than a page of nulls.
+  // Still a 200: the dashboard fires this alongside its other widgets, and a
+  // 403 here blanked the whole page.
+  if (!canSeeMoney(actor)) return { data: [], meta: { total: 0 } };
   const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, q?.branch_id);
   return repo.listPaymentDetails(tenant, { ...q, branchId, teamIds });
 };
 
 // Payment analytics for the admin dashboard charts.
 export const paymentAnalytics = async (tenant, q, actor) => {
+  // Revenue series (trend / by_account / by_kind) — all rupees. Same reasoning
+  // as listPaymentDetails: empty rather than 403, so the caller's other
+  // widgets still render.
+  if (!canSeeMoney(actor)) return { trend: [], by_account: [], by_kind: [] };
   const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, q?.branch_id);
   return repo.paymentAnalytics(tenant, { ...q, branchId, teamIds });
 };
@@ -773,9 +819,11 @@ export const leadStatusSnapshot = async (tenant, actor, branchId) => {
     lP,
   );
   return {
+    // Counts are lead-status figures, not money — every role that reaches this
+    // endpoint gets them. Only the per-row total_fees is withheld.
     counts: counts.reduce((acc, r) => { acc[r.status] = r.count; return acc; }, {}),
     unrouted_converted: unroutedRows.length,
-    rows: [...list, ...unroutedRows],
+    rows: stripMoney([...list, ...unroutedRows], actor),
   };
 };
 
@@ -808,7 +856,11 @@ export const pendingAdmissionsCount = async (tenant, actor) => {
 };
 export const emiDigest = async (tenant, upcomingDays, actor) => {
   const { branchId, teamIds } = await resolveAdmissionScope(tenant, actor, undefined);
-  return repo.emiDigest(tenant, upcomingDays, branchId, teamIds);
+  const rows = await repo.emiDigest(tenant, upcomingDays, branchId, teamIds);
+  // Every row is "student X owes ₹Y on date Z" — the amount is the whole
+  // point of the row, so a non-money role gets the counts and due dates with
+  // the figures nulled out.
+  return stripMoney(rows, actor);
 };
 
 // Compound dashboard fetch: KPI cards (existing) + 4 chart datasets.
@@ -822,11 +874,17 @@ export const dashboardWithCharts = async (tenant, { trend_days = 30, branch_id }
     repo.statusBreakdown(tenant, b, t),
     repo.courseBreakdown(tenant, b, t),
   ]);
+  const money = canSeeMoney(actor);
   return {
-    ...kpis,
+    // KPI cards: admission counts stay for everyone, the collection figure is
+    // nulled for roles that may not see money (stripMoney covers
+    // this_month_collection). The FE renders null as an em-dash.
+    ...stripMoney(kpis, actor),
     charts: {
       admissions_trend: admTrend,
-      collection_trend: colTrend,
+      // Rupee series. Withheld rather than zeroed — a zeroed line would read
+      // as "no collections", which is a different and wrong claim.
+      collection_trend: money ? colTrend : [],
       status_breakdown: breakdown,
       course_breakdown: courses,
       trend_days,

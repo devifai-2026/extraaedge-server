@@ -31,13 +31,16 @@ const acctRole = requireRole(
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
-// Read-only dashboard/analytics — same audience as acctRole. Kept as a
-// separate gate (identical today) so a future narrowing of one doesn't
-// silently narrow the other. branch_manager excluded for the same reason:
-// the accounts dashboard is almost entirely rupee figures.
+// Read-only dashboard/analytics. branch_manager IS included: these feed the
+// pipeline counts (pending approval / attending / on break / completed) on the
+// main analytics dashboard, which are lead-status figures, not money, and the
+// role's whole job is that oversight. Money is withheld from the RESPONSE
+// instead — see stripMoneyForActor in service.js — rather than by blocking the
+// endpoint, which blanked the dashboard.
 const acctOrBranch = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
 // Counsellor-facing subset (their own converted students): counsellors may
@@ -59,6 +62,7 @@ const acctOrCounsellorOrBranch = requireRole(
   SYSTEM_TENANT_ROLES.ACCOUNT_MANAGER,
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.COUNSELLOR,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
   SYSTEM_TENANT_ROLES.SALES_MANAGER,
 );
 // NOTE: gating is now PER-ROUTE (no blanket router.use) so counsellors can
