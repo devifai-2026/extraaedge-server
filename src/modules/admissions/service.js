@@ -37,8 +37,45 @@ export const canSeeMoney = (actor) => MONEY_ROLES.has(actor?.role);
 const MONEY_FIELDS = [
   'total_fees', 'paid_till_date', 'pending_fees', 'due_amount', 'due_this_month',
   'amount', 'payment_amount', 'course_fees', 'collection', 'total_amount',
-  'this_month_collection', 'old_collection', 'new_collection', 'registration_due',
+  'this_month_collection', 'old_collection', 'new_collection',
 ];
+
+// Registration figures, deliberately NOT stripped. Collecting the registration
+// amount is the one money decision a branch manager owns, so they need to know
+// what it is, what has been paid against it, and what is still outstanding.
+// Listed explicitly so a future edit to MONEY_FIELDS cannot swallow them by
+// accident: 'registration_amount', 'registration_paid', 'registration_due',
+// 'registration_declared_unverified'.
+
+// An admission detail row carries the whole commercial picture: total_fees,
+// the per-installment fee_schedule, every receipt, and the fee_offer's
+// course_fees. A branch manager is allowed exactly ONE figure out of that —
+// the registration amount, because collecting it is the approval they own.
+// Everything else is withheld.
+//
+// Applied on the single-admission read (service.get). The registration_* keys
+// are deliberately preserved: registration_amount (what to collect),
+// registration_paid and registration_due (whether it has been collected).
+export const stripAdmissionMoney = (row, actor) => {
+  if (canSeeMoney(actor) || !row) return row;
+  const out = stripMoney(row, actor);
+  // Collections of amounts — no per-row registration figure to preserve, so
+  // they go entirely rather than becoming a list of nulls.
+  out.fee_schedule = [];
+  out.receipts = [];
+  // The offer carries course_fees + the installment plan. Keep only the
+  // registration amount off it.
+  out.fee_offer = row.fee_offer
+    ? {
+      id: row.fee_offer.id,
+      lead_id: row.fee_offer.lead_id,
+      program_id: row.fee_offer.program_id,
+      registration_amount: row.fee_offer.registration_amount,
+      payment_mode: row.fee_offer.payment_mode,
+    }
+    : null;
+  return out;
+};
 
 // Null out every money field on a row / array of rows for actors who may not
 // see amounts. Shallow by design: these are flat SQL result rows.
@@ -169,7 +206,16 @@ const scopeForActor = async (tenant, q, actor) => {
   return q;
 };
 
-export const list = async (tenant, q, actor) => repo.list(tenant, await scopeForActor(tenant, q, actor));
+export const list = async (tenant, q, actor) => {
+  const res = await repo.list(tenant, await scopeForActor(tenant, q, actor));
+  // Rows carry total_fees / paid_till_date / pending_fees per student. The
+  // student list itself is legitimate branch oversight; the fee columns are
+  // not, so null them and let the FE render an em-dash.
+  if (canSeeMoney(actor) || !res) return res;
+  return Array.isArray(res)
+    ? stripMoney(res, actor)
+    : { ...res, data: stripMoney(res.data, actor) };
+};
 
 export const get = async (tenant, id, actor) => {
   const row = await repo.findByIdWithRelations(tenant, id);
@@ -180,7 +226,9 @@ export const get = async (tenant, id, actor) => {
   }
   // branch_manager / sales_manager: theirs branch/team only.
   await assertAdmissionInScope(tenant, actor, id);
-  return row;
+  // Registration amount is the one figure a non-money role keeps — total
+  // fees, the installment plan and the receipt history are not theirs.
+  return stripAdmissionMoney(row, actor);
 };
 
 export const create = async (tenant, actor, input) => {
