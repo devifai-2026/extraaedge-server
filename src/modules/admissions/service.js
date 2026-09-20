@@ -59,10 +59,15 @@ const MONEY_FIELDS = [
 export const stripAdmissionMoney = (row, actor) => {
   if (canSeeMoney(actor) || !row) return row;
   const out = stripMoney(row, actor);
-  // Collections of amounts — no per-row registration figure to preserve, so
-  // they go entirely rather than becoming a list of nulls.
+  // The installment plan is course fees end to end — nothing on it is theirs.
   out.fee_schedule = [];
-  out.receipts = [];
+  // Receipts: keep the REGISTRATION ones, drop the rest. Collecting the
+  // registration amount is this role's approval, so they need the proof it
+  // was collected — receipt number, date, mode, UTR and the amount. Receipts
+  // against installments or misc payments are course money and go.
+  // stripMoney would null the amount on these, so they are taken from the
+  // original row rather than the stripped copy.
+  out.receipts = (row.receipts || []).filter((r) => r.receipt_kind === 'registration');
   // The offer carries course_fees + the installment plan. Keep only the
   // registration amount off it.
   out.fee_offer = row.fee_offer
