@@ -207,7 +207,11 @@ export const listQuery = z.object({
   followup_from: z.string().optional(),
   followup_to: z.string().optional(),
   tab: z.string().optional(),
-  flag: z.enum(['fresh', 'untouched', 'unassigned']).optional(),
+  // 'dormant' = parked in a terminal, non-success stage (Cold / Junk / Lost /
+  // Dropped — whatever the tenant named them). Driven by lead_stages.is_success
+  // rather than a hardcoded name list, so a tenant that renames "Junk" to
+  // "Not Interested" keeps working.
+  flag: z.enum(['fresh', 'untouched', 'unassigned', 'dormant']).optional(),
   tag_id: z.string().uuid().optional(),
   date_from: z.string().optional(),
   date_to: z.string().optional(),
@@ -293,6 +297,21 @@ export const bulkDeleteSchema = z.object({
   ids: z.array(z.string().uuid()).min(1, 'at least one lead id is required'),
 });
 
+// Bulk reassign across MANY assignees. mode decides how the pool is resolved:
+//   round_robin → every active counsellor in branch_id (counsellors only)
+//   manual      → the assignee_ids ticked in the dropdown (counsellor OR
+//                 telecaller)
+export const distributeSchema = z.object({
+  lead_ids: z.array(z.string().uuid()).min(1),
+  mode: z.enum(['round_robin', 'manual']),
+  assignee_ids: z.array(z.string().uuid()).optional(),
+  branch_id: z.string().uuid().optional(),
+  reason: z.string().optional(),
+}).refine(
+  (v) => (v.mode === 'round_robin' ? !!v.branch_id : !!v.assignee_ids?.length),
+  { message: 'round_robin needs branch_id; manual needs at least one assignee_id' },
+);
+
 export const bulkAssignSchema = z.object({
   lead_ids: z.array(z.string().uuid()).optional(),
   filter: z.object({
@@ -302,6 +321,11 @@ export const bulkAssignSchema = z.object({
     program_id: z.string().uuid().optional(),
     assigned_to: z.string().uuid().optional(),
     team_id: z.string().uuid().optional(),
+    // Same flag vocabulary as the list. Needed so "reassign everything in this
+    // view" works from a flag-driven tab (Cold / Junk, Unassigned, …) —
+    // without it the flag was dropped and the filter matched far more leads
+    // than the view the user was looking at.
+    flag: z.enum(['fresh', 'untouched', 'unassigned', 'dormant']).optional(),
   }).optional(),
   assigned_to: z.string().uuid(),
   reason: z.string().optional(),

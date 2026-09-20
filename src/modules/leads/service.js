@@ -151,6 +151,74 @@ export const bulkAssign = async (tenant, actor, { lead_ids, filter, assigned_to,
   return result;
 };
 
+// Bulk reassign a set of leads across MANY assignees at once. Two modes, one
+// code path — both end up as "spread these leads evenly over this pool":
+//
+//   mode 'round_robin' — pool = every ACTIVE COUNSELLOR in `branch_id`.
+//     Counsellors only, by product decision: telecallers never receive leads
+//     from an automatic spread, only from an explicit pick.
+//   mode 'manual'      — pool = the `assignee_ids` the caller ticked, which
+//     may mix counsellors and telecallers.
+//
+// Every target is re-validated here regardless of mode: active, not deleted,
+// and a LEAD_OWNER_ROLE. That last check is the same invariant the single-lead
+// reassign enforces — leads.assigned_to must never point at a manager tier.
+export const distributeLeads = async (tenant, actor, {
+  lead_ids, mode, assignee_ids, branch_id, reason,
+}) => {
+  if (!lead_ids?.length) throw validationError('Select at least one lead');
+
+  let pool;
+  if (mode === 'round_robin') {
+    if (!branch_id) throw validationError('Pick a branch to round-robin within');
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT id FROM users
+        WHERE role = $1 AND branch_id = $2
+          AND is_active = true AND deleted_at IS NULL
+        ORDER BY name`,
+      [SYSTEM_TENANT_ROLES.COUNSELLOR, branch_id],
+    );
+    pool = rows.map((r) => r.id);
+    if (!pool.length) throw validationError('That branch has no active counsellors to assign to');
+  } else {
+    if (!assignee_ids?.length) throw validationError('Pick at least one person to assign to');
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT id FROM users
+        WHERE id = ANY($1::uuid[]) AND role = ANY($2)
+          AND is_active = true AND deleted_at IS NULL`,
+      [assignee_ids, LEAD_OWNER_ROLES],
+    );
+    const valid = new Set(rows.map((r) => r.id));
+    // Reject rather than silently narrow: quietly dropping an ineligible pick
+    // would hand their share to someone else without telling anyone.
+    const bad = assignee_ids.filter((id) => !valid.has(id));
+    if (bad.length) {
+      throw validationError('Leads can only be assigned to an active counsellor or telecaller');
+    }
+    pool = assignee_ids;
+  }
+
+  const result = await repo.distributeLeads(tenant, {
+    lead_ids, assignee_ids: pool, assigned_by: actor?.id ?? null, reason,
+  });
+
+  // Same per-lead event fan-out bulkAssign does, so timelines, dashboards and
+  // the reassign report see these moves like any other.
+  for (const [assignedTo, count] of Object.entries(result.per_assignee)) {
+    if (!count) continue;
+    notifyLeadChange({
+      tenant,
+      lead: { id: null, assigned_to: assignedTo },
+      type: 'lead.reassigned',
+      actor_id: actor?.id,
+      payload: { assigned_to: assignedTo, reason: reason ?? null, count },
+    }).catch(() => {});
+  }
+  return result;
+};
+
 export const getLead = async (tenant, actor, id) => {
   const row = await repo.findByIdWithRelations(tenant, id);
   if (!row) throw notFound('Lead not found');

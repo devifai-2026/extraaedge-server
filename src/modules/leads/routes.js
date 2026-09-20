@@ -11,7 +11,7 @@ import { tenantQuery } from '../../db/tenant.js';
 import { forbidden, notFound } from '../../lib/errors.js';
 import * as controller from './controller.js';
 import * as service from './service.js';
-import { leadCreateSchema, leadUpdateSchema, listQuery, idParam, stageChangeSchema, bulkAssignSchema, bulkDeleteSchema } from './schema.js';
+import { leadCreateSchema, leadUpdateSchema, listQuery, idParam, stageChangeSchema, bulkAssignSchema, distributeSchema, bulkDeleteSchema } from './schema.js';
 
 const router = express.Router();
 router.use(authRequired, tenantRequired, workTracker, requireClockIn);
@@ -66,6 +66,16 @@ router.post(
   requireRole(...MANAGER_TIER_ROLES),
   validate({ body: bulkAssignSchema }),
   controller.bulkAssign,
+);
+
+// Bulk reassign spread across MANY people — round-robin over a branch's
+// counsellors, or evenly across a hand-picked set of counsellors/telecallers.
+// Manager tier and up, same as bulk-assign: this moves other people's leads.
+router.post(
+  '/distribute',
+  requireRole(...MANAGER_TIER_ROLES),
+  validate({ body: distributeSchema }),
+  controller.distribute,
 );
 
 // Bulk hard-delete. Super-admin ONLY — counsellors / managers don't even

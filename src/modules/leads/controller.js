@@ -91,6 +91,13 @@ export const stageCounts = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const distribute = async (req, res, next) => {
+  try {
+    const data = await service.distributeLeads(req.tenant, req.user, req.body);
+    res.json({ data, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
 export const autoAssignUnassigned = async (req, res, next) => {
   try {
     const data = await service.autoAssignUnassigned(req.tenant);

@@ -1128,6 +1128,19 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
           AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
       )`);
     }
+    // Cold / Junk and anything else the tenant parks leads in: a TERMINAL
+    // stage that is not a success. Keyed off lead_stages.is_success (set by
+    // migration 1700000017000) rather than matching stage names, so renaming
+    // "Junk" to "Not Interested" does not silently empty the tab.
+    // is_cold is deliberately NOT part of this: it is a separate boolean that
+    // tenants in practice leave at false (0 rows on the live data), while the
+    // real cold pile lives in the stage.
+    if (flag === 'dormant') {
+      conds.push(`EXISTS (
+        SELECT 1 FROM lead_stages s
+         WHERE s.id = l.stage_id AND s.is_terminal = true AND s.is_success = false
+      )`);
+    }
   }
   if (scope && scope.user_ids) {
     params.push(scope.user_ids);
@@ -1393,11 +1406,22 @@ export const stageCounts = async (tenant, opts = {}, scope) => {
     `SELECT COUNT(*)::int AS total FROM leads l ${tagJoin} ${where} AND l.assigned_to IS NULL`,
     params,
   );
+  // Cold / Junk pile — see the 'dormant' flag in buildLeadWhere.
+  const dormantRow = await tenantQuery(
+    tenant,
+    `SELECT COUNT(*)::int AS total FROM leads l ${tagJoin} ${where}
+       AND EXISTS (
+         SELECT 1 FROM lead_stages s
+          WHERE s.id = l.stage_id AND s.is_terminal = true AND s.is_success = false
+       )`,
+    params,
+  );
   return {
     all: totalRow.rows[0].total,
     fresh: freshRow.rows[0].total,
     untouched: untouchedRow.rows[0].total,
     unassigned: unassignedRow.rows[0].total,
+    dormant: dormantRow.rows[0].total,
     stages: stageCountsByStage,
   };
 };
@@ -1430,6 +1454,23 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
     if (filter?.assigned_to) { params.push(filter.assigned_to); conds.push(`assigned_to = $${params.length}`); }
     if (filter?.team_id) { params.push(filter.team_id); conds.push(`team_id = $${params.length}`); }
     if (filter?.q) { params.push(`%${filter.q}%`); conds.push(`(name ILIKE $${params.length} OR email::text ILIKE $${params.length} OR phone ILIKE $${params.length})`); }
+    // Flag filters — same definitions as the list's buildLeadWhere, so
+    // "reassign everything in this view" moves exactly the rows the view
+    // showed. Note this block runs against the `leads` table unaliased.
+    if (filter?.flag === 'unassigned') { conds.push(`assigned_to IS NULL`); }
+    if (filter?.flag === 'fresh') { conds.push(`created_at >= now() - interval '24 hours'`); }
+    if (filter?.flag === 'untouched') {
+      conds.push(`assigned_to IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM lead_activities a WHERE a.lead_id = leads.id
+          AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
+      )`);
+    }
+    if (filter?.flag === 'dormant') {
+      conds.push(`EXISTS (
+        SELECT 1 FROM lead_stages s
+         WHERE s.id = leads.stage_id AND s.is_terminal = true AND s.is_success = false
+      )`);
+    }
     if (scope && scope.user_ids) {
       params.push(scope.user_ids);
       const userIdsIdx = params.length;
@@ -1506,4 +1547,100 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
     );
   }
   return { affected: changingIds.length, ids: changingIds };
+});
+
+// Spread a set of leads EVENLY across several assignees, in one transaction.
+//
+// Powers both bulk-reassign modes on the Lead Manager:
+//   • round-robin — every active counsellor in a branch (pool resolved by the
+//     caller, see service.distributeLeads)
+//   • manual pick — whichever counsellors/telecallers were ticked in the
+//     dropdown
+// Both are the same operation: "hand these leads to these people, evenly", so
+// they share one code path rather than drifting apart.
+//
+// Deal round-robin by POSITION (lead i → pool[i % pool.length]) rather than
+// slicing into contiguous blocks. With leads ordered by created_at, slicing
+// would give one person every old lead and another every new one; dealing
+// spreads each assignee's share across the whole age range.
+//
+// Mirrors bulkAssign's per-lead bookkeeping exactly — prior-owner snapshot,
+// closing the active assignment row, a 'reassign' history row and a timeline
+// activity per lead, with clock_timestamp() so rows in the same batch order
+// deterministically instead of tying on a frozen now().
+export const distributeLeads = async (tenant, {
+  lead_ids, assignee_ids, assigned_by, reason,
+}) => tenantTx(tenant, async (client) => {
+  if (!lead_ids?.length || !assignee_ids?.length) return { affected: 0, per_assignee: {} };
+
+  // Snapshot current owners so we can record from_user_id and skip no-ops.
+  const priorRes = await client.query(
+    `SELECT id, assigned_to FROM leads WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL ORDER BY created_at`,
+    [lead_ids],
+  );
+  if (!priorRes.rows.length) return { affected: 0, per_assignee: {} };
+
+  // Resolve each assignee's manager + branch once; both are snapshotted onto
+  // the lead, same as bulkAssign does for its single target.
+  const { rows: assigneeRows } = await client.query(
+    `SELECT id, manager_id, branch_id FROM users WHERE id = ANY($1::uuid[])`,
+    [assignee_ids],
+  );
+  const metaById = new Map(assigneeRows.map((r) => [r.id, r]));
+  // Preserve the caller's ordering, and drop any id that did not resolve.
+  const pool = assignee_ids.filter((id) => metaById.has(id));
+  if (!pool.length) return { affected: 0, per_assignee: {} };
+
+  const firstStageRes = await client.query(
+    `SELECT id FROM lead_stages WHERE is_active = true ORDER BY order_index ASC, name ASC LIMIT 1`);
+  const firstStageId = firstStageRes.rows[0]?.id ?? null;
+
+  // Deal the leads out, skipping any already owned by the person they would
+  // land on — reassigning a lead to its current owner would churn the
+  // assignment row and write a misleading from===to history entry.
+  const batches = new Map(pool.map((id) => [id, []]));
+  priorRes.rows.forEach((row, i) => {
+    const target = pool[i % pool.length];
+    if (row.assigned_to !== target) batches.get(target).push(row);
+  });
+
+  const perAssignee = {};
+  let affected = 0;
+  for (const [target, rows] of batches) {
+    perAssignee[target] = rows.length;
+    if (!rows.length) continue;
+    const ids = rows.map((r) => r.id);
+    const meta = metaById.get(target);
+    await client.query(
+      `UPDATE leads
+          SET assigned_to      = $1,
+              manager_id       = $4,
+              branch_id        = $5,
+              stage_id         = COALESCE(stage_id, $3),
+              updated_at       = now(),
+              last_activity_at = now()
+        WHERE id = ANY($2::uuid[]) AND deleted_at IS NULL`,
+      [target, ids, firstStageId, meta.manager_id ?? null, meta.branch_id ?? null],
+    );
+    await client.query(
+      `UPDATE lead_assignments SET is_active = false, status = 'closed'
+        WHERE lead_id = ANY($1::uuid[]) AND is_active`,
+      [ids],
+    );
+    for (const row of rows) {
+      await client.query(
+        `INSERT INTO lead_assignments (lead_id, from_user_id, assigned_to, assigned_by, assignment_type, reason, is_active, status, created_at)
+         VALUES ($1,$2,$3,$4,'reassign',$5,true,'open', clock_timestamp())`,
+        [row.id, row.assigned_to ?? null, target, assigned_by ?? null, reason ?? null],
+      );
+      await client.query(
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json, created_at)
+         VALUES ($1,$2,'reassign',$3,$4::jsonb, clock_timestamp())`,
+        [row.id, assigned_by ?? null, 'Lead reassigned',
+          JSON.stringify({ from: row.assigned_to ?? null, to: target, assigned_to: target, reason: reason ?? null })],
+      );
+    }
+    affected += rows.length;
+  }
+  return { affected, per_assignee: perAssignee };
 });
