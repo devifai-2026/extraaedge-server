@@ -87,6 +87,27 @@ The second sheet is an interview line, one row per scheduled interview. A
 candidate can be interviewed more than once, so this is a child table rather
 than columns on the candidate.
 
+**This cannot reuse the existing interviews module.** That module is for
+STUDENT MOCK INTERVIEWS — placement practice, not hiring:
+
+```sql
+CREATE TABLE mock_interviews (
+  program_id uuid NOT NULL REFERENCES programs(id) ...
+CREATE TABLE interview_slots (
+  student_id uuid NOT NULL REFERENCES students(id) ...
+```
+
+An interview there hangs off a **course** and its attendees are **enrolled
+students**. A trainer creates it and nominates an HR person to score soft-skill
+categories — which is why the recruiter's current screen reads "Interviews a
+trainer assigns you as the HR evaluator will appear here" and is permanently
+empty. There is no way to express "interview Akanksha for the Telecaller
+vacancy" in that schema: she is not a student and Telecaller is not a course.
+
+Surfacing the trainer's scheduling UI to the recruiter would therefore be
+actively wrong, not merely unhelpful. Staff-hiring interviews need these
+tables.
+
 | Column | From sheet |
 |---|---|
 | `candidate_id` | FK `hiring_candidates` |
@@ -219,7 +240,7 @@ Rules:
 | **Positions** | List + create/edit. Per position: openings, posted-to channels, candidate count. |
 | **Candidates** | The main working list. Filter by position, status, experience, location. Bulk upload button. Row → candidate detail. |
 | **Candidate detail** | The full record, interview history, status moves, remarks timeline. |
-| **Interviews** | Calendar/list of scheduled interviews. Bulk upload. This is where "interview scheduled" from the role brief lives. |
+| **Interviews** | Calendar/list of scheduled interviews for CANDIDATES. Bulk upload. This is where "interview scheduled" from the role brief lives — distinct from HR → Interviews, which is student mock-interview scoring and should arguably be renamed to say so. |
 | **Configuration → Hiring statuses** | CRUD for `hiring_statuses`. |
 
 Onboarding hand-off: a candidate at a `hired` status gets a **"Create staff
