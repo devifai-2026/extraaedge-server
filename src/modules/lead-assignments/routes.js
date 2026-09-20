@@ -43,9 +43,19 @@ router.get('/lead/:leadId', validate({ params: z.object({ leadId: z.string().uui
 // below will accept, so the FE picker never shows someone the server rejects.
 //   super_admin   → every active counsellor / telecaller
 //   manager       → their team hierarchy (downward subtree)
-//   front line    → their managers + peers who share a manager (NOT just their
-//                   own downward subtree, which for a leaf counsellor is empty
-//                   — that was the "No options" bug).
+//   front line    → every active lead owner in their BRANCH
+//
+// Front line used to be "my managers + peers who share a manager". That made
+// cross-role reassignment impossible in practice: counsellors report to a
+// sales manager and telecallers to a telecaller lead, so the two were never
+// peers and never appeared in each other's picker. The rule is now the branch,
+// which is the boundary the rest of the product already scopes by (leads,
+// analytics, admissions) — a counsellor can hand a lead to any counsellor OR
+// telecaller in their branch, and vice versa, but never across branches.
+//
+// Managers are deliberately left on their team subtree: widening who a manager
+// can move leads to is a different decision from letting the front line hand
+// work sideways.
 router.get('/targets', async (req, res, next) => {
   try {
     const COLS = `u.id, u.name, u.email, u.role, u.manager_id, u.is_active`;
@@ -61,24 +71,18 @@ router.get('/targets', async (req, res, next) => {
       return res.json({ data: rows, meta: { requestId: req.id } });
     }
     if (LEAD_OWNER_ROLES.includes(req.user.role)) {
-      // Same allowed-target set the POST enforces: my managers + peers sharing
-      // any of my managers + my primary manager; excluding myself.
+      // Same allowed-target set the POST enforces: every OTHER active lead
+      // owner in my branch, whatever their role. Counsellor ↔ telecaller both
+      // ways; never across branches.
       const { rows } = await tenantQuery(
         req.tenant,
-        `WITH my_mgrs AS (
-           SELECT manager_id FROM user_managers WHERE user_id = $1
-           UNION
-           SELECT manager_id FROM users WHERE id = $1 AND manager_id IS NOT NULL
-         )
-         SELECT DISTINCT ${COLS} FROM users u
+        `SELECT ${COLS} FROM users u
           WHERE u.deleted_at IS NULL AND u.is_active = true AND u.id <> $1
-            AND (
-              u.id IN (SELECT manager_id FROM my_mgrs)
-              OR u.manager_id IN (SELECT manager_id FROM my_mgrs)
-              OR EXISTS (SELECT 1 FROM user_managers um WHERE um.user_id = u.id AND um.manager_id IN (SELECT manager_id FROM my_mgrs))
-            )
+            AND u.role = ANY($2)
+            AND u.branch_id IS NOT DISTINCT FROM (SELECT branch_id FROM users WHERE id = $1)
+            AND u.branch_id IS NOT NULL
           ORDER BY u.name`,
-        [req.user.id],
+        [req.user.id, LEAD_OWNER_ROLES],
       );
       return res.json({ data: rows, meta: { requestId: req.id } });
     }
@@ -89,10 +93,14 @@ router.get('/targets', async (req, res, next) => {
     if (!targetIds.length) return res.json({ data: [], meta: { requestId: req.id } });
     const { rows } = await tenantQuery(
       req.tenant,
+      // role filter matters: a manager's subtree contains other MANAGERS, and
+      // the POST below rejects any target that is not a lead owner. Without
+      // this the picker offered people the server then refused.
       `SELECT ${COLS} FROM users u
         WHERE u.id = ANY($1::uuid[]) AND u.deleted_at IS NULL AND u.is_active = true
+          AND u.role = ANY($2)
         ORDER BY u.name`,
-      [targetIds],
+      [targetIds, LEAD_OWNER_ROLES],
     );
     res.json({ data: rows, meta: { requestId: req.id } });
   } catch (err) { next(err); }
@@ -141,10 +149,10 @@ router.post(
       }
 
       // Front-line scope (counsellor / telecaller): can only reassign leads
-      // they currently own, and only to a teammate (someone who shares one of
-      // their managers via user_managers, or their primary manager via
-      // users.manager_id). The primary manager themselves is also a valid
-      // target so a front-line user can hand a lead "up" to their manager.
+      // they currently own, and only to another lead owner in the SAME BRANCH.
+      // Role is deliberately not compared — a counsellor may hand to a
+      // telecaller and vice versa. Branch is the containment boundary, which
+      // is what the rest of the product already scopes by.
       if (LEAD_OWNER_ROLES.includes(req.user.role)) {
         const ownership = await tenantQuery(
           req.tenant,
@@ -155,29 +163,23 @@ router.post(
         if (ownership.rows[0].assigned_to !== req.user.id) {
           throw forbidden('You can only reassign leads you currently own');
         }
-        // Allowed targets = my managers + everyone who shares any of my
-        // managers (peers) + the primary manager from users.manager_id.
-        // Self is not allowed (no-op reassign).
+        // Mirror of the /targets query above — keep the two in step or the
+        // picker will offer people the server then rejects. A caller with no
+        // branch assigned matches nobody (rather than every other branchless
+        // user), and self is excluded as a no-op.
         const { rows: allowed } = await tenantQuery(
           req.tenant,
-          `WITH my_mgrs AS (
-             SELECT manager_id FROM user_managers WHERE user_id = $1
-             UNION
-             SELECT manager_id FROM users WHERE id = $1 AND manager_id IS NOT NULL
-           )
-           SELECT DISTINCT u.id
+          `SELECT u.id
              FROM users u
             WHERE u.deleted_at IS NULL AND u.is_active = true AND u.id <> $1
-              AND (
-                u.id IN (SELECT manager_id FROM my_mgrs)
-                OR u.manager_id IN (SELECT manager_id FROM my_mgrs)
-                OR EXISTS (SELECT 1 FROM user_managers um WHERE um.user_id = u.id AND um.manager_id IN (SELECT manager_id FROM my_mgrs))
-              )`,
-          [req.user.id],
+              AND u.role = ANY($2)
+              AND u.branch_id IS NOT DISTINCT FROM (SELECT branch_id FROM users WHERE id = $1)
+              AND u.branch_id IS NOT NULL`,
+          [req.user.id, LEAD_OWNER_ROLES],
         );
         const allowedIds = allowed.map((r) => r.id);
         if (!allowedIds.includes(assigned_to)) {
-          throw forbidden('You can only reassign to a teammate or your manager');
+          throw forbidden('You can only reassign to a counsellor or telecaller in your branch');
         }
       }
 
