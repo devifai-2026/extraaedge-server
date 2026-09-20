@@ -1,4 +1,5 @@
 import express from 'express';
+import { branchManagerReadOnly } from './middleware/branchManagerReadOnly.js';
 
 // ---- Built modules (Passes 1-6 complete) ----
 import authRouter from './modules/auth/routes.js';
@@ -113,6 +114,15 @@ import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
 export const mountRoutes = (app) => {
   const api = express.Router();
+
+  // Branch managers are READ-ONLY across the whole tenant API, with a short
+  // allowlist (approvals + bulk import + their own session/profile). Mounted
+  // here, ahead of every module, so it cannot be forgotten on a new route:
+  // most write routes carry no requireRole() of their own and rely on the
+  // ADMIN_TIER/MANAGER_TIER groups, which include branch_manager. Default-deny
+  // at the edge is the only version of this that stays true over time.
+  // No-op for every other role.
+  api.use(branchManagerReadOnly);
 
   // Auth
   api.use('/auth', authRouter);
