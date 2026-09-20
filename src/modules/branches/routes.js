@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
-import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
 import * as repo from './repo.js';
 import { idParam, createBranchSchema, updateBranchSchema, assignUserSchema } from './schema.js';
@@ -21,12 +21,19 @@ const loadUpdatedAt = async (req) => repo.getUpdatedAt(req.tenant, req.params.id
 // branch_manager managing branch structure is allowed but they can't make
 // themselves head of a new branch they don't already run — enforced by the
 // one-branch-per-manager constraint + role check in the service.
+// Reading the branch LIST is not the same authority as managing branches: it
+// is the lookup behind every "which office?" dropdown. The HR tiers need it to
+// say which branch a vacancy is for and which branch a new hire joins, so they
+// read the list here while every mutating route below stays super_admin only.
 router.get(
   '/',
   requireRole(
     SYSTEM_TENANT_ROLES.SUPER_ADMIN,
     SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
     SYSTEM_TENANT_ROLES.SALES_MANAGER,
+    LMS_TENANT_ROLES.HR_TEAM_LEAD,
+    LMS_TENANT_ROLES.HR_RECRUITER,
+    LMS_TENANT_ROLES.HR,
   ),
   controller.list,
 );
