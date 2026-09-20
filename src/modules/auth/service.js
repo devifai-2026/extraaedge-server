@@ -39,19 +39,25 @@ const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, par
 // also means a newly added tab is withheld from the role until someone decides
 // it belongs there, rather than being granted silently.
 //
-// An explicit per-user tab_permissions row still wins over the default, so a
-// tenant can hide more — but it cannot hand back a money tab, because the list
-// below is intersected over it.
+// A tenant can still HIDE tabs from a branch manager by marking them 'hidden'
+// in tab_permissions, but the stored row is not treated as the grant list.
+// The role held '*' until recently, so its tab_permissions rows were seeded
+// for a wildcard and are missing keys it always had in practice — reading one
+// as an allowlist silently dropped real surfaces (Discount Approvals and Lead
+// Report, both 'lead_transfer_report', went missing exactly this way). The
+// explicit list below is the grant; the row may only subtract from it.
 const buildAllowedTabs = (tab_permissions, role) => {
   if (role === 'super_admin') return ['*'];
   if (role === 'branch_manager') {
     if (!tab_permissions) return [...BRANCH_MANAGER_TAB_KEYS];
-    // Intersect: a custom role row may narrow the set, never widen it back
-    // onto a money surface.
-    const granted = Object.entries(tab_permissions)
-      .filter(([, level]) => level && level !== 'hidden')
-      .map(([k]) => k);
-    return BRANCH_MANAGER_TAB_KEYS.filter((k) => granted.includes(k));
+    // Only an explicit 'hidden' removes a tab. A key simply ABSENT from the
+    // stored row means "never configured", not "denied".
+    const hidden = new Set(
+      Object.entries(tab_permissions)
+        .filter(([, level]) => !level || level === 'hidden')
+        .map(([k]) => k),
+    );
+    return BRANCH_MANAGER_TAB_KEYS.filter((k) => !hidden.has(k));
   }
   if (!tab_permissions) return null;
   return Object.entries(tab_permissions)
