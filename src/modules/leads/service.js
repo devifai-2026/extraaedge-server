@@ -154,11 +154,14 @@ export const bulkAssign = async (tenant, actor, { lead_ids, filter, assigned_to,
 // Bulk reassign a set of leads across MANY assignees at once. Two modes, one
 // code path — both end up as "spread these leads evenly over this pool":
 //
-//   mode 'round_robin' — pool = every ACTIVE COUNSELLOR in `branch_id`.
-//     Counsellors only, by product decision: telecallers never receive leads
-//     from an automatic spread, only from an explicit pick.
-//   mode 'manual'      — pool = the `assignee_ids` the caller ticked, which
-//     may mix counsellors and telecallers.
+//   mode 'round_robin'            — pool = every ACTIVE COUNSELLOR in branch_id
+//   mode 'round_robin_telecaller' — pool = every ACTIVE TELECALLER in branch_id
+//   mode 'manual'                 — pool = the `assignee_ids` the caller
+//     ticked, which may mix counsellors and telecallers.
+//
+// The two round-robin pools are deliberately single-role: spreading across a
+// mixed pool would hand leads to whichever team happened to have more people
+// on it, which is not a routing decision anyone asked for.
 //
 // Every target is re-validated here regardless of mode: active, not deleted,
 // and a LEAD_OWNER_ROLE. That last check is the same invariant the single-lead
@@ -169,18 +172,26 @@ export const distributeLeads = async (tenant, actor, {
   if (!lead_ids?.length) throw validationError('Select at least one lead');
 
   let pool;
-  if (mode === 'round_robin') {
+  if (mode === 'round_robin' || mode === 'round_robin_telecaller') {
     if (!branch_id) throw validationError('Pick a branch to round-robin within');
+    const isTelecaller = mode === 'round_robin_telecaller';
+    const role = isTelecaller
+      ? SYSTEM_TENANT_ROLES.TELECALLER
+      : SYSTEM_TENANT_ROLES.COUNSELLOR;
     const { rows } = await tenantQuery(
       tenant,
       `SELECT id FROM users
         WHERE role = $1 AND branch_id = $2
           AND is_active = true AND deleted_at IS NULL
         ORDER BY name`,
-      [SYSTEM_TENANT_ROLES.COUNSELLOR, branch_id],
+      [role, branch_id],
     );
     pool = rows.map((r) => r.id);
-    if (!pool.length) throw validationError('That branch has no active counsellors to assign to');
+    if (!pool.length) {
+      throw validationError(
+        `That branch has no active ${isTelecaller ? 'telecallers' : 'counsellors'} to assign to`,
+      );
+    }
   } else {
     if (!assignee_ids?.length) throw validationError('Pick at least one person to assign to');
     const { rows } = await tenantQuery(

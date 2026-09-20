@@ -298,18 +298,22 @@ export const bulkDeleteSchema = z.object({
 });
 
 // Bulk reassign across MANY assignees. mode decides how the pool is resolved:
-//   round_robin → every active counsellor in branch_id (counsellors only)
-//   manual      → the assignee_ids ticked in the dropdown (counsellor OR
-//                 telecaller)
+//   round_robin            → every active counsellor in branch_id
+//   round_robin_telecaller → every active telecaller in branch_id
+//   manual                 → the assignee_ids ticked in the dropdown
+//                            (counsellor OR telecaller)
+// The two round-robin modes are kept as separate values rather than a
+// role parameter so the intent is legible in the audit trail and a caller
+// cannot accidentally spread across both pools at once.
 export const distributeSchema = z.object({
   lead_ids: z.array(z.string().uuid()).min(1),
-  mode: z.enum(['round_robin', 'manual']),
+  mode: z.enum(['round_robin', 'round_robin_telecaller', 'manual']),
   assignee_ids: z.array(z.string().uuid()).optional(),
   branch_id: z.string().uuid().optional(),
   reason: z.string().optional(),
 }).refine(
-  (v) => (v.mode === 'round_robin' ? !!v.branch_id : !!v.assignee_ids?.length),
-  { message: 'round_robin needs branch_id; manual needs at least one assignee_id' },
+  (v) => (v.mode === 'manual' ? !!v.assignee_ids?.length : !!v.branch_id),
+  { message: 'round-robin needs branch_id; manual needs at least one assignee_id' },
 );
 
 export const bulkAssignSchema = z.object({
