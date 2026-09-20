@@ -18,7 +18,7 @@ import {
   SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES, LEAD_OWNER_ROLES,
 } from '../../config/constants.js';
 import { LEAD_ORIGINS, originSqlPredicate } from '../../lib/leadOrigin.js';
-import { teamHierarchyMulti } from '../users/repo.js';
+import { teamHierarchyMulti, findById as findUserById } from '../users/repo.js';
 import { computeSecurityAnomalies } from '../../lib/securityAnomalies.js';
 
 const router = express.Router();
@@ -43,7 +43,16 @@ const computeScope = async (req) => {
     return req.query?.branch_id ? { branch_id: req.query.branch_id } : null;
   }
   if (actor.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
-    return { branch_id: actor.branch_id ?? null };
+    // Look the branch up from the DB, NOT off the token: branch_id is not a
+    // JWT claim (see middleware/auth.js — req.user carries no branch_id), so
+    // `actor.branch_id` was always undefined here. That collapsed to
+    // { branch_id: null }, which buildLeadConds turns into a literal `false`,
+    // and EVERY branch manager saw zero leads on the analytics dashboard
+    // however their branch was set up — while admissions, which resolves the
+    // same thing properly, showed real counts on the same page.
+    // admissions/service.resolveAdmissionScope does exactly this lookup.
+    const me = await findUserById(req.tenant, actor.id);
+    return { branch_id: me?.branch_id ?? null };
   }
   if (TEAM_SCOPED_MANAGER_ROLES.includes(actor.role)) {
     const ids = await teamHierarchyMulti(req.tenant, actor.id);
