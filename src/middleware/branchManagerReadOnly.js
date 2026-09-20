@@ -46,6 +46,14 @@ const ALLOWED = [
   // gate (acctRole) which still lists branch_manager, but this middleware runs
   // first and blocks it — one place to change if that decision is revisited.
 
+  // ---- Reads that happen to be POSTs ------------------------------------
+  // Revealing a masked phone number changes nothing: the handler fetches the
+  // lead, writes a 'lead.phone_revealed' audit row and returns the digits. It
+  // is a POST only so the reveal is recorded against the person who asked —
+  // which is exactly what makes it safe to grant. Blocking it would leave a
+  // branch manager able to SEE a lead but never contact them.
+  { method: 'POST', re: /^\/leads\/[^/]+\/reveal-phone\/?$/ },
+
   // ---- Bulk write -------------------------------------------------------
   // Bulk lead import: dry-run, commit, retry the rows that failed, and the
   // download/report helpers that are POST only because they take a body.
