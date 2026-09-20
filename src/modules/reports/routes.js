@@ -7,7 +7,7 @@ import { validate } from '../../middleware/validate.js';
 import { tenantQuery } from '../../db/tenant.js';
 import { publish } from '../../lib/queue.js';
 import { QUEUE_NAMES, TEAM_SCOPED_MANAGER_ROLES, MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
-import { notFound } from '../../lib/errors.js';
+import { notFound, forbidden } from '../../lib/errors.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import ExcelJS from 'exceljs';
 import { teamHierarchyMulti } from '../users/repo.js';
@@ -212,6 +212,16 @@ router.get('/lead-transfers', adminOrManager, validate({ query: transferQuery })
       scopeUserIds = await teamHierarchyMulti(req.tenant, req.user.id);
     }
     const { rows, leadCount, transferCount } = await fetchLeadTransfers(req.tenant, req.query, scopeUserIds);
+
+    // Bulk EXPORT is a different thing from reading the report on screen: it
+    // walks the whole tenant's lead + transfer history out to a file. Branch
+    // managers are read-only precisely so they cannot extract data in bulk,
+    // and GET /leads/export.csv is already super_admin-only for the same
+    // reason — this route was the way around that. Reading the report in the
+    // UI stays allowed.
+    if (req.query.format === 'xlsx' && req.user.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER) {
+      throw forbidden('Branch managers cannot export this report. You can view it on screen.');
+    }
 
     if (req.query.format === 'xlsx') {
       const wb = new ExcelJS.Workbook();
