@@ -167,9 +167,9 @@ export const bulkAssign = async (tenant, actor, { lead_ids, filter, assigned_to,
 // and a LEAD_OWNER_ROLE. That last check is the same invariant the single-lead
 // reassign enforces — leads.assigned_to must never point at a manager tier.
 export const distributeLeads = async (tenant, actor, {
-  lead_ids, mode, assignee_ids, branch_id, reason,
+  lead_ids, filter, mode, assignee_ids, branch_id, reason,
 }) => {
-  if (!lead_ids?.length) throw validationError('Select at least one lead');
+  if (!lead_ids?.length && !filter) throw validationError('Select at least one lead');
 
   let pool;
   if (mode === 'round_robin' || mode === 'round_robin_telecaller') {
@@ -211,8 +211,11 @@ export const distributeLeads = async (tenant, actor, {
     pool = assignee_ids;
   }
 
+  // Scope the filter path the same way the list is scoped, so a manager
+  // cannot spread leads they are not allowed to see.
+  const scope = lead_ids?.length ? null : await computeScope(tenant, actor);
   const result = await repo.distributeLeads(tenant, {
-    lead_ids, assignee_ids: pool, assigned_by: actor?.id ?? null, reason,
+    lead_ids, filter, scope, assignee_ids: pool, assigned_by: actor?.id ?? null, reason,
   });
 
   // Same per-lead event fan-out bulkAssign does, so timelines, dashboards and

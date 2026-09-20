@@ -306,7 +306,19 @@ export const bulkDeleteSchema = z.object({
 // role parameter so the intent is legible in the audit trail and a caller
 // cannot accidentally spread across both pools at once.
 export const distributeSchema = z.object({
-  lead_ids: z.array(z.string().uuid()).min(1),
+  // Either an explicit selection, OR a filter meaning "everything matching the
+  // current view" — the latter because a tenant with 2,337 leads across 117
+  // pages cannot realistically be selected checkbox by checkbox.
+  lead_ids: z.array(z.string().uuid()).optional(),
+  filter: z.object({
+    q: z.string().optional(),
+    stage_id: z.string().uuid().optional(),
+    sub_stage_id: z.string().uuid().optional(),
+    program_id: z.string().uuid().optional(),
+    assigned_to: z.string().uuid().optional(),
+    team_id: z.string().uuid().optional(),
+    flag: z.enum(['fresh', 'untouched', 'unassigned', 'dormant']).optional(),
+  }).optional(),
   mode: z.enum(['round_robin', 'round_robin_telecaller', 'manual']),
   assignee_ids: z.array(z.string().uuid()).optional(),
   branch_id: z.string().uuid().optional(),
@@ -314,6 +326,13 @@ export const distributeSchema = z.object({
 }).refine(
   (v) => (v.mode === 'manual' ? !!v.assignee_ids?.length : !!v.branch_id),
   { message: 'round-robin needs branch_id; manual needs at least one assignee_id' },
+).refine(
+  // Same guard bulkAssign uses: an all-empty filter means "every lead in
+  // scope", which is how one request could move a whole tenant. Require a
+  // real selection or a genuinely scoped filter.
+  (v) => (v.lead_ids?.length
+    || (v.filter && Object.values(v.filter).some((x) => x !== undefined && x !== null && x !== ''))),
+  { message: 'Select leads, or apply a filter to target' },
 );
 
 export const bulkAssignSchema = z.object({

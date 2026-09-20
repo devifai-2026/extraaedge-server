@@ -1430,6 +1430,50 @@ export const stageCounts = async (tenant, opts = {}, scope) => {
 // Side effect: any lead without a stage_id is auto-moved into the first active
 // stage (lowest order_index). This matches the "Fresh → Untouched → Working"
 // lifecycle and prevents leads from sitting in "no stage" once they have an owner.
+// WHERE-builder for "every lead matching this filter", shared by bulkAssign
+// and distributeLeads so the two can never disagree about what "all leads in
+// the current view" means. Runs against `leads` UNALIASED.
+//
+// The flag definitions mirror buildLeadWhere (used by the list + stage-counts),
+// so what a bulk action moves is exactly what the tab showed.
+const buildBulkTargetWhere = (filter, scope) => {
+  const conds = ['deleted_at IS NULL'];
+  const params = [];
+  if (filter?.stage_id) { params.push(filter.stage_id); conds.push(`stage_id = $${params.length}`); }
+  if (filter?.sub_stage_id) { params.push(filter.sub_stage_id); conds.push(`sub_stage_id = $${params.length}`); }
+  if (filter?.program_id) { params.push(filter.program_id); conds.push(`program_id = $${params.length}`); }
+  if (filter?.assigned_to) { params.push(filter.assigned_to); conds.push(`assigned_to = $${params.length}`); }
+  if (filter?.team_id) { params.push(filter.team_id); conds.push(`team_id = $${params.length}`); }
+  if (filter?.q) { params.push(`%${filter.q}%`); conds.push(`(name ILIKE $${params.length} OR email::text ILIKE $${params.length} OR phone ILIKE $${params.length})`); }
+  if (filter?.flag === 'unassigned') { conds.push(`assigned_to IS NULL`); }
+  if (filter?.flag === 'fresh') { conds.push(`created_at >= now() - interval '24 hours'`); }
+  if (filter?.flag === 'untouched') {
+    conds.push(`assigned_to IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM lead_activities a WHERE a.lead_id = leads.id
+        AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
+    )`);
+  }
+  if (filter?.flag === 'dormant') {
+    conds.push(`EXISTS (
+      SELECT 1 FROM lead_stages s
+       WHERE s.id = leads.stage_id AND s.is_terminal = true AND s.is_success = false
+    )`);
+  }
+  if (scope && scope.user_ids) {
+    params.push(scope.user_ids);
+    const userIdsIdx = params.length;
+    if (scope.include_unassigned_team_id) {
+      params.push(scope.include_unassigned_team_id);
+      const teamIdx = params.length;
+      conds.push(`(assigned_to = ANY($${userIdsIdx}::uuid[]) OR (assigned_to IS NULL AND team_id = $${teamIdx}))`);
+    } else {
+      conds.push(`assigned_to = ANY($${userIdsIdx}::uuid[])`);
+    }
+  }
+  if (scope && scope.converted_only) { conds.push(`converted_at IS NOT NULL`); }
+  return { where: conds.join(' AND '), params };
+};
+
 export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, reason, filter, scope }) => tenantTx(tenant, async (client) => {
   // INVARIANT: leads.assigned_to must be an active front-line user
   // (LEAD_OWNER_ROLES — counsellor or telecaller); manager tiers own a team,
@@ -1446,44 +1490,8 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
   }
   let ids = lead_ids ?? null;
   if (!ids) {
-    const conds = ['deleted_at IS NULL'];
-    const params = [];
-    if (filter?.stage_id) { params.push(filter.stage_id); conds.push(`stage_id = $${params.length}`); }
-    if (filter?.sub_stage_id) { params.push(filter.sub_stage_id); conds.push(`sub_stage_id = $${params.length}`); }
-    if (filter?.program_id) { params.push(filter.program_id); conds.push(`program_id = $${params.length}`); }
-    if (filter?.assigned_to) { params.push(filter.assigned_to); conds.push(`assigned_to = $${params.length}`); }
-    if (filter?.team_id) { params.push(filter.team_id); conds.push(`team_id = $${params.length}`); }
-    if (filter?.q) { params.push(`%${filter.q}%`); conds.push(`(name ILIKE $${params.length} OR email::text ILIKE $${params.length} OR phone ILIKE $${params.length})`); }
-    // Flag filters — same definitions as the list's buildLeadWhere, so
-    // "reassign everything in this view" moves exactly the rows the view
-    // showed. Note this block runs against the `leads` table unaliased.
-    if (filter?.flag === 'unassigned') { conds.push(`assigned_to IS NULL`); }
-    if (filter?.flag === 'fresh') { conds.push(`created_at >= now() - interval '24 hours'`); }
-    if (filter?.flag === 'untouched') {
-      conds.push(`assigned_to IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM lead_activities a WHERE a.lead_id = leads.id
-          AND a.type NOT IN ('lead_created','assigned','reassign','auto_assign','refer')
-      )`);
-    }
-    if (filter?.flag === 'dormant') {
-      conds.push(`EXISTS (
-        SELECT 1 FROM lead_stages s
-         WHERE s.id = leads.stage_id AND s.is_terminal = true AND s.is_success = false
-      )`);
-    }
-    if (scope && scope.user_ids) {
-      params.push(scope.user_ids);
-      const userIdsIdx = params.length;
-      if (scope.include_unassigned_team_id) {
-        params.push(scope.include_unassigned_team_id);
-        const teamIdx = params.length;
-        conds.push(`(assigned_to = ANY($${userIdsIdx}::uuid[]) OR (assigned_to IS NULL AND team_id = $${teamIdx}))`);
-      } else {
-        conds.push(`assigned_to = ANY($${userIdsIdx}::uuid[])`);
-      }
-    }
-    if (scope && scope.converted_only) { conds.push(`converted_at IS NOT NULL`); }
-    const r = await client.query(`SELECT id FROM leads WHERE ${conds.join(' AND ')}`, params);
+    const { where, params } = buildBulkTargetWhere(filter, scope);
+    const r = await client.query(`SELECT id FROM leads WHERE ${where}`, params);
     ids = r.rows.map((x) => x.id);
   }
   if (!ids.length) return { affected: 0, ids: [] };
@@ -1569,15 +1577,25 @@ export const bulkAssign = async (tenant, { lead_ids, assigned_to, assigned_by, r
 // activity per lead, with clock_timestamp() so rows in the same batch order
 // deterministically instead of tying on a frozen now().
 export const distributeLeads = async (tenant, {
-  lead_ids, assignee_ids, assigned_by, reason,
+  lead_ids, filter, scope, assignee_ids, assigned_by, reason,
 }) => tenantTx(tenant, async (client) => {
-  if (!lead_ids?.length || !assignee_ids?.length) return { affected: 0, per_assignee: {} };
+  if (!assignee_ids?.length) return { affected: 0, per_assignee: {} };
+  if (!lead_ids?.length && !filter) return { affected: 0, per_assignee: {} };
 
   // Snapshot current owners so we can record from_user_id and skip no-ops.
-  const priorRes = await client.query(
-    `SELECT id, assigned_to FROM leads WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL ORDER BY created_at`,
-    [lead_ids],
-  );
+  // Either an explicit selection, or everything matching the filter — the
+  // same WHERE bulkAssign uses, so "all leads in this view" means the same
+  // thing whichever action you reach for. Ordered by created_at so the deal
+  // below spreads each assignee's share across the whole age range.
+  const priorRes = lead_ids?.length
+    ? await client.query(
+      `SELECT id, assigned_to FROM leads WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL ORDER BY created_at`,
+      [lead_ids],
+    )
+    : await (async () => {
+      const { where, params } = buildBulkTargetWhere(filter, scope);
+      return client.query(`SELECT id, assigned_to FROM leads WHERE ${where} ORDER BY created_at`, params);
+    })();
   if (!priorRes.rows.length) return { affected: 0, per_assignee: {} };
 
   // Resolve each assignee's manager + branch once; both are snapshotted onto
