@@ -77,10 +77,16 @@ const buildLeadConds = (q, scope, leadAlias = '') => {
   }
   // Branch scope (branch_manager, or super_admin via the branch switcher). A
   // null branch_id means "no branch" → match nothing rather than leak.
+  //
+  // An UNASSIGNED lead is included alongside the branch's own. leads.branch_id
+  // is snapshotted from the assignee, so a lead nobody owns yet can never
+  // carry one — and the unassigned queue is precisely what a branch manager
+  // needs to see in order to get it routed. Excluding it made the "Unassigned
+  // leads" KPI permanently read 0 for the one role meant to act on it.
   if (scope && Object.prototype.hasOwnProperty.call(scope, 'branch_id')) {
     if (scope.branch_id) {
       params.push(scope.branch_id);
-      conds.push(`${a}branch_id = $${params.length}`);
+      conds.push(`(${a}branch_id = $${params.length} OR (${a}branch_id IS NULL AND ${a}assigned_to IS NULL))`);
     } else {
       conds.push('false');
     }

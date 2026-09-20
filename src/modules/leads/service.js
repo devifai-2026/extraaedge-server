@@ -159,10 +159,16 @@ export const getLead = async (tenant, actor, id) => {
     if (scope.converted_only && !row.converted_at) {
       throw forbidden('Lead not in your scope');
     }
-    // branch_manager: the lead must belong to their branch.
-    if (Object.prototype.hasOwnProperty.call(scope, 'branch_id')
-        && (!scope.branch_id || row.branch_id !== scope.branch_id)) {
-      throw forbidden('Lead not in your scope');
+    // branch_manager: the lead must belong to their branch, or be unassigned.
+    // An unassigned lead carries no branch_id (it is snapshotted from the
+    // assignee), and routing it is the branch manager's job — so opening one
+    // from the unassigned queue must work. Matches the list/analytics rule.
+    if (Object.prototype.hasOwnProperty.call(scope, 'branch_id')) {
+      const inBranch = scope.branch_id && row.branch_id === scope.branch_id;
+      const unrouted = row.branch_id === null && row.assigned_to === null;
+      if (!scope.branch_id || (!inBranch && !unrouted)) {
+        throw forbidden('Lead not in your scope');
+      }
     }
     if (scope.user_ids && !scope.user_ids.includes(row.assigned_to) && row.assigned_to !== null) {
       if (actor.role !== SYSTEM_TENANT_ROLES.SUPER_ADMIN) throw forbidden('Lead not in your scope');

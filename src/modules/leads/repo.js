@@ -1140,13 +1140,17 @@ const buildLeadWhere = (opts, scope, { includeFlag = true } = {}) => {
       conds.push(`l.assigned_to = ANY($${userIdsIdx}::uuid[])`);
     }
   }
-  // branch_manager scope: every lead in their branch. A null branch_id means
-  // the manager isn't assigned to any branch yet — scope to nothing rather
-  // than leaking the whole tenant.
+  // branch_manager scope: every lead in their branch, PLUS the unassigned
+  // queue. A lead's branch_id is snapshotted from its assignee, so a lead
+  // nobody owns yet carries none — and routing those is the branch manager's
+  // job, so they must be visible. Kept identical to the analytics dashboard's
+  // rule (analytics/routes.js buildLeadConds) so the KPI count and this list
+  // never disagree. A null branch_id on the MANAGER still means they aren't
+  // assigned to a branch — scope to nothing rather than leaking the tenant.
   if (scope && Object.prototype.hasOwnProperty.call(scope, 'branch_id')) {
     if (scope.branch_id) {
       params.push(scope.branch_id);
-      conds.push(`l.branch_id = $${params.length}`);
+      conds.push(`(l.branch_id = $${params.length} OR (l.branch_id IS NULL AND l.assigned_to IS NULL))`);
     } else {
       conds.push('false');
     }
