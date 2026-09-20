@@ -19,10 +19,17 @@ import { unitsFor, workingDays } from './units.js';
 // NOT ADMIN_TIER_ROLES: that set includes branch_manager, and salary is money.
 // A branch manager approves registration amounts and nothing else — they keep
 // their own payslip (handled by the self-service path below), but the whole
-// org's salaries are for super_admin and the HR lead.
+// org's salaries are for super_admin and the HR side.
+//
+// hr_recruiter is included because payroll management is part of that role's
+// brief (recruitment & staffing: hire, onboard, then run their leave and pay).
+// Computing a run is not the same as paying it — DISBURSE_ROLES below stays
+// super_admin only, so the person who prepares payroll still cannot release
+// the money.
 export const PAYROLL_ADMIN_ROLES = [
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   LMS_TENANT_ROLES.HR_TEAM_LEAD,
+  LMS_TENANT_ROLES.HR_RECRUITER,
 ];
 // Who may release money. Narrower on purpose — the person who computes a run
 // must not also be the person who pays it.

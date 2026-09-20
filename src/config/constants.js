@@ -426,12 +426,15 @@ export const LMS_TENANT_ROLES = Object.freeze({
 // still blocked from admin-tier accounts by assertHrScope — this constant only
 // says "may reach the user-management endpoints at all".
 //
-// hr_recruiter is deliberately NOT here: a recruiter runs the hiring pipeline
-// and hands a completed onboarding to HR, but must not be able to mint a login
-// on their own.
+// hr_recruiter IS here: "staff onboarded" is part of the role's brief, and a
+// recruiter who cannot create the account for someone they just hired has to
+// hand the last step to someone else. They remain blocked from admin-tier
+// accounts by assertHrScope — this constant only says "may reach the
+// user-management endpoints at all", not "may create a super_admin".
 export const STAFF_ADMIN_ROLES = Object.freeze([
   ...ADMIN_TIER_ROLES,
   LMS_TENANT_ROLES.HR_TEAM_LEAD,
+  LMS_TENANT_ROLES.HR_RECRUITER,
 ]);
 
 
@@ -551,8 +554,18 @@ export const QA_TAB_KEYS = Object.freeze(['qa.reviews', 'qa.feedback']);
 export const HR_TEAM_LEAD_TAB_KEYS = Object.freeze([
   ...HR_TAB_KEYS, ...PLACEMENT_TAB_KEYS, 'lms.analytics',
 ]);
-// Recruiter works the hiring side only. No placement, no analytics.
-export const HR_RECRUITER_TAB_KEYS = Object.freeze([...HR_TAB_KEYS]);
+// Recruiter owns recruitment AND staffing: hiring pipeline, onboarding the
+// people they hire, then the leave and payroll admin for that workforce.
+// No placement (that is the placement officer's) and no LMS analytics.
+export const HR_RECRUITER_TAB_KEYS = Object.freeze([
+  ...HR_TAB_KEYS,
+  // Leave administration — approve/decline requests plus quotas and holidays.
+  'hr.leave_approvals', 'hr.leave_admin',
+  // Payroll administration. NOTE this exposes every employee's salary; it is
+  // granted because payroll management is explicitly part of this role.
+  // Releasing money is still separate — see DISBURSE_ROLES in payroll/service.
+  'payroll.runs', 'payroll.structures',
+]);
 // Placement officer runs companies/openings/applications and is the one who
 // assigns mock interviews, hence hr.interviews on top of the placement set.
 export const PLACEMENT_OFFICER_TAB_KEYS = Object.freeze([

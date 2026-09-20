@@ -19,8 +19,18 @@ import {
 const router = express.Router();
 router.use(authRequired, tenantRequired);
 
-const APPROVER_ROLES = [...MANAGER_TIER_ROLES, LMS_TENANT_ROLES.HR, LMS_TENANT_ROLES.HR_TEAM_LEAD];
-const LEAVE_ADMIN = [...ADMIN_TIER_ROLES, LMS_TENANT_ROLES.HR_TEAM_LEAD];
+// hr_recruiter is an approver AND a leave admin: leave management is part of
+// the recruitment & staffing brief — they hire someone, onboard them, then run
+// that person's leave. Approving is still bounded by the approval chain built
+// from the applicant's own reporting line (see service.buildApprovalSteps), so
+// this grants reach, not a bypass.
+const APPROVER_ROLES = [
+  ...MANAGER_TIER_ROLES, LMS_TENANT_ROLES.HR,
+  LMS_TENANT_ROLES.HR_TEAM_LEAD, LMS_TENANT_ROLES.HR_RECRUITER,
+];
+const LEAVE_ADMIN = [
+  ...ADMIN_TIER_ROLES, LMS_TENANT_ROLES.HR_TEAM_LEAD, LMS_TENANT_ROLES.HR_RECRUITER,
+];
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD');
 const idParam = z.object({ id: z.string().uuid() });
