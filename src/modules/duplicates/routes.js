@@ -5,8 +5,8 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
-import { EVENT_TYPES, QUEUE_NAMES, MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
-import { notFound } from '../../lib/errors.js';
+import { EVENT_TYPES, QUEUE_NAMES, MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
+import { notFound, forbidden } from '../../lib/errors.js';
 import { findDuplicates } from '../leads/repo.js';
 import { publish } from '../../lib/queue.js';
 
@@ -23,15 +23,28 @@ const bulkSchema = z.object({
   rows: z.array(checkSchema).min(1).max(1000),
 });
 
-// Who may run a scan and merge. super_admin and branch_manager by decision —
-// merging is destructive to one of the two records, and a branch manager is
-// the person who actually knows whether two rows are the same human.
+// Who may run a scan and merge.
+//
+//   super_admin / branch_manager — the whole tenant / their whole branch.
+//   counsellor / telecaller      — ONLY duplicates where they own EVERY lead
+//                                  in the group.
+//
+// That last rule is the important one. A front-line user cleaning up their own
+// list is good; a front-line user merging someone else's lead into theirs is a
+// silent reassignment that the owner never sees. So a group is offered to them
+// only when every row in it is already theirs — then merging changes ownership
+// of nothing.
+//
 // branch_manager is READ-ONLY across the CRM (middleware/branchManagerReadOnly)
-// so the merge route is allowlisted there too, or this guard never runs.
+// so the merge routes are allowlisted there too, or this guard never runs.
 const DEDUPE_ROLES = [
   SYSTEM_TENANT_ROLES.SUPER_ADMIN,
   SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+  ...LEAD_OWNER_ROLES,
 ];
+
+// True when the caller only ever sees groups they own outright.
+const isOwnerScoped = (role) => LEAD_OWNER_ROLES.includes(role);
 
 // Scan modes. Contact matching is the reliable one; name matching is a
 // suggestion, because two real people genuinely share a name.
@@ -156,7 +169,7 @@ router.get('/scan', requireRole(...DEDUPE_ROLES), validate({ query: scanSchema }
     const { rows: leads } = await tenantQuery(
       req.tenant,
       `SELECT l.id, l.name, l.phone, l.whatsapp_number, l.email, l.created_at,
-              l.updated_at, l.converted_at,
+              l.updated_at, l.converted_at, l.assigned_to,
               s.name AS stage_name, u.name AS owner_name,
               (SELECT count(*)::int FROM lead_activities a WHERE a.lead_id = l.id) AS activity_count
          FROM leads l
@@ -166,13 +179,21 @@ router.get('/scan', requireRole(...DEDUPE_ROLES), validate({ query: scanSchema }
       [allIds],
     );
     const byId = new Map(leads.map((l) => [l.id, l]));
-    const data = groups.map((g) => ({
+    let data = groups.map((g) => ({
       match_value: g.match_value,
       leads: g.ids.map((id) => byId.get(id)).filter(Boolean)
         // Oldest first: the longest-worked record is usually the survivor, so
         // it should be the one pre-selected in the UI.
         .sort((a, b) => new Date(a.created_at) - new Date(b.created_at)),
     })).filter((g) => g.leads.length > 1);
+
+    // Front line: drop any group containing a lead they do not own. Merging a
+    // colleague's lead into your own is a silent reassignment — the other
+    // owner would simply find the lead gone. Requiring the WHOLE group means
+    // a merge here can never move a lead between people.
+    if (isOwnerScoped(req.user.role)) {
+      data = data.filter((g) => g.leads.every((l) => l.assigned_to === req.user.id));
+    }
 
     res.json({ data, meta: { mode, groups: data.length, requestId: req.id } });
   } catch (err) { next(err); }
@@ -189,9 +210,19 @@ router.post('/merge-many', requireRole(...DEDUPE_ROLES), validate({ body: mergeM
 
     const result = await tenantTx(req.tenant, async (client) => {
       const { rows: live } = await client.query(
-        `SELECT id FROM leads WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+        `SELECT id, assigned_to FROM leads WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
         [[survivor_id, ...losers]],
       );
+      // Enforce the ownership rule HERE, not just in the scan's filter: the
+      // scan only decides what is shown, and a hand-made request could name
+      // any two lead ids. A front-line user must own every lead involved,
+      // survivor included, so a merge can never move a lead between people.
+      if (isOwnerScoped(req.user.role)) {
+        const foreign = live.filter((r) => r.assigned_to !== req.user.id);
+        if (foreign.length) {
+          throw forbidden('You can only merge leads you own. Ask a manager to merge across owners.');
+        }
+      }
       const liveIds = new Set(live.map((r) => r.id));
       if (!liveIds.has(survivor_id)) throw notFound('The lead to keep no longer exists');
       const actual = losers.filter((id) => liveIds.has(id));
