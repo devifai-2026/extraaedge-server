@@ -6,7 +6,7 @@ import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { EVENT_TYPES, QUEUE_NAMES, MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
-import { notFound, forbidden } from '../../lib/errors.js';
+import { notFound, forbidden, conflict } from '../../lib/errors.js';
 import { findDuplicates } from '../leads/repo.js';
 import { publish } from '../../lib/queue.js';
 
@@ -228,6 +228,18 @@ router.post('/merge-many', requireRole(...DEDUPE_ROLES), validate({ body: mergeM
       const actual = losers.filter((id) => liveIds.has(id));
       if (!actual.length) throw notFound('Those leads are already merged or deleted');
 
+      // lead_assignments carries a partial unique index — one ACTIVE row per
+      // lead (one_active_assignment_per_lead). Both leads have one, so simply
+      // re-pointing the loser's row would put two active rows on the survivor
+      // and violate it. Close the losers' rows first: the survivor keeps its
+      // own current owner, and the loser's assignment becomes history, which
+      // is what a merge means anyway.
+      await client.query(
+        `UPDATE lead_assignments SET is_active = false, status = 'closed'
+          WHERE lead_id = ANY($1::uuid[]) AND is_active`,
+        [actual],
+      );
+
       const TRANSFERS = [
         'lead_activities', 'lead_notes', 'lead_followups', 'lead_assignments',
         'message_log', 'calls', 'lead_source_attributions', 'lead_touches',
@@ -256,8 +268,18 @@ router.post('/merge-many', requireRole(...DEDUPE_ROLES), validate({ body: mergeM
       );
       await client.query(`DELETE FROM lead_custom_values WHERE lead_id = ANY($1::uuid[])`, [actual]);
 
-      // Fill blanks on the survivor from the losers rather than discarding
-      // contact details: the whole reason these rows diverged is that one had
+      // Soft-delete the losers BEFORE copying their contact details up. The
+      // unique indexes on phone / whatsapp / email are partial — scoped to
+      // `deleted_at IS NULL` — so filling a blank on the survivor while the
+      // loser still holds that value live collides with itself. Retiring the
+      // loser first frees the value.
+      await client.query(
+        `UPDATE leads SET merged_into_id = $1, deleted_at = now() WHERE id = ANY($2::uuid[])`,
+        [survivor_id, actual],
+      );
+
+      // Now fill blanks on the survivor rather than discarding contact
+      // details: the whole reason these rows diverged is usually that one had
       // the number in phone and the other in whatsapp.
       await client.query(
         `UPDATE leads s SET
@@ -266,11 +288,6 @@ router.post('/merge-many', requireRole(...DEDUPE_ROLES), validate({ body: mergeM
            email            = COALESCE(s.email, m.email)
          FROM (SELECT * FROM leads WHERE id = ANY($2::uuid[]) ORDER BY created_at LIMIT 1) m
          WHERE s.id = $1`,
-        [survivor_id, actual],
-      );
-
-      await client.query(
-        `UPDATE leads SET merged_into_id = $1, deleted_at = now() WHERE id = ANY($2::uuid[])`,
         [survivor_id, actual],
       );
       await client.query(
@@ -283,7 +300,17 @@ router.post('/merge-many', requireRole(...DEDUPE_ROLES), validate({ body: mergeM
     });
 
     res.json({ data: result, meta: { requestId: req.id } });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // A unique-index collision here means the survivor cannot hold one of the
+    // loser's values. Surface it as something actionable rather than a bare
+    // 500 — the recruiter's next move is to pick the other lead as survivor.
+    if (err?.code === '23505') {
+      return next(conflict(
+        'These leads cannot be merged in this direction — try keeping the other one instead.',
+      ));
+    }
+    return next(err);
+  }
 });
 
 router.post('/:matchId/ignore', requireRole(...MANAGER_TIER_ROLES), validate({ params: z.object({ matchId: z.string().uuid() }) }), async (req, res, next) => {
