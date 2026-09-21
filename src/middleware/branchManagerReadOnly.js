@@ -54,6 +54,15 @@ const ALLOWED = [
   // branch manager able to SEE a lead but never contact them.
   { method: 'POST', re: /^\/leads\/[^/]+\/reveal-phone\/?$/ },
 
+  // Merging duplicate leads. Destructive to one record, but it is cleanup of
+  // data that is already wrong, and a branch manager is the person who knows
+  // whether two rows are the same human. The survivor keeps every activity,
+  // note and payment; the loser is soft-deleted with merged_into_id, so this
+  // is reversible in the data even though the UI does not offer an undo.
+  { method: 'POST', re: /^\/duplicates\/merge-many\/?$/ },
+  { method: 'POST', re: /^\/duplicates\/lead\/[^/]+\/merge\/?$/ },
+  { method: 'POST', re: /^\/duplicates\/[^/]+\/ignore\/?$/ },
+
   // ---- Bulk write -------------------------------------------------------
   // Bulk lead import: dry-run, commit, retry the rows that failed, and the
   // download/report helpers that are POST only because they take a body.

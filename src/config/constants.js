@@ -307,6 +307,10 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // counterweight that keeps them visible. Front line AND manager tiers: the
   // route scopes a lead owner to their own rows and a manager to their team's.
   'missed_leads',
+  // Duplicate lead finder + merge. super_admin and branch_manager: merging is
+  // destructive to one record, and a branch manager is the person who knows
+  // whether two rows are the same human.
+  'duplicates',
   // Unmatched call recordings uploaded from the mobile app whose number
   // matched no lead — counsellors review their own, managers see scope, and
   // can create a lead from the number.
@@ -525,6 +529,8 @@ export const BRANCH_MANAGER_TAB_KEYS = Object.freeze([
   'unmatched_recordings',
   'qa.feedback',
   'lms.analytics',
+  // Duplicate finder + merge — cleaning up the lead list is branch work.
+  'duplicates',
   // HR/placement oversight. Deliberately excludes payroll.* — salary is money.
   'hr.dashboard',
   'hr.interviews',

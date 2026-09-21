@@ -5,7 +5,7 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
-import { EVENT_TYPES, QUEUE_NAMES, MANAGER_TIER_ROLES } from '../../config/constants.js';
+import { EVENT_TYPES, QUEUE_NAMES, MANAGER_TIER_ROLES, SYSTEM_TENANT_ROLES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
 import { findDuplicates } from '../leads/repo.js';
 import { publish } from '../../lib/queue.js';
@@ -21,6 +21,31 @@ const checkSchema = z.object({
 
 const bulkSchema = z.object({
   rows: z.array(checkSchema).min(1).max(1000),
+});
+
+// Who may run a scan and merge. super_admin and branch_manager by decision —
+// merging is destructive to one of the two records, and a branch manager is
+// the person who actually knows whether two rows are the same human.
+// branch_manager is READ-ONLY across the CRM (middleware/branchManagerReadOnly)
+// so the merge route is allowlisted there too, or this guard never runs.
+const DEDUPE_ROLES = [
+  SYSTEM_TENANT_ROLES.SUPER_ADMIN,
+  SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+];
+
+// Scan modes. Contact matching is the reliable one; name matching is a
+// suggestion, because two real people genuinely share a name.
+const scanSchema = z.object({
+  mode: z.enum(['contact', 'name']).default('contact'),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+// Merge N leads into one survivor in a single transaction. The one-at-a-time
+// route below still exists for the review queue; this is for "I searched, I
+// ticked four rows, they are all the same person".
+const mergeManySchema = z.object({
+  survivor_id: z.string().uuid(),
+  merge_ids: z.array(z.string().uuid()).min(1).max(20),
 });
 
 const mergeSchema = z.object({
@@ -63,6 +88,170 @@ router.get('/', requireRole(...MANAGER_TIER_ROLES), async (req, res, next) => {
         LIMIT 500`,
     );
     res.json({ data: rows, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// On-demand scan. Groups live leads that look like the same person.
+//
+// CONTACT mode normalises phone AND whatsapp to their last 10 digits and keys
+// on the union of both columns. That crossover matters: the unique index only
+// covers `phone`, so a lead with the number in `whatsapp_number` and a NULL
+// phone never collides with one holding it in `phone`. That is exactly how the
+// Snehal Deshmukh pair got in — June row had whatsapp only, September row had
+// phone only.
+//
+// NAME mode is case- and space-insensitive and is explicitly a SUGGESTION:
+// two different people really can share a name, so these are never merged
+// without someone looking.
+router.get('/scan', requireRole(...DEDUPE_ROLES), validate({ query: scanSchema }), async (req, res, next) => {
+  try {
+    const { mode, limit } = req.query;
+    // Last 10 digits of either column, as one key per lead per number. A lead
+    // with the same number in both columns yields one key, not two.
+    const CONTACT_SQL = `
+      WITH keys AS (
+        SELECT id, right(regexp_replace(phone, '[^0-9]', '', 'g'), 10) AS k
+          FROM leads
+         WHERE deleted_at IS NULL AND phone IS NOT NULL
+           AND length(regexp_replace(phone, '[^0-9]', '', 'g')) >= 10
+        UNION
+        SELECT id, right(regexp_replace(whatsapp_number, '[^0-9]', '', 'g'), 10)
+          FROM leads
+         WHERE deleted_at IS NULL AND whatsapp_number IS NOT NULL
+           AND length(regexp_replace(whatsapp_number, '[^0-9]', '', 'g')) >= 10
+      ),
+      grouped AS (
+        SELECT k, array_agg(DISTINCT id) AS ids
+          FROM keys GROUP BY k HAVING count(DISTINCT id) > 1
+      )
+      SELECT k AS match_value, ids FROM grouped ORDER BY array_length(ids,1) DESC LIMIT $1`;
+
+    // Name matching needs guarding hard. On live data "unknown" alone groups
+    // 3,015 leads, "no name" another 122 — placeholders, not people, and
+    // offering them as one mergeable group would be actively dangerous.
+    //   • placeholders are excluded outright
+    //   • a single-word name is excluded: "sakshi" matches 20 unrelated people
+    //   • a group larger than 6 is excluded — at that size it is a common
+    //     name, not a duplicate, and nobody can verify it by eye anyway
+    const NAME_SQL = `
+      SELECT lower(regexp_replace(btrim(name), '\\s+', ' ', 'g')) AS match_value,
+             array_agg(id) AS ids
+        FROM leads
+       WHERE deleted_at IS NULL AND name IS NOT NULL AND btrim(name) <> ''
+         AND lower(btrim(name)) NOT IN ('unknown','no name','test','n/a','na','-','--')
+         AND position(' ' IN btrim(name)) > 0
+       GROUP BY 1
+      HAVING count(*) > 1 AND count(*) <= 6
+       ORDER BY count(*) DESC LIMIT $1`;
+
+    const { rows: groups } = await tenantQuery(
+      req.tenant, mode === 'name' ? NAME_SQL : CONTACT_SQL, [limit],
+    );
+    if (!groups.length) return res.json({ data: [], meta: { mode, requestId: req.id } });
+
+    // One follow-up query for every lead in every group, so the UI can show
+    // enough to decide without a request per row.
+    const allIds = [...new Set(groups.flatMap((g) => g.ids))];
+    const { rows: leads } = await tenantQuery(
+      req.tenant,
+      `SELECT l.id, l.name, l.phone, l.whatsapp_number, l.email, l.created_at,
+              l.updated_at, l.converted_at,
+              s.name AS stage_name, u.name AS owner_name,
+              (SELECT count(*)::int FROM lead_activities a WHERE a.lead_id = l.id) AS activity_count
+         FROM leads l
+         LEFT JOIN lead_stages s ON s.id = l.stage_id
+         LEFT JOIN users u ON u.id = l.assigned_to
+        WHERE l.id = ANY($1::uuid[])`,
+      [allIds],
+    );
+    const byId = new Map(leads.map((l) => [l.id, l]));
+    const data = groups.map((g) => ({
+      match_value: g.match_value,
+      leads: g.ids.map((id) => byId.get(id)).filter(Boolean)
+        // Oldest first: the longest-worked record is usually the survivor, so
+        // it should be the one pre-selected in the UI.
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at)),
+    })).filter((g) => g.leads.length > 1);
+
+    res.json({ data, meta: { mode, groups: data.length, requestId: req.id } });
+  } catch (err) { next(err); }
+});
+
+// Merge several leads into one survivor. Everything the single merge moves is
+// moved here too — it simply runs once per losing lead, in one transaction, so
+// a partial merge can never leave history split across both records.
+router.post('/merge-many', requireRole(...DEDUPE_ROLES), validate({ body: mergeManySchema }), async (req, res, next) => {
+  try {
+    const { survivor_id, merge_ids } = req.body;
+    const losers = merge_ids.filter((id) => id !== survivor_id);
+    if (!losers.length) throw notFound('Nothing to merge into that lead');
+
+    const result = await tenantTx(req.tenant, async (client) => {
+      const { rows: live } = await client.query(
+        `SELECT id FROM leads WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+        [[survivor_id, ...losers]],
+      );
+      const liveIds = new Set(live.map((r) => r.id));
+      if (!liveIds.has(survivor_id)) throw notFound('The lead to keep no longer exists');
+      const actual = losers.filter((id) => liveIds.has(id));
+      if (!actual.length) throw notFound('Those leads are already merged or deleted');
+
+      const TRANSFERS = [
+        'lead_activities', 'lead_notes', 'lead_followups', 'lead_assignments',
+        'message_log', 'calls', 'lead_source_attributions', 'lead_touches',
+        'payments', 'payment_links',
+      ];
+      for (const table of TRANSFERS) {
+        await client.query(
+          `UPDATE ${table} SET lead_id = $1 WHERE lead_id = ANY($2::uuid[])`,
+          [survivor_id, actual],
+        );
+      }
+      // Tags and custom values are keyed per lead, so they need conflict
+      // handling rather than a blind re-point. Survivor wins on conflict.
+      await client.query(
+        `INSERT INTO lead_tags (lead_id, tag_id, assigned_by, assigned_at)
+         SELECT $1, tag_id, assigned_by, assigned_at FROM lead_tags
+          WHERE lead_id = ANY($2::uuid[]) ON CONFLICT DO NOTHING`,
+        [survivor_id, actual],
+      );
+      await client.query(`DELETE FROM lead_tags WHERE lead_id = ANY($1::uuid[])`, [actual]);
+      await client.query(
+        `INSERT INTO lead_custom_values (lead_id, field_id, value, updated_at)
+         SELECT $1, field_id, value, updated_at FROM lead_custom_values
+          WHERE lead_id = ANY($2::uuid[]) ON CONFLICT (lead_id, field_id) DO NOTHING`,
+        [survivor_id, actual],
+      );
+      await client.query(`DELETE FROM lead_custom_values WHERE lead_id = ANY($1::uuid[])`, [actual]);
+
+      // Fill blanks on the survivor from the losers rather than discarding
+      // contact details: the whole reason these rows diverged is that one had
+      // the number in phone and the other in whatsapp.
+      await client.query(
+        `UPDATE leads s SET
+           phone            = COALESCE(s.phone, m.phone),
+           whatsapp_number  = COALESCE(s.whatsapp_number, m.whatsapp_number),
+           email            = COALESCE(s.email, m.email)
+         FROM (SELECT * FROM leads WHERE id = ANY($2::uuid[]) ORDER BY created_at LIMIT 1) m
+         WHERE s.id = $1`,
+        [survivor_id, actual],
+      );
+
+      await client.query(
+        `UPDATE leads SET merged_into_id = $1, deleted_at = now() WHERE id = ANY($2::uuid[])`,
+        [survivor_id, actual],
+      );
+      await client.query(
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json, created_at)
+         VALUES ($1,$2,'merge',$3,$4::jsonb, now())`,
+        [survivor_id, req.user.id, `Merged ${actual.length} duplicate lead(s) into this one`,
+          JSON.stringify({ merged_ids: actual })],
+      );
+      return { survivor_id, merged: actual.length };
+    });
+
+    res.json({ data: result, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });
 
