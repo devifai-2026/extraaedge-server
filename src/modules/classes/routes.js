@@ -10,12 +10,24 @@ import * as controller from './controller.js';
 const router = express.Router();
 const uuid = z.string().uuid();
 const idParam = z.object({ id: uuid });
+// options are only required for 'mcq' — true_false has them seeded server-side
+// and long_text has none, so the array is optional here and the service's
+// normaliseQuestionInput enforces the per-type rules.
 const questionBody = z.object({
   question: z.string().min(1).max(500),
-  options: z.array(z.string().max(200)).min(2).max(6),
+  question_type: z.enum(['mcq', 'true_false', 'long_text']).optional(),
+  options: z.array(z.string().max(200)).max(6).optional(),
   correct_index: z.number().int().min(0).optional().nullable(),
   source: z.enum(['bank', 'adhoc']).optional(),
   visible_minutes: z.number().int().min(1).max(120).optional(),
+});
+
+// A student sends EITHER option_index (choice kinds) or answer_text
+// (long_text); the service rejects the wrong one for the question's type.
+const answerBody = z.object({
+  question_id: uuid,
+  option_index: z.number().int().min(0).optional(),
+  answer_text: z.string().max(5000).optional(),
 });
 
 // ---- Student routes (student principal) — BEFORE the staff chain. ----
@@ -23,7 +35,7 @@ const s = express.Router();
 s.use(studentAuthRequired, tenantRequired);
 s.get('/my/classes', controller.studentClasses);
 s.get('/:id/open-questions', validate({ params: idParam }), controller.openQuestions);
-s.post('/:id/answer', validate({ params: idParam, body: z.object({ question_id: uuid, option_index: z.number().int().min(0) }) }), controller.answer);
+s.post('/:id/answer', validate({ params: idParam, body: answerBody }), controller.answer);
 s.post('/:id/pre-notify-absence', validate({ params: idParam, body: z.object({ reason: z.string().max(500).optional() }).optional() }), controller.preNotifyAbsence);
 s.post('/:id/join-mode', validate({ params: idParam, body: z.object({ join_mode: z.enum(['online', 'offline']), reason: z.string().max(500).optional() }) }), controller.setJoinMode);
 router.use('/student', s);
@@ -70,6 +82,13 @@ router.delete('/bank-question/:id', validate({ params: idParam }), controller.de
 // Fire question + attendance
 router.post('/:id/fire-question', validate({ params: idParam, body: questionBody }), controller.fireQuestion);
 router.get('/:id/questions', validate({ params: idParam }), controller.listQuestions);
+// Per-question results: who answered what, and who was right, by name.
+router.get('/:id/question-analytics', validate({ params: idParam }), controller.questionAnalytics);
+// Trainer grades one long_text answer (choice kinds are auto-graded).
+router.post('/:id/grade-answer', validate({
+  params: idParam,
+  body: z.object({ answer_id: uuid, is_correct: z.boolean() }),
+}), controller.gradeAnswer);
 router.get('/:id/attendance', validate({ params: idParam }), controller.attendanceTable);
 router.post('/:id/attendance/edit', validate({ params: idParam, body: z.object({ student_id: uuid, status: z.enum(['present', 'absent']) }) }), controller.editAttendance);
 

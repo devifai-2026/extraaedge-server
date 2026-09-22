@@ -46,6 +46,16 @@ export const fireQuestion = async (req, res, next) => {
 export const listQuestions = async (req, res, next) => {
   try { ok(res, req, await service.listQuestions(req.tenant, req.user, req.params.id)); } catch (e) { next(e); }
 };
+export const questionAnalytics = async (req, res, next) => {
+  try { ok(res, req, await service.questionAnalytics(req.tenant, req.user, req.params.id)); } catch (e) { next(e); }
+};
+export const gradeAnswer = async (req, res, next) => {
+  try {
+    ok(res, req, await service.gradeAnswer(
+      req.tenant, req.user, req.params.id, req.body.answer_id, req.body.is_correct,
+    ));
+  } catch (e) { next(e); }
+};
 export const attendanceTable = async (req, res, next) => {
   try { ok(res, req, await service.attendanceTable(req.tenant, req.user, req.params.id)); } catch (e) { next(e); }
 };
@@ -61,7 +71,12 @@ export const openQuestions = async (req, res, next) => {
   try { ok(res, req, await service.openQuestions(req.tenant, req.student.id, req.params.id)); } catch (e) { next(e); }
 };
 export const answer = async (req, res, next) => {
-  try { ok(res, req, await service.answer(req.tenant, req.student.id, req.params.id, req.body.question_id, req.body.option_index), 201); } catch (e) { next(e); }
+  try {
+    ok(res, req, await service.answer(
+      req.tenant, req.student.id, req.params.id,
+      req.body.question_id, req.body.option_index, req.body.answer_text,
+    ), 201);
+  } catch (e) { next(e); }
 };
 export const preNotifyAbsence = async (req, res, next) => {
   try { ok(res, req, await service.preNotifyAbsence(req.tenant, req.student.id, req.params.id, req.body?.reason ?? null)); } catch (e) { next(e); }

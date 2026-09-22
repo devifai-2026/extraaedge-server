@@ -238,17 +238,47 @@ export const listQuestions = async (tenant, classId) => {
 };
 
 // Student answers a fired question — only if still within the window.
-export const answerQuestion = async (tenant, questionId, studentId, optionIndex) => {
+export const questionById = async (tenant, questionId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO attendance_answers (question_id, student_id, option_index)
-     SELECT $1, $2, $3
+    `SELECT id, class_id, question, question_type, options, correct_index, closes_at
+       FROM attendance_questions WHERE id = $1`,
+    [questionId],
+  );
+  return rows[0] || null;
+};
+
+// A long_text answer carries no option, but option_index is NOT NULL — park a
+// sentinel there and keep the real answer in answer_text.
+export const LONG_TEXT_NO_OPTION = -1;
+
+export const answerQuestion = async (tenant, questionId, studentId, optionIndex, answerText = null) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO attendance_answers (question_id, student_id, option_index, answer_text)
+     SELECT $1, $2, $3, $4
       WHERE EXISTS (SELECT 1 FROM attendance_questions q WHERE q.id = $1 AND q.closes_at > now())
      ON CONFLICT (question_id, student_id) DO NOTHING
      RETURNING *`,
-    [questionId, studentId, optionIndex],
+    [questionId, studentId, optionIndex, answerText],
   );
   return rows[0] || null; // null => window closed or already answered
+};
+
+// Trainer's manual verdict on a long_text answer. Only long_text is gradable
+// this way — the choice kinds are settled by correct_index and must not be
+// overridable, or the analytics would disagree with itself.
+export const gradeAnswer = async (tenant, answerId, isCorrect, graderId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE attendance_answers a
+        SET is_correct_override = $2, graded_by = $3, graded_at = now()
+       FROM attendance_questions q
+      WHERE a.id = $1 AND q.id = a.question_id AND q.question_type = 'long_text'
+      RETURNING a.*`,
+    [answerId, isCorrect, graderId],
+  );
+  return rows[0] || null;
 };
 
 // ---------- Attendance computation ----------
@@ -305,6 +335,60 @@ export const attendanceTable = async (tenant, classId) => {
        LEFT JOIN users eu ON eu.id = att.edited_by
       WHERE c.id = $1
       ORDER BY s.name`,
+    [classId],
+  );
+  return rows;
+};
+
+// ---------- Question analytics (trainer) ----------
+// Every question fired in a class, each with the full roster of who answered
+// what and whether it was right — by student name, which is what the trainer
+// actually needs to act on.
+//
+// `verdict` is deliberately three-valued:
+//   correct | wrong | ungraded
+// 'ungraded' is a long_text answer the trainer hasn't reviewed yet, and a
+// choice answer on a question fired with no correct_index set (the pre-existing
+// rows, and any question the trainer chooses not to grade). Collapsing either
+// into 'wrong' would overstate how badly the class did.
+export const questionAnalytics = async (tenant, classId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT q.id, q.question, q.question_type, q.options, q.correct_index,
+            q.fired_at, q.closes_at, q.visible_minutes, q.source,
+            COALESCE(
+              (SELECT json_agg(x ORDER BY x.name)
+                 FROM (
+                   SELECT s.id AS student_id, s.name, a.id AS answer_id,
+                          a.option_index, a.answer_text, a.answered_at,
+                          a.is_correct_override,
+                          CASE
+                            WHEN q.question_type = 'long_text' THEN
+                              CASE WHEN a.is_correct_override IS NULL THEN 'ungraded'
+                                   WHEN a.is_correct_override THEN 'correct'
+                                   ELSE 'wrong' END
+                            WHEN q.correct_index IS NULL THEN 'ungraded'
+                            WHEN a.option_index = q.correct_index THEN 'correct'
+                            ELSE 'wrong'
+                          END AS verdict
+                     FROM attendance_answers a
+                     JOIN students s ON s.id = a.student_id AND s.deleted_at IS NULL
+                    WHERE a.question_id = q.id
+                 ) x),
+              '[]'::json) AS answers,
+            -- Students on the roster who never answered this one.
+            COALESCE(
+              (SELECT json_agg(json_build_object('student_id', s2.id, 'name', s2.name) ORDER BY s2.name)
+                 FROM classes c2
+                 JOIN batch_students bs2 ON bs2.batch_id = c2.batch_id AND bs2.deleted_at IS NULL
+                 JOIN students s2 ON s2.id = bs2.student_id AND s2.deleted_at IS NULL
+                WHERE c2.id = q.class_id
+                  AND NOT EXISTS (SELECT 1 FROM attendance_answers a2
+                                   WHERE a2.question_id = q.id AND a2.student_id = s2.id)),
+              '[]'::json) AS no_answer
+       FROM attendance_questions q
+      WHERE q.class_id = $1
+      ORDER BY q.fired_at`,
     [classId],
   );
   return rows;
