@@ -10,6 +10,7 @@ import { notFound, forbidden, validationError } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES, ADMIN_TIER_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 import { emitToBatch } from '../../lib/socket.js';
 import { notifyBatch } from '../student-notifications/service.js';
+import { logger } from '../../lib/logger.js';
 
 const isSuperAdmin = (actor) => actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN
   || actor?.role === SYSTEM_TENANT_ROLES.BRANCH_MANAGER;
@@ -61,6 +62,18 @@ export const markLifecycle = async (tenant, actor, id, action) => {
   const c = await assertClassAccess(tenant, id, actor);
   const row = await repo.markLifecycle(tenant, id, action, actor?.id);
   emitToBatch(tenant.id, c.batch_id, 'lms:class-state', { class_id: id, action });
+
+  // Tell the batch the class is open. The socket event above only reaches
+  // students with the portal already loaded; the notification is what shows up
+  // on the dashboard for everyone else.
+  if (action === 'class_started') {
+    notifyBatch(tenant, { batchId: c.batch_id }, {
+      type: 'class_started',
+      message: 'Your class has started — join now',
+      link: '/student/classes',
+      metadata: { class_id: id },
+    });
+  }
   return row;
 };
 
@@ -103,6 +116,18 @@ export const setCompletion = async (tenant, actor, id, { status, note, is_billab
   emitToBatch(tenant.id, c.batch_id, 'lms:class-state', {
     class_id: id, action: status === 'completed' ? 'class_ended' : 'class_not_conducted',
   });
+
+  // Completing the LAST class of a module completes the module, which is what
+  // the trainer performance report measures on-time delivery against. Failure
+  // here must not fail the class completion the trainer just made.
+  if (status === 'completed' && c.module_id) {
+    try {
+      await coursesRepo.autoCompleteModuleIfDone(tenant, c.module_id);
+    } catch (err) {
+      logger.warn({ tenantId: tenant.id, moduleId: c.module_id, err: err.message },
+        'module auto-completion failed');
+    }
+  }
   return row;
 };
 
@@ -161,9 +186,19 @@ export const normaliseQuestionInput = (input) => {
   return { ...input, question_type: type, options, correct_index: ci ?? null };
 };
 
+// A class that has ended is closed for business: no new questions, no answers,
+// no joining. Enforced HERE rather than only in the UI — hiding a button stops
+// an honest mistake, not a replayed request, and attendance is what payroll and
+// the performance report are computed from.
+const assertClassLive = (c, what) => {
+  if (c?.ended_at) throw validationError({ class: `This class has ended — ${what} is closed.` });
+  if (!c?.started_at) throw validationError({ class: `This class has not started yet — ${what} is not open.` });
+};
+
 // ---------- Fire question (live) ----------
 export const fireQuestion = async (tenant, actor, classId, input) => {
   const c = await assertClassAccess(tenant, classId, actor);
+  assertClassLive(c, 'firing questions');
   const q = await repo.fireQuestion(tenant, classId, normaliseQuestionInput(input), actor?.id);
   // Push to the batch room WITHOUT the correct answer — students receive the
   // question and its options only. correct_index never leaves the server here,
@@ -247,6 +282,12 @@ export const answer = async (tenant, studentId, classId, questionId, optionIndex
   const inBatch = await repo.studentInClassBatch(tenant, classId, studentId);
   if (!inBatch) throw forbidden('Not your class');
 
+  // A pending question dies with the class. Without this a student could
+  // answer inside the question's own window after the trainer had ended the
+  // class, and be marked present for a class they were absent from.
+  const cls = await repo.classBatchId(tenant, classId);
+  assertClassLive(cls, 'answering');
+
   // The payload has to match the question's kind: a long_text answer carries
   // text and no option, every other kind carries an option and no text.
   const q = await repo.questionById(tenant, questionId);
@@ -271,6 +312,20 @@ export const answer = async (tenant, studentId, classId, questionId, optionIndex
   // Nudge the trainer console to refresh its live table.
   if (c) emitToBatch(tenant.id, c.batch_id, 'lms:attendance-updated', { class_id: classId });
   return { ok: true };
+};
+
+// Student clicks through to the class. Only possible between the trainer
+// starting and ending it — which is what makes the portal button dynamic:
+// "Not started" -> "Join Class" -> "Rejoin" -> "Class ended".
+export const joinClass = async (tenant, studentId, classId) => {
+  const inBatch = await repo.studentInClassBatch(tenant, classId, studentId);
+  if (!inBatch) throw forbidden('Not your class');
+  const cls = await repo.classBatchId(tenant, classId);
+  assertClassLive(cls, 'joining');
+  const saved = await repo.recordJoin(tenant, classId, studentId);
+  // The trainer's live table shows who has actually turned up.
+  emitToBatch(tenant.id, cls.batch_id, 'lms:attendance-updated', { class_id: classId });
+  return { ...saved, meeting_url: cls.meeting_url };
 };
 
 export const preNotifyAbsence = async (tenant, studentId, classId, reason = null) => {

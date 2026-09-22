@@ -87,6 +87,18 @@ export const updateModule = async (tenant, actor, programId, moduleId, input) =>
   return row;
 };
 
+// Manual completion override — the trainer finished the syllabus early and
+// says so, rather than waiting for the last class to be marked. on_time is
+// judged from completed_at vs end_date either way.
+export const completeModule = async (tenant, actor, programId, moduleId, { note, reopen } = {}) => {
+  await assertCanManage(tenant, programId, actor);
+  const row = reopen
+    ? await repo.reopenModule(tenant, moduleId)
+    : await repo.completeModule(tenant, moduleId, actor?.id, note ?? null);
+  if (!row) throw notFound('Module not found');
+  return row;
+};
+
 export const deleteModule = async (tenant, actor, programId, moduleId) => {
   await assertCanManage(tenant, programId, actor);
   await repo.deleteModule(tenant, moduleId);

@@ -36,6 +36,9 @@ s.use(studentAuthRequired, tenantRequired);
 s.get('/my/classes', controller.studentClasses);
 s.get('/:id/open-questions', validate({ params: idParam }), controller.openQuestions);
 s.post('/:id/answer', validate({ params: idParam, body: answerBody }), controller.answer);
+// Records that the student actually opened the class; refused before the
+// trainer starts it and after they end it.
+s.post('/:id/join', validate({ params: idParam }), controller.joinClass);
 s.post('/:id/pre-notify-absence', validate({ params: idParam, body: z.object({ reason: z.string().max(500).optional() }).optional() }), controller.preNotifyAbsence);
 s.post('/:id/join-mode', validate({ params: idParam, body: z.object({ join_mode: z.enum(['online', 'offline']), reason: z.string().max(500).optional() }) }), controller.setJoinMode);
 router.use('/student', s);

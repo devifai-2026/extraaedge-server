@@ -94,6 +94,8 @@ import assessmentsRouter from './modules/assessments/routes.js';
 import interviewsRouter from './modules/interviews/routes.js';
 import catalogRouter from './modules/catalog/routes.js';
 import lmsAnalyticsRouter from './modules/lms-analytics/routes.js';
+import trainerPerformanceRouter from './modules/trainer-performance/routes.js';
+import lmsFeedbackRouter from './modules/lms-feedback/routes.js';
 import studentNotificationsRouter from './modules/student-notifications/routes.js';
 import learningRouter from './modules/learning/routes.js';
 import capstoneRouter from './modules/capstone/routes.js';
@@ -277,6 +279,10 @@ export const mountRoutes = (app) => {
   api.use('/catalog', catalogRouter);
   // LMS admin analytics dashboards + student sudo-login (super_admin/branch_mgr).
   api.use('/lms-analytics', lmsAnalyticsRouter);
+  // Module on-time delivery per trainer. Trainers see only their own rows.
+  api.use('/trainer-performance', trainerPerformanceRouter);
+  // End-of-class / end-of-module feedback (student principal).
+  api.use('/lms-feedback', lmsFeedbackRouter);
   // Student notifications feed (student principal; router self-gates).
   api.use('/student-notifications', studentNotificationsRouter);
   api.use('/learning', learningRouter);

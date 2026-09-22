@@ -446,7 +446,20 @@ export const studentClasses = async (tenant, studentId) => {
               WHEN att.pre_notified_absent THEN 'absent'              -- student said "can't attend"
               WHEN c.ended_at IS NOT NULL THEN COALESCE(att.status, 'absent') -- final once ended
               ELSE 'upcoming'                                         -- not ended yet → never auto-absent
-            END AS my_status, att.pre_notified_absent
+            END AS my_status, att.pre_notified_absent,
+            att.joined_at, att.join_count,
+            -- The portal's join button is driven entirely by these two, so the
+            -- rule lives in ONE place instead of being re-derived in the UI:
+            --   not started -> ended -> joined -> joinable
+            (c.started_at IS NOT NULL AND c.ended_at IS NULL) AS can_join,
+            -- Feedback is only asked of students who were actually present.
+            (c.ended_at IS NOT NULL
+             AND att.status = 'present'
+             AND NOT EXISTS (
+               SELECT 1 FROM lms_feedback f
+                WHERE f.scope = 'class' AND f.class_id = c.id
+                  AND f.student_id = bs.student_id AND f.submitted_at IS NOT NULL
+             )) AS feedback_due
        FROM batch_students bs
        JOIN classes c ON c.batch_id = bs.batch_id AND c.deleted_at IS NULL
        LEFT JOIN course_modules m ON m.id = c.module_id
@@ -484,7 +497,32 @@ export const studentInClassBatch = async (tenant, classId, studentId) => {
   return rows.length > 0;
 };
 
+// started_at/ended_at come along because every caller that guards on the class
+// lifecycle (fire a question, answer one, join) resolves the class through this.
 export const classBatchId = async (tenant, classId) => {
-  const { rows } = await tenantQuery(tenant, `SELECT batch_id, program_id FROM classes WHERE id = $1 AND deleted_at IS NULL`, [classId]);
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT batch_id, program_id, started_at, ended_at, meeting_url, mode
+       FROM classes WHERE id = $1 AND deleted_at IS NULL`,
+    [classId],
+  );
   return rows[0] || null;
+};
+
+// Student clicked through to the class. Recorded separately from join_mode
+// (which is the student DECLARING how they will attend) — this is proof they
+// actually opened it, and drives the Join/Rejoin button state.
+export const recordJoin = async (tenant, classId, studentId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO attendance (class_id, student_id, joined_at, join_count)
+     VALUES ($1,$2, now(), 1)
+     ON CONFLICT (class_id, student_id) DO UPDATE
+       SET joined_at = COALESCE(attendance.joined_at, now()),
+           join_count = attendance.join_count + 1,
+           updated_at = now()
+     RETURNING joined_at, join_count`,
+    [classId, studentId],
+  );
+  return rows[0];
 };

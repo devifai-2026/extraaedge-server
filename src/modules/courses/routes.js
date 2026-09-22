@@ -49,14 +49,30 @@ router.get('/:programId', validate({ params: programParam }), controller.getCour
 
 // Modules
 router.get('/:programId/modules', validate({ params: programParam }), controller.listModules);
+// start_date/end_date are REQUIRED on create: the trainer performance report is
+// built on them, and a module with no deadline can never be judged late. Kept
+// optional on edit so an unrelated field can be patched without resending them.
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD');
 router.post('/:programId/modules', validate({ params: programParam, body: z.object({
   name: z.string().min(1).max(160), description: z.string().max(2000).optional(),
   order_index: z.number().int().optional(), syllabus: z.array(z.any()).optional(),
+  start_date: isoDate, end_date: isoDate,
+}).refine((b) => b.end_date >= b.start_date, {
+  message: 'End date cannot be before the start date', path: ['end_date'],
 }) }), controller.createModule);
 router.put('/:programId/modules/:moduleId', validate({ params: z.object({ programId: uuid, moduleId: uuid }), body: z.object({
   name: z.string().min(1).max(160).optional(), description: z.string().max(2000).optional(),
   order_index: z.number().int().optional(), syllabus: z.array(z.any()).optional(),
+  start_date: isoDate.optional(), end_date: isoDate.optional(),
+}).refine((b) => !b.start_date || !b.end_date || b.end_date >= b.start_date, {
+  message: 'End date cannot be before the start date', path: ['end_date'],
 }) }), controller.updateModule);
+// Mark a module complete (or reopen it). Auto-completion also happens when the
+// last class under the module is completed — see classes/service.setCompletion.
+router.post('/:programId/modules/:moduleId/complete', validate({
+  params: z.object({ programId: uuid, moduleId: uuid }),
+  body: z.object({ note: z.string().max(500).optional(), reopen: z.boolean().optional() }).optional(),
+}), controller.completeModule);
 router.delete('/:programId/modules/:moduleId', validate({ params: z.object({ programId: uuid, moduleId: uuid }) }), controller.deleteModule);
 
 // Attendance history (per-student summary across the course's classes)

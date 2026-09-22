@@ -81,10 +81,11 @@ export const listModules = async (tenant, programId) => {
 export const createModule = async (tenant, programId, input, actorId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO course_modules (program_id, name, description, order_index, syllabus, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    `INSERT INTO course_modules (program_id, name, description, order_index, syllabus,
+                                 start_date, end_date, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
     [programId, input.name, input.description ?? null, input.order_index ?? 0,
-     JSON.stringify(input.syllabus ?? []), actorId ?? null],
+     JSON.stringify(input.syllabus ?? []), input.start_date, input.end_date, actorId ?? null],
   );
   return rows[0];
 };
@@ -97,6 +98,8 @@ export const updateModule = async (tenant, moduleId, input) => {
   if (input.description !== undefined) add('description', input.description);
   if (input.order_index !== undefined) add('order_index', input.order_index);
   if (input.syllabus !== undefined) add('syllabus', input.syllabus, true);
+  if (input.start_date !== undefined) add('start_date', input.start_date);
+  if (input.end_date !== undefined) add('end_date', input.end_date);
   if (!sets.length) return null;
   params.push(moduleId);
   const { rows } = await tenantQuery(
@@ -636,4 +639,57 @@ export const leavesForProgram = async (tenant, programId) => {
     [programId],
   );
   return rows;
+};
+
+// ---------- Module completion ----------
+// Manual override: the trainer finished the syllabus early and says so. Sets
+// completed_at to now(), which the performance report compares against
+// end_date to decide on_time vs late.
+export const completeModule = async (tenant, moduleId, actorId, note = null) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE course_modules
+        SET completed_at = COALESCE(completed_at, now()),
+            completed_by = COALESCE(completed_by, $2),
+            completion_note = COALESCE($3, completion_note),
+            updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL
+      RETURNING *`,
+    [moduleId, actorId ?? null, note],
+  );
+  return rows[0] || null;
+};
+
+// Trainer changed their mind / marked the wrong module.
+export const reopenModule = async (tenant, moduleId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE course_modules
+        SET completed_at = NULL, completed_by = NULL, completion_note = NULL, updated_at = now()
+      WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+    [moduleId],
+  );
+  return rows[0] || null;
+};
+
+// Auto-completion: a module whose classes are ALL completed is done. Called
+// after a class completion is recorded. Only fills completed_at when it is
+// still NULL, so it can never overwrite a manual (earlier) completion.
+export const autoCompleteModuleIfDone = async (tenant, moduleId) => {
+  if (!moduleId) return null;
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE course_modules m
+        SET completed_at = now(), updated_at = now()
+      WHERE m.id = $1 AND m.deleted_at IS NULL AND m.completed_at IS NULL
+        AND EXISTS (SELECT 1 FROM classes c WHERE c.module_id = m.id AND c.deleted_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM classes c
+           WHERE c.module_id = m.id AND c.deleted_at IS NULL
+             AND c.completion_status IS DISTINCT FROM 'completed'
+        )
+      RETURNING *`,
+    [moduleId],
+  );
+  return rows[0] || null;
 };

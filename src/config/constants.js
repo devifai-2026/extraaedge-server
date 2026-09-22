@@ -369,6 +369,7 @@ export const DEFAULT_TAB_KEYS = Object.freeze([
   // a page in the trainer nav group; scoped server-side to the trainer's own
   // courses via course_trainers membership.
   'trainer.classes',
+  'trainer.performance',
   'trainer.attendance',
   'trainer.recordings',
   'trainer.announcements',
@@ -458,7 +459,7 @@ export const STAFF_ADMIN_ROLES = Object.freeze([
 // Tab bundles per LMS role — used by provisioning + the seed migration so the
 // grant list stays in one place.
 export const TRAINER_TAB_KEYS = Object.freeze([
-  'trainer.classes', 'trainer.attendance', 'trainer.recordings',
+  'trainer.classes', 'trainer.performance', 'trainer.attendance', 'trainer.recordings',
   'trainer.announcements', 'trainer.forum', 'trainer.tests',
   'trainer.projects', 'trainer.interviews', 'trainer.leaderboard',
   'trainer.materials',
