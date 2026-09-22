@@ -99,6 +99,16 @@ export const completeModule = async (tenant, actor, programId, moduleId, { note,
   return row;
 };
 
+export const updateBatch = async (tenant, actor, programId, batchId, input) => {
+  await assertCanManage(tenant, programId, actor);
+  if (input.start_date && input.end_date && input.end_date < input.start_date) {
+    throw validationError({ end_date: 'End date cannot be before the start date' });
+  }
+  const row = await repo.updateBatch(tenant, batchId, input);
+  if (!row) throw notFound('Batch not found');
+  return row;
+};
+
 export const deleteModule = async (tenant, actor, programId, moduleId) => {
   await assertCanManage(tenant, programId, actor);
   await repo.deleteModule(tenant, moduleId);

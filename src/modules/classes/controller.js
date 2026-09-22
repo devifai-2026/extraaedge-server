@@ -24,6 +24,9 @@ export const markLifecycle = async (req, res, next) => {
 export const setCompletion = async (req, res, next) => {
   try { ok(res, req, await service.setCompletion(req.tenant, req.user, req.params.id, req.body)); } catch (e) { next(e); }
 };
+export const unendedClasses = async (req, res, next) => {
+  try { ok(res, req, await service.unendedClasses(req.tenant, req.user)); } catch (e) { next(e); }
+};
 export const pendingCompletions = async (req, res, next) => {
   try { ok(res, req, await service.pendingCompletions(req.tenant, req.user)); } catch (e) { next(e); }
 };

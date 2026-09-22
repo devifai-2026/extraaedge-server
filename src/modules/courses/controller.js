@@ -23,6 +23,9 @@ export const updateModule = async (req, res, next) => {
 export const completeModule = async (req, res, next) => {
   try { ok(res, req, await service.completeModule(req.tenant, req.user, req.params.programId, req.params.moduleId, req.body || {})); } catch (e) { next(e); }
 };
+export const updateBatch = async (req, res, next) => {
+  try { ok(res, req, await service.updateBatch(req.tenant, req.user, req.params.programId, req.params.batchId, req.body || {})); } catch (e) { next(e); }
+};
 export const deleteModule = async (req, res, next) => {
   try { await service.deleteModule(req.tenant, req.user, req.params.programId, req.params.moduleId); res.status(204).end(); } catch (e) { next(e); }
 };

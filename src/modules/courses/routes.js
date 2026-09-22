@@ -93,8 +93,24 @@ router.post('/:programId/create-trainer', validate({ params: programParam, body:
 // Batches
 router.get('/:programId/batches', validate({ params: programParam }), controller.listBatches);
 router.post('/:programId/batches', validate({ params: programParam, body: z.object({
-  name: z.string().min(1).max(120), start_date: z.string().optional().nullable(), end_date: z.string().optional().nullable(),
+  name: z.string().min(1).max(120),
+  start_date: isoDate.optional().nullable(), end_date: isoDate.optional().nullable(),
+}).refine((b) => !b.start_date || !b.end_date || b.end_date >= b.start_date, {
+  message: 'End date cannot be before the start date', path: ['end_date'],
 }) }), controller.createBatch);
+// Edit a batch's name / schedule. Dates drive the batch progress bar and the
+// "X weeks" label; both are optional so a batch can be created before its
+// schedule is known and dated later.
+router.put('/:programId/batches/:batchId', validate({
+  params: z.object({ programId: uuid, batchId: uuid }),
+  body: z.object({
+    name: z.string().min(1).max(120).optional(),
+    start_date: isoDate.nullable().optional(),
+    end_date: isoDate.nullable().optional(),
+  }).refine((b) => !b.start_date || !b.end_date || b.end_date >= b.start_date, {
+    message: 'End date cannot be before the start date', path: ['end_date'],
+  }),
+}), controller.updateBatch);
 router.get('/:programId/batches/:batchId/students', validate({ params: z.object({ programId: uuid, batchId: uuid }) }), controller.listBatchStudents);
 router.get('/:programId/unassigned-students', validate({ params: programParam }), controller.listUnassignedStudents);
 router.post('/:programId/batches/place', validate({ params: programParam, body: z.object({

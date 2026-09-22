@@ -374,7 +374,13 @@ export const listBatches = async (tenant, programId) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT b.id, b.name, b.start_date, b.end_date, b.status, b.merged_into_batch_id,
-            (SELECT count(*)::int FROM batch_students bs WHERE bs.batch_id = b.id AND bs.deleted_at IS NULL) AS student_count
+            (SELECT count(*)::int FROM batch_students bs WHERE bs.batch_id = b.id AND bs.deleted_at IS NULL) AS student_count,
+            -- Delivery progress: classes actually completed vs scheduled. The
+            -- UI also shows elapsed-time progress from the dates, but that only
+            -- measures the calendar, not whether teaching kept up with it.
+            (SELECT count(*)::int FROM classes c WHERE c.batch_id = b.id AND c.deleted_at IS NULL) AS classes_planned,
+            (SELECT count(*)::int FROM classes c WHERE c.batch_id = b.id AND c.deleted_at IS NULL
+               AND c.completion_status = 'completed') AS classes_completed
        FROM batches b
       WHERE b.program_id = $1 AND b.deleted_at IS NULL
       ORDER BY b.status = 'merged', b.created_at DESC`,
@@ -690,6 +696,26 @@ export const autoCompleteModuleIfDone = async (tenant, moduleId) => {
         )
       RETURNING *`,
     [moduleId],
+  );
+  return rows[0] || null;
+};
+
+// Edit a batch's name / schedule. Dates are what the batch progress bar and the
+// "X weeks" label are computed from.
+export const updateBatch = async (tenant, batchId, input) => {
+  const sets = [];
+  const params = [];
+  const add = (col, val) => { params.push(val); sets.push(`${col} = $${params.length}`); };
+  if (input.name !== undefined) add('name', input.name);
+  if (input.start_date !== undefined) add('start_date', input.start_date || null);
+  if (input.end_date !== undefined) add('end_date', input.end_date || null);
+  if (!sets.length) return null;
+  params.push(batchId);
+  const { rows } = await tenantQuery(
+    tenant,
+    `UPDATE batches SET ${sets.join(', ')}, updated_at = now()
+      WHERE id = $${params.length} AND deleted_at IS NULL RETURNING *`,
+    params,
   );
   return rows[0] || null;
 };

@@ -52,6 +52,8 @@ router.use(authRequired, tenantRequired, requireRole(
 router.get('/', controller.listClasses);
 // Literal path, declared before any ':id' route so it is not matched as an id.
 router.get('/pending-completions', controller.pendingCompletions);
+// Started but never ended, past their finish time — drives the nag modal.
+router.get('/unended', controller.unendedClasses);
 router.post('/', validate({ body: z.object({
   program_id: uuid, module_id: uuid.nullable().optional(), batch_id: uuid, trainer_id: uuid.nullable().optional(),
   title: z.string().min(1).max(200), kind: z.enum(['lecture', 'mock_test', 'demo']).optional(),

@@ -112,6 +112,40 @@ export const setCompletion = async (tenant, classId, { status, note, billable, a
   return rows[0] ?? null;
 };
 
+// Classes the trainer STARTED and never ended, past their scheduled finish.
+//
+// This is the nag list. Ending a class is what closes attendance, stops further
+// questions and feeds module completion, so a forgotten "End class" silently
+// holds all three open — and the trainer has no reason to notice, because from
+// their side the console just looks idle.
+//
+// Only started-but-not-ended classes qualify: one never started is a no-show,
+// which the completion flow already handles, and nagging about it would bury
+// the real cases.
+export const unendedClassesFor = async (tenant, { trainerId = null, limit = 20 } = {}) => {
+  const params = [limit];
+  let cond = '';
+  if (trainerId) { params.push(trainerId); cond = `AND c.trainer_id = $${params.length}`; }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT c.id, c.title, c.starts_at, c.ends_at, c.started_at, c.batch_id,
+            b.name AS batch_name, m.name AS module_name,
+            EXTRACT(EPOCH FROM (now() - c.ends_at))::bigint AS overdue_seconds
+       FROM classes c
+       LEFT JOIN batches b ON b.id = c.batch_id
+       LEFT JOIN course_modules m ON m.id = c.module_id
+      WHERE c.deleted_at IS NULL
+        AND c.started_at IS NOT NULL
+        AND c.ended_at IS NULL
+        AND c.ends_at < now()
+        ${cond}
+      ORDER BY c.ends_at
+      LIMIT $1`,
+    params,
+  );
+  return rows;
+};
+
 // A trainer's outstanding confirmations, newest deadline first. `trainerId`
 // null means the manager view: everyone's.
 export const pendingCompletionsFor = async (tenant, { trainerId = null, limit = 200 } = {}) => {

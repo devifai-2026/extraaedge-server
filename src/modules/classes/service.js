@@ -131,6 +131,13 @@ export const setCompletion = async (tenant, actor, id, { status, note, is_billab
   return row;
 };
 
+// Classes this trainer started and forgot to end. Managers see everyone's,
+// since an unended class blocks the module completion they are measured on.
+export const unendedClasses = async (tenant, actor) => {
+  const isManager = OVERRIDE_ROLES.includes(actor.role);
+  return repo.unendedClassesFor(tenant, { trainerId: isManager ? null : actor.id });
+};
+
 // The trainer's own worklist: what still needs confirming, and by when.
 export const pendingCompletions = async (tenant, actor) => {
   const isManager = OVERRIDE_ROLES.includes(actor.role);
