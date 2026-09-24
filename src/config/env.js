@@ -43,6 +43,13 @@ const schema = z.object({
         'https://extraaedge-admin.onrender.com',
         // Render-hosted product-owner (platform) portal.
         'https://extraaedge-product-owner.onrender.com',
+        // CloseFlow — the branded production domain for the admin app. Both
+        // apex and www: a browser sends whichever the user actually typed, and
+        // an origin missing from this list gets NO access-control-allow-origin
+        // header at all, which the browser reports as a CORS error with no
+        // server-side trace (the request is rejected before any handler runs).
+        'https://closeflow.in',
+        'https://www.closeflow.in',
       ].join(','),
     ),
   PUBLIC_TENANT_DOMAIN: stringNonEmpty.default('productivo.in'),
