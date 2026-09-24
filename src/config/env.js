@@ -263,7 +263,25 @@ export const normalizeOrigin = (s) => String(s ?? '')
                                 // last origin — the exact bug we hit)
   .trim();
 
-export const corsOrigins = () =>
-  env.CORS_ORIGINS.split(',')
-    .map(normalizeOrigin)
-    .filter(Boolean);
+// Origins that are ALWAYS allowed, whatever CORS_ORIGINS says.
+//
+// These are the product's own front ends. Putting them here rather than
+// relying on the deployment's env var removes a whole class of outage: the
+// live server spent an afternoon rejecting https://closeflow.in because its
+// .env held a pre-edit copy of the list, and nothing short of a cold restart
+// would pick the new value up. A front end we ship cannot be locked out by a
+// stale environment variable.
+//
+// Both apex and www: the browser sends whichever the user typed, and allowing
+// only one of the pair fails for half of them.
+const ALWAYS_ALLOWED_ORIGINS = [
+  'https://closeflow.in',
+  'https://www.closeflow.in',
+  'https://extraaedge-admin.onrender.com',
+  'https://extraaedge-product-owner.onrender.com',
+];
+
+export const corsOrigins = () => [...new Set([
+  ...env.CORS_ORIGINS.split(',').map(normalizeOrigin).filter(Boolean),
+  ...ALWAYS_ALLOWED_ORIGINS,
+])];
