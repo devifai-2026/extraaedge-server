@@ -26,6 +26,12 @@ export const authRequired = (req, _res, next) => {
       type: claims.type ?? 'access',
       permissions: claims.permissions ?? null,
       allowedTabs: claims.allowedTabs ?? null,
+      // Branch-manager "view as": the actor is STILL the branch manager (sub,
+      // role and allowedTabs are all theirs), and this claim only narrows
+      // which user's data the read paths show. See modules/view-as/service.js
+      // for why the role is deliberately not swapped to the target's.
+      viewAsUserId: claims.viewAsUserId ?? null,
+      viewAsSessionId: claims.viewAsSessionId ?? null,
     };
     if (req.user.type !== 'access') throw unauthenticated('Not an access token');
     next();

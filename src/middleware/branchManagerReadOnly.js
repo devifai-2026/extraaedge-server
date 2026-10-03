@@ -63,6 +63,55 @@ const ALLOWED = [
   { method: 'POST', re: /^\/duplicates\/lead\/[^/]+\/merge\/?$/ },
   { method: 'POST', re: /^\/duplicates\/[^/]+\/ignore\/?$/ },
 
+  // ---- Delegated administration (create + edit, never delete) -----------
+  // A branch manager runs a branch: they staff it, they shape the lead
+  // pipeline it works, and they schedule the batches it teaches. These three
+  // are the only authoring powers the role has, and each is create/update
+  // ONLY — DELETE stays with super_admin everywhere below, because removing a
+  // user, a stage or a batch destroys history that other branches share.
+  //
+  // Staff: create a user and edit one. The service layer already constrains a
+  // branch_manager actor hard (users/service.js):
+  //   • assertBranchManagerScope — the target must be inside their own branch
+  //     subtree, and the new reporting manager must be too;
+  //   • BRANCH_MANAGER_FORBIDDEN_ROLES — they cannot create, promote into or
+  //     edit a super_admin or another branch_manager, so this is not a
+  //     privilege-escalation path;
+  //   • resolveBranchId — a user created without a branch defaults to the
+  //     creator's own.
+  // Those guards were written for this role and were simply unreachable while
+  // the gate blocked the route. DELETE /users/:id is deliberately absent:
+  // offboarding is HR's, and a soft-deleted user takes their lead history off
+  // every report.
+  { method: 'POST', re: /^\/users\/?$/ },
+  { method: 'PUT', re: /^\/users\/[^/]+\/?$/ },
+
+  // Lead stages + sub-stages, and the rest of the dropdown catalogue behind
+  // the same routes (sources, statuses, lost reasons...). NOTE this is
+  // TENANT-WIDE, not branch-scoped — lead_stages has no branch column, so a
+  // stage a branch manager adds or renames appears for every branch in the
+  // tenant. That is accepted deliberately; if two branches ever need
+  // different pipelines, the table needs a branch_id before this entry can be
+  // made safe. Reorder is included because adding a stage without being able
+  // to place it in the funnel is not usable.
+  { method: 'POST', re: /^\/dropdowns\/[^/]+\/?$/ },
+  { method: 'POST', re: /^\/dropdowns\/[^/]+\/reorder\/?$/ },
+  { method: 'PUT', re: /^\/dropdowns\/[^/]+\/[^/]+\/?$/ },
+
+  // Batches (LMS classes): create one and edit its schedule/trainer. The
+  // lifecycle, attendance, question-bank and grading sub-routes are NOT here
+  // — those are the trainer's working surface, and a branch manager marking
+  // attendance or grading an answer would be authoring a student record.
+  { method: 'POST', re: /^\/classes\/?$/ },
+  { method: 'PUT', re: /^\/classes\/[^/]+\/?$/ },
+
+  // ---- View-as (read-only by construction) ------------------------------
+  // Starting/stopping a look at a staff member's screens. POST only because
+  // it writes the audit row that makes the look accountable; the token it
+  // returns still carries role: branch_manager, so this gate applies to
+  // everything done inside the session too. See modules/view-as/service.js.
+  { method: 'POST', re: /^\/view-as\/(start|stop)\/?$/ },
+
   // ---- Bulk write -------------------------------------------------------
   // Bulk lead import: dry-run, commit, retry the rows that failed, and the
   // download/report helpers that are POST only because they take a body.

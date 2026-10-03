@@ -16,8 +16,13 @@ tmp/
 .wwebjs_auth/
 .wwebjs_cache/
 
-# Stray lead-data exports (PII) — never commit
+# Stray lead-data exports (PII) — never commit.
+# Broadened from the single /merged-leads-review.csv entry: the diagnostic and
+# revert scripts in scripts/ each write their own CSV of lead names + owners
+# (sep21-revert*.csv, speedup-recovery.csv ...), and three of them were sitting
+# untracked in the repo root one `git add -A` away from a public remote.
 /merged-leads-review.csv
+/*.csv
 
 # incident recovery artifacts (contain lead data / one-off scripts)
 speedup-recovery.csv

@@ -552,8 +552,20 @@ export const BRANCH_MANAGER_TAB_KEYS = Object.freeze([
   // already withheld per-field (stripAdmissionMoney + the showFees gate), so
   // granting the route exposes no course money.
   'accounts.approvals',
-  // DELIBERATELY ABSENT — 'admissions.pipeline' (the branch manager has no
-  // use for a post-conversion pipeline; that is the accounts team's surface),
+  // The admissions pipeline. Granted so a branch manager can see what their
+  // branch converted — the read-back for the approvals they own. Money on
+  // these rows is withheld per-field, not by hiding the page: the list runs
+  // through stripMoney and the detail page through stripAdmissionMoney, which
+  // lets exactly the four registration_* figures through and empties
+  // fee_schedule, non-registration receipts and the fee offer's course_fees.
+  // Creating or editing an admission stays with the accounts team (acctRole
+  // on POST/PUT, and branchManagerReadOnly blocks it regardless).
+  'admissions.pipeline',
+  // Course + batch management. The branch manager schedules the batches their
+  // branch teaches, which is the authoring half of the create/edit grant in
+  // branchManagerReadOnly (POST/PUT /classes). Deleting a batch is not theirs.
+  'courses.manage',
+  // DELIBERATELY ABSENT —
   // the remaining accounts.* keys, 'payments',
   // and the whole payroll group ('payroll.runs',
   // 'payroll.structures', 'payroll.my_payslips'). These are the money

@@ -33,6 +33,15 @@ const computeScope = async (tenant, actor, query = {}) => {
   //                  owner. They handle post-conversion account work and
   //                  need visibility across the whole converted pipeline.
   if (!actor || !actor.id) return { user_ids: [] };
+  // Branch-manager "view as": narrow to the single user being looked at.
+  // Placed FIRST so it wins over the branch-wide rule below — the whole point
+  // of the session is to see one person's queue, not the branch's.
+  //
+  // This NARROWS and can never widen: view-as only ever issues a token for a
+  // target inside the actor's own branch subtree (view-as/service.js
+  // loadTargetInBranch), so the single id here was already inside the
+  // branch_id scope this replaces.
+  if (actor.viewAsUserId) return { user_ids: [actor.viewAsUserId] };
   if (actor.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
     return query.branch_id ? { branch_id: query.branch_id } : null;
   }

@@ -5,11 +5,15 @@ import { unauthenticated } from './errors.js';
 const accessTtlSec = () => env.JWT_ACCESS_TTL_MINUTES * 60;
 const refreshTtlSec = () => env.JWT_REFRESH_TTL_DAYS * 24 * 60 * 60;
 
-export const signAccessToken = (payload) =>
+// `ttlSeconds` overrides the tenant-wide access TTL for tokens that must be
+// shorter-lived than a normal login — currently the branch manager's view-as
+// session, which is a 30-minute look rather than a session. Omit it and the
+// configured TTL applies, which is what every ordinary login does.
+export const signAccessToken = (payload, { ttlSeconds } = {}) =>
   jwt.sign(payload, env.JWT_SECRET, {
     algorithm: 'HS256',
     issuer: env.JWT_ISSUER,
-    expiresIn: accessTtlSec(),
+    expiresIn: ttlSeconds ?? accessTtlSec(),
   });
 
 export const signRefreshToken = (payload) =>

@@ -103,6 +103,7 @@ import homeworkRouter from './modules/homework/routes.js';
 import placementRouter from './modules/placement/routes.js';
 import hiringRouter from './modules/hiring/routes.js';
 import leadFeeOffersRouter from './modules/lead-fee-offers/routes.js';
+import viewAsRouter from './modules/view-as/routes.js';
 import paymentAccountsRouter from './modules/payment-accounts/routes.js';
 
 // ---- Pending modules (wired as these passes complete) ----
@@ -157,6 +158,8 @@ export const mountRoutes = (app) => {
 
   // Tenant — config
   api.use('/dropdowns', dropdownsRouter);
+  // Branch-manager "view as" — look at a staff member's screens read-only.
+  api.use('/view-as', viewAsRouter);
   api.use('/programs', programsRouter);
   api.use('/calendar', calendarRouter);
   api.use('/template-variables', templateVariablesRouter);
