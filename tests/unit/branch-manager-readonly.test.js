@@ -106,11 +106,26 @@ test('delegated admin — create and edit are allowed', () => {
   for (const [m, p] of ok) assert.ok(allows(m, p), `${m} ${p} should be allowed`);
 });
 
-test('delegated admin — DELETE is never granted', () => {
-  // Removing a user, a stage or a batch destroys history other branches share.
-  for (const p of ['/users/abc', '/dropdowns/stages/abc', '/courses/p1/batches/b1']) {
+test('delegated admin — DELETE stays blocked for users and stages', () => {
+  // Removing a user or a stage destroys history other branches share: a
+  // soft-deleted user takes their lead history off every report, and
+  // lead_stages is tenant-wide.
+  for (const p of ['/users/abc', '/dropdowns/stages/abc', '/dropdowns/sub-stages/abc']) {
     assert.equal(allows('DELETE', p), false, `DELETE ${p} must stay blocked`);
   }
+});
+
+test('deleting a BATCH is the one delete this role has', () => {
+  // Granted because the service makes it safe, not because the rule relaxed:
+  // service.deleteBatch refuses when the batch has students, classes,
+  // capstones, announcements, linked modules or merged batches pointing at it,
+  // and it is a soft delete. Only an empty batch — a typo or a mistaken
+  // create — can actually go.
+  assert.ok(allows('DELETE', '/courses/p1/batches/b1'));
+  // Still scoped to a batch: the course itself is not deletable from here.
+  assert.equal(allows('DELETE', '/courses/p1'), false, 'DELETE a course must stay blocked');
+  assert.equal(allows('DELETE', '/courses/p1/modules/m1'), false, 'DELETE a module must stay blocked');
+  assert.equal(allows('DELETE', '/courses/p1/trainers/t1'), false, 'DELETE a trainer must stay blocked');
 });
 
 test('batch grant does not leak the trainer working surface', () => {

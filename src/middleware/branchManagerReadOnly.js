@@ -114,10 +114,17 @@ const ALLOWED = [
   // student record — the per-student completion rows are written by the
   // trainer's own surfaces.
   { method: 'POST', re: /^\/courses\/[^/]+\/batches\/[^/]+\/complete\/?$/ },
+  // Deleting a batch. The ONE delete this role has, and it is granted because
+  // the service makes it safe rather than because the rule changed:
+  // service.deleteBatch refuses outright if the batch has students, classes,
+  // capstones, announcements, linked modules, or other batches merged into it
+  // — so only an EMPTY batch can go, which in practice means a typo or a
+  // mistaken create. It is also a SOFT delete (repo.softDeleteBatch), so the
+  // row survives and is recoverable. Compare users and stages below, where a
+  // delete destroys history other branches share and stays blocked.
+  { method: 'DELETE', re: /^\/courses\/[^/]+\/batches\/[^/]+\/?$/ },
   //
   // DELIBERATELY ABSENT:
-  //   DELETE /courses/:programId/batches/:batchId — deleting is not granted,
-  //     consistent with users and stages above.
   //   /classes/* — the trainer's working surface. A branch manager marking
   //     attendance, firing a question or grading an answer would be authoring
   //     a student record.
