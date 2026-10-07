@@ -98,12 +98,31 @@ const ALLOWED = [
   { method: 'POST', re: /^\/dropdowns\/[^/]+\/reorder\/?$/ },
   { method: 'PUT', re: /^\/dropdowns\/[^/]+\/[^/]+\/?$/ },
 
-  // Batches (LMS classes): create one and edit its schedule/trainer. The
-  // lifecycle, attendance, question-bank and grading sub-routes are NOT here
-  // — those are the trainer's working surface, and a branch manager marking
-  // attendance or grading an answer would be authoring a student record.
-  { method: 'POST', re: /^\/classes\/?$/ },
-  { method: 'PUT', re: /^\/classes\/[^/]+\/?$/ },
+  // Batches. These live under /courses/:programId/batches — NOT /classes,
+  // which is the live-session + attendance router (a scheduled session of a
+  // batch, the trainer's surface). An earlier version of this list allowlisted
+  // /classes by mistake, which granted nothing a branch manager actually uses
+  // and left every real batch action denied.
+  //
+  // Create a batch, rename it / set its schedule, place students into it, and
+  // merge two batches together:
+  { method: 'POST', re: /^\/courses\/[^/]+\/batches\/?$/ },
+  { method: 'PUT', re: /^\/courses\/[^/]+\/batches\/[^/]+\/?$/ },
+  { method: 'POST', re: /^\/courses\/[^/]+\/batches\/place\/?$/ },
+  { method: 'POST', re: /^\/courses\/[^/]+\/batches\/merge\/?$/ },
+  // Marking a batch finished is the end of the same scheduling job, not a
+  // student record — the per-student completion rows are written by the
+  // trainer's own surfaces.
+  { method: 'POST', re: /^\/courses\/[^/]+\/batches\/[^/]+\/complete\/?$/ },
+  //
+  // DELIBERATELY ABSENT:
+  //   DELETE /courses/:programId/batches/:batchId — deleting is not granted,
+  //     consistent with users and stages above.
+  //   /classes/* — the trainer's working surface. A branch manager marking
+  //     attendance, firing a question or grading an answer would be authoring
+  //     a student record.
+  //   /courses/:programId/modules, /trainers, /create-trainer — syllabus and
+  //     roster are the head trainer's, not branch scheduling.
 
   // ---- View-as (read-only by construction) ------------------------------
   // Starting/stopping a look at a staff member's screens. POST only because

@@ -98,28 +98,37 @@ test('delegated admin — create and edit are allowed', () => {
     ['POST', '/users'], ['PUT', '/users/abc-123'],
     ['POST', '/dropdowns/stages'], ['POST', '/dropdowns/sub-stages'],
     ['PUT', '/dropdowns/stages/abc-123'], ['POST', '/dropdowns/stages/reorder'],
-    ['POST', '/classes'], ['PUT', '/classes/abc-123'],
+    // Batches live under /courses/:programId/batches, NOT /classes.
+    ['POST', '/courses/p1/batches'], ['PUT', '/courses/p1/batches/b1'],
+    ['POST', '/courses/p1/batches/place'], ['POST', '/courses/p1/batches/merge'],
+    ['POST', '/courses/p1/batches/b1/complete'],
   ];
   for (const [m, p] of ok) assert.ok(allows(m, p), `${m} ${p} should be allowed`);
 });
 
 test('delegated admin — DELETE is never granted', () => {
   // Removing a user, a stage or a batch destroys history other branches share.
-  for (const p of ['/users/abc', '/dropdowns/stages/abc', '/classes/abc']) {
+  for (const p of ['/users/abc', '/dropdowns/stages/abc', '/courses/p1/batches/b1']) {
     assert.equal(allows('DELETE', p), false, `DELETE ${p} must stay blocked`);
   }
 });
 
 test('batch grant does not leak the trainer working surface', () => {
-  // POST /classes is scheduling. Attendance, grading, lifecycle and the
-  // question bank are the trainer's, and a branch manager marking attendance
-  // would be authoring a student record.
+  // Batch scheduling is /courses/:programId/batches. The ENTIRE /classes
+  // router is the trainer's surface (a class is a live session of a batch) —
+  // attendance, grading, lifecycle and the question bank. A branch manager
+  // marking attendance would be authoring a student record.
   const blocked = [
-    '/classes/abc/attendance/edit', '/classes/abc/grade-answer',
+    '/classes', '/classes/abc/attendance/edit', '/classes/abc/grade-answer',
     '/classes/abc/lifecycle', '/classes/abc/completion',
     '/classes/abc/fire-question', '/classes/bank/abc',
   ];
   for (const p of blocked) assert.equal(allows('POST', p), false, `POST ${p} must be blocked`);
+  assert.equal(allows('PUT', '/classes/abc'), false, 'PUT /classes/:id must be blocked');
+  // Syllabus and roster are the head trainer's, not branch scheduling.
+  for (const p of ['/courses/p1/modules', '/courses/p1/trainers', '/courses/p1/create-trainer']) {
+    assert.equal(allows('POST', p), false, `POST ${p} must be blocked`);
+  }
 });
 
 test('user grant does not leak the rest of the users module', () => {
