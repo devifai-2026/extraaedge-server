@@ -106,16 +106,39 @@ test('delegated admin — create and edit are allowed', () => {
   for (const [m, p] of ok) assert.ok(allows(m, p), `${m} ${p} should be allowed`);
 });
 
-test('delegated admin — DELETE stays blocked for users and stages', () => {
-  // Removing a user or a stage destroys history other branches share: a
-  // soft-deleted user takes their lead history off every report, and
-  // lead_stages is tenant-wide.
-  for (const p of ['/users/abc', '/dropdowns/stages/abc', '/dropdowns/sub-stages/abc']) {
-    assert.equal(allows('DELETE', p), false, `DELETE ${p} must stay blocked`);
+test('delegated admin — full CRUD, DELETE included', () => {
+  // The brief is full CRUD on users, stages and batches. Each delete has its
+  // own guardrail BELOW this gate, which is why granting them here is safe:
+  //   users     — assertBranchManagerScope (own branch subtree only, never an
+  //               admin or fellow branch manager), self-delete blocked, and a
+  //               handover flow that refuses to orphan live work.
+  //   stages    — leads.stage_id is ON DELETE RESTRICT, so Postgres refuses to
+  //               drop a stage any lead still sits on.
+  //   batches   — service.deleteBatch refuses when anything is attached.
+  for (const p of ['/users/abc', '/dropdowns/stages/abc', '/dropdowns/sub-stages/abc',
+    '/courses/p1/batches/b1']) {
+    assert.ok(allows('DELETE', p), `DELETE ${p} should be allowed`);
   }
 });
 
-test('deleting a BATCH is the one delete this role has', () => {
+test('CRUD grant does not spill onto neighbouring routes', () => {
+  // The delete entries are anchored to one path segment. Nothing else under
+  // these modules opens up.
+  const blocked = [
+    ['DELETE', '/users'],                    // the collection, not a row
+    ['DELETE', '/dropdowns/stages'],         // the whole type
+    ['DELETE', '/courses/p1'],               // the course itself
+    ['DELETE', '/courses/p1/modules/m1'],
+    ['DELETE', '/courses/p1/trainers/t1'],
+    ['DELETE', '/leads/abc'],
+    ['DELETE', '/admissions/abc'],
+    ['DELETE', '/classes/abc'],
+    ['DELETE', '/branches/abc'],             // branches are super_admin's
+  ];
+  for (const [m, p] of blocked) assert.equal(allows(m, p), false, `${m} ${p} must stay blocked`);
+});
+
+test('batch delete is scoped to a batch', () => {
   // Granted because the service makes it safe, not because the rule relaxed:
   // service.deleteBatch refuses when the batch has students, classes,
   // capstones, announcements, linked modules or merged batches pointing at it,

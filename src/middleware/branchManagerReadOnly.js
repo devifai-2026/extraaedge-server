@@ -85,6 +85,12 @@ const ALLOWED = [
   // every report.
   { method: 'POST', re: /^\/users\/?$/ },
   { method: 'PUT', re: /^\/users\/[^/]+\/?$/ },
+  // DELETE soft-deletes the row, and assertBranchManagerScope applies to it
+  // exactly as it does to create/edit: the target must be inside the actor's
+  // own branch subtree, and a super_admin / branch_manager target is refused
+  // outright — so this is not a route to removing a peer or an admin. The
+  // route additionally blocks self-deletion.
+  { method: 'DELETE', re: /^\/users\/[^/]+\/?$/ },
 
   // Lead stages + sub-stages, and the rest of the dropdown catalogue behind
   // the same routes (sources, statuses, lost reasons...). NOTE this is
@@ -97,6 +103,22 @@ const ALLOWED = [
   { method: 'POST', re: /^\/dropdowns\/[^/]+\/?$/ },
   { method: 'POST', re: /^\/dropdowns\/[^/]+\/reorder\/?$/ },
   { method: 'PUT', re: /^\/dropdowns\/[^/]+\/[^/]+\/?$/ },
+  // Removing a stage/sub-stage/source. Tenant-wide like the rest of this
+  // group, and a HARD delete — repo.remove is a bare `DELETE FROM`, with no
+  // in-use check in the service.
+  //
+  // What stops it orphaning a lead is the SCHEMA, not application code:
+  // leads.stage_id is `REFERENCES lead_stages(id) ON DELETE RESTRICT`, so
+  // Postgres refuses to drop a stage any lead still sits on and the request
+  // surfaces as a 500/constraint error rather than silently destroying data.
+  // (leads.sub_stage_id is ON DELETE SET NULL, so removing a SUB-stage does
+  // succeed and quietly clears it off those leads — recoverable only by
+  // re-tagging them.)
+  //
+  // Granted because the ask was full CRUD on stages. If the constraint error
+  // ever needs to read as a friendly "move these leads first" message, that
+  // belongs in the dropdowns service, not here.
+  { method: 'DELETE', re: /^\/dropdowns\/[^/]+\/[^/]+\/?$/ },
 
   // Batches. These live under /courses/:programId/batches — NOT /classes,
   // which is the live-session + attendance router (a scheduled session of a
