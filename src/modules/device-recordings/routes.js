@@ -598,7 +598,10 @@ router.get('/:id/url', validate({ params: idParam }), async (req, res, next) => 
     );
     if (!rows[0]) throw notFound('Recording not found');
     await assertRecordingVisible(req, rows[0]);
-    const url = await getDownloadSignedUrl({ key: rows[0].r2_key, expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS });
+    // PLAYBACK ttl, not the general one: the browser streams this URL for the
+    // whole length of the call, so a 5-minute link stalls any recording longer
+    // than 5 minutes partway through.
+    const url = await getDownloadSignedUrl({ key: rows[0].r2_key, expiresIn: env.PLAYBACK_SIGNED_URL_TTL_SECONDS });
     res.json({ data: { url, file_name: rows[0].file_name }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });

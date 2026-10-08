@@ -103,7 +103,20 @@ const schema = z.object({
   GCS_KEY_FILE: z.string().optional().default(''),
   GCS_CREDENTIALS_JSON: z.string().optional().default(''),
   GCS_PUBLIC_BASE_URL: z.string().optional().default(''),
+  // Default TTL for a signed download URL. 5 minutes was too short for one
+  // caller in particular: a call recording is streamed by the browser's own
+  // <audio> element for as long as it plays, so a 16-minute call outlived its
+  // URL and the player stalled partway through with no error — it just stopped.
+  // Playback routes pass PLAYBACK_SIGNED_URL_TTL_SECONDS instead; this stays
+  // short for the one-shot fetches (avatars, receipts, attachments) where the
+  // URL is used immediately and a long-lived link is needless exposure.
   GCS_SIGNED_URL_TTL_SECONDS: intFrom(300),
+  // TTL for MEDIA PLAYBACK links, which must outlive the thing being played.
+  // 4 hours covers the longest recording in the system (69 min) many times
+  // over, including a reviewer who opens a call, walks away and comes back.
+  // The URL still grants read access only to one object, and the route that
+  // mints it authorises the caller first.
+  PLAYBACK_SIGNED_URL_TTL_SECONDS: intFrom(4 * 60 * 60),
 
   BREVO_API_KEY: apiOnly(stringNonEmpty),
   BREVO_SENDER_EMAIL: apiOnly(z.string().email()),

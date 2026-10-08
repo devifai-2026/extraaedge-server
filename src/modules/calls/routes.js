@@ -12,6 +12,7 @@ import { putObject, getDownloadSignedUrl, buildKey } from '../../lib/r2.js';
 import { nanoid } from 'nanoid';
 import { forbidden, notFound } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES, EVENT_TYPES, QUEUE_NAMES } from '../../config/constants.js';
+import { env } from '../../config/env.js';
 import { publish } from '../../lib/queue.js';
 
 const router = express.Router();
@@ -200,7 +201,14 @@ router.get('/:id/recording', validate({ params: idParam }), async (req, res, nex
   try {
     const { rows } = await tenantQuery(req.tenant, `SELECT recording_r2_key FROM calls WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]);
     if (!rows[0] || !rows[0].recording_r2_key) throw notFound('Recording not available');
-    const url = await getDownloadSignedUrl({ key: rows[0].recording_r2_key, downloadAs: `call-${req.params.id}.mp3` });
+    // PLAYBACK ttl — this URL is handed to an <audio> element, which streams it
+    // for the whole length of the call; the 5-minute default stalled anything
+    // longer than 5 minutes partway through.
+    const url = await getDownloadSignedUrl({
+      key: rows[0].recording_r2_key,
+      expiresIn: env.PLAYBACK_SIGNED_URL_TTL_SECONDS,
+      downloadAs: `call-${req.params.id}.mp3`,
+    });
     res.json({ data: { url }, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 });

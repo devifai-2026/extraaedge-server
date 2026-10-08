@@ -152,7 +152,9 @@ router.get('/:id/url', validate({ params: recordingIdParams }), async (req, res,
     if (!rows[0]) throw notFound('Recording not found');
     const url = await getDownloadSignedUrl({
       key: rows[0].r2_key,
-      expiresIn: env.GCS_SIGNED_URL_TTL_SECONDS,
+      // PLAYBACK ttl: the browser streams this for the whole call, so the
+      // 5-minute general TTL cut off anything longer than 5 minutes.
+      expiresIn: env.PLAYBACK_SIGNED_URL_TTL_SECONDS,
       // No `downloadAs` — we want the audio to stream inline, not download.
     });
     res.json({ data: { url, file_name: rows[0].file_name }, meta: { requestId: req.id } });
