@@ -178,8 +178,42 @@ const ALLOWED = [
   // Marking your own notifications read, and your own notification prefs.
   { method: 'POST', re: /^\/notifications\/(read-all|[^/]+\/read)\/?$/ },
   { method: 'PUT', re: /^\/notification-preferences\/?$/ },
-  // Their own leave requests + profile photo, same reasoning.
-  { method: 'POST', re: /^\/staff-leave\/(requests|my)\b/ },
+  // Your OWN profile: theme, avatar, and the phone number + its OTP exchange.
+  // Every one of these resolves the caller's own id server-side and cannot
+  // touch another user — /users/:id is the route that edits someone else, and
+  // it is allowlisted separately above with assertBranchManagerScope behind it.
+  //
+  // The phone pair is not cosmetic: Layout.jsx shows a BLOCKING phone-capture
+  // modal to any user without a number (so their mobile call recordings
+  // attribute to them). With these blocked, a branch manager in that state
+  // could not satisfy the gate and could not use the product at all.
+  { method: 'PUT', re: /^\/users\/me\/(theme|avatar|phone)\/?$/ },
+  { method: 'POST', re: /^\/users\/me\/phone\/(send-otp|verify-otp)\/?$/ },
+  // Leave.
+  //
+  // This entry used to read /^\/staff-leave\/(requests|my)\b/, which matched
+  // NO REAL ROUTE — there is no /staff-leave/requests and no /staff-leave/my
+  // POST. Applying for leave is a POST to the router ROOT, so a branch manager
+  // could not apply for their own leave at all, and could not approve anyone
+  // else's either. Written against the actual routes this time:
+  //
+  //   POST /staff-leave            apply for your own leave
+  //   POST /staff-leave/:id/cancel withdraw your own pending request
+  { method: 'POST', re: /^\/staff-leave\/?$/ },
+  { method: 'POST', re: /^\/staff-leave\/[^/]+\/cancel\/?$/ },
+  //   POST /staff-leave/:id/decide approve / decline someone else's
+  //
+  // Deciding is a genuine approval, which is the one shape of write this role
+  // is built around — it already sits in the route's own APPROVER_ROLES (via
+  // MANAGER_TIER_ROLES) and holds the hr.leave_approvals tab, so this
+  // middleware was the only thing standing in the way. A branch manager
+  // approving their branch's leave is the whole point of the tab.
+  { method: 'POST', re: /^\/staff-leave\/[^/]+\/decide\/?$/ },
+  //
+  // NOT granted: PUT /staff-leave/policies/:scope, POST /staff-leave/holidays
+  // and DELETE /staff-leave/holidays/:id — quotas, approval chains and the
+  // holiday calendar are tenant-wide configuration (LEAVE_ADMIN), not this
+  // branch's business, and the role does not hold hr.leave_admin.
   // Raising a support ticket about a problem they can see but not fix.
   { method: 'POST', re: /^\/tickets\/?$/ },
   { method: 'POST', re: /^\/platform-feedback\/?$/ },

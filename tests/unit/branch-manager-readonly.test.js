@@ -78,6 +78,41 @@ test('core CRM writes stay blocked', () => {
   for (const [m, p] of blocked) assert.equal(allows(m, p), false, `${m} ${p} must be blocked`);
 });
 
+test('leave — apply for your own, and approve your branch\'s', () => {
+  // REGRESSION: this list previously carried /^\/staff-leave\/(requests|my)\b/,
+  // which matched no real route at all. Applying for leave is a POST to the
+  // router ROOT, so a branch manager could neither apply for their own leave
+  // nor approve anyone else's, despite holding hr.my_leave and
+  // hr.leave_approvals and sitting in the route's own APPROVER_ROLES.
+  assert.ok(allows('POST', '/staff-leave'), 'apply for own leave');
+  assert.ok(allows('POST', '/staff-leave/'), 'apply, trailing slash');
+  assert.ok(allows('POST', '/staff-leave/abc/cancel'), 'withdraw own request');
+  assert.ok(allows('POST', '/staff-leave/abc/decide'), 'approve / decline');
+});
+
+test('leave — tenant-wide leave CONFIG stays blocked', () => {
+  // Quotas, approval chains and the holiday calendar are LEAVE_ADMIN's, and
+  // the role does not hold hr.leave_admin.
+  assert.equal(allows('PUT', '/staff-leave/policies/tenant'), false);
+  assert.equal(allows('POST', '/staff-leave/holidays'), false);
+  assert.equal(allows('DELETE', '/staff-leave/holidays/abc'), false);
+});
+
+test('own profile — theme, avatar and the phone gate', () => {
+  // These resolve the caller's own id server-side and cannot touch another
+  // user. The phone pair is load-bearing: Layout shows a BLOCKING capture
+  // modal to anyone without a number, so blocking these locked the role out
+  // of the product entirely.
+  for (const p of ['/users/me/theme', '/users/me/avatar', '/users/me/phone']) {
+    assert.ok(allows('PUT', p), `PUT ${p} should be allowed`);
+  }
+  assert.ok(allows('POST', '/users/me/phone/send-otp'));
+  assert.ok(allows('POST', '/users/me/phone/verify-otp'));
+  // ...but /users/me/* must not become a wildcard over the users module.
+  assert.equal(allows('PUT', '/users/me/role'), false, 'no self-promotion');
+  assert.equal(allows('POST', '/users/me/anything-else'), false);
+});
+
 test('approvals + bulk import + own session are allowed', () => {
   const ok = [
     ['POST', '/lead-discounts/abc/decide'],
