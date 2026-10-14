@@ -335,9 +335,24 @@ export const resetStudentPassword = async (tenant, actor, studentId) => {
   return { password };
 };
 
+// Open a student's portal from the Students tab.
+//
+// WHICH TOKEN depends on who is asking, and this distinction is the whole
+// point: a branch_manager is read-only everywhere else in the product
+// (branchManagerReadOnly), so handing them a FULL student session here would
+// be a way around that gate — they could submit a test or post to a forum as
+// the student, and the action would be indistinguishable from the student's
+// own. They get the readOnly:true token instead, which studentReadOnly denies
+// every write on. super_admin keeps the full session it has always had.
+//
+// head_trainer also gets read-only: they own the teaching roster, not the
+// student's submissions.
 export const sudoStudent = async (tenant, actor, studentId) => {
   await assertStudentInScope(tenant, actor, studentId);
-  return studentAuthService.sudoLoginAsStudent(tenant, studentId);
+  if (actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN) {
+    return studentAuthService.sudoLoginAsStudent(tenant, studentId);
+  }
+  return studentAuthService.viewAsStudent(tenant, studentId);
 };
 
 export const mergeBatches = async (tenant, actor, programId, input) => {

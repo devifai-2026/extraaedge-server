@@ -160,6 +160,21 @@ const ALLOWED = [
   // everything done inside the session too. See modules/view-as/service.js.
   { method: 'POST', re: /^\/view-as\/(start|stop)\/?$/ },
 
+  // Opening a STUDENT's portal to troubleshoot. POST only because it mints a
+  // token and writes an audit row — it changes nothing about the student.
+  //
+  // Safe to allow because the service hands a branch_manager the readOnly:true
+  // student token, never the full session (courses/service.sudoStudent and
+  // lms-analytics' view-as route both branch on role). studentReadOnly then
+  // denies every write made with it, so this cannot become a way around this
+  // very gate. Both paths are branch-scoped server-side.
+  //
+  // Without these two entries the UI offered a "Sudo login" button that was
+  // guaranteed to 403 with this middleware's own message — which is exactly
+  // what branch managers were hitting.
+  { method: 'POST', re: /^\/courses\/students\/[^/]+\/sudo-login\/?$/ },
+  { method: 'POST', re: /^\/lms-analytics\/students\/[^/]+\/(sudo-login|view-as)\/?$/ },
+
   // ---- Bulk write -------------------------------------------------------
   // Bulk lead import: dry-run, commit, retry the rows that failed, and the
   // download/report helpers that are POST only because they take a body.

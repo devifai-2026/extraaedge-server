@@ -22,11 +22,77 @@ export const listCompanies = async (tenant, branchScope = null) => {
   const { rows } = await tenantQuery(
     tenant,
     `SELECT c.id, c.name, c.website, c.industry, c.location, c.about, c.logo_r2_key, c.branch_id, c.created_at,
-            (SELECT count(*)::int FROM job_openings o WHERE o.company_id = c.id AND o.deleted_at IS NULL) AS opening_count
+            (SELECT count(*)::int FROM job_openings o WHERE o.company_id = c.id AND o.deleted_at IS NULL) AS opening_count,
+            -- Split the total into live vs finished. The card previously showed
+            -- only the total, so "2 openings" could mean two live roles or two
+            -- closed ones — the one thing a placement officer actually needs to
+            -- know was the thing it didn't say.
+            (SELECT count(*)::int FROM job_openings o
+              WHERE o.company_id = c.id AND o.deleted_at IS NULL AND o.status = 'open') AS open_count,
+            (SELECT count(*)::int FROM job_openings o
+              WHERE o.company_id = c.id AND o.deleted_at IS NULL AND o.status = 'closed') AS closed_count
        FROM companies c WHERE c.deleted_at IS NULL${branchClause('c', branchScope, params)} ORDER BY c.name`,
     params,
   );
   return rows;
+};
+
+// One company plus everything its detail page shows: the profile, its openings
+// split into current vs past, and a rollup of how its hiring has actually gone.
+//
+// Returns null when the company doesn't exist (or is outside the caller's
+// branch scope), so the controller can 404 rather than render an empty shell.
+export const getCompanyDetail = async (tenant, id, branchScope = null) => {
+  const params = [id];
+  const { rows: companyRows } = await tenantQuery(
+    tenant,
+    `SELECT c.id, c.name, c.website, c.industry, c.location, c.about,
+            c.logo_r2_key, c.branch_id, c.created_at
+       FROM companies c
+      WHERE c.id = $1 AND c.deleted_at IS NULL${branchClause('c', branchScope, params)}`,
+    params,
+  );
+  const company = companyRows[0];
+  if (!company) return null;
+
+  // Every opening for this company, newest first, each with its applicant
+  // count and how many of those reached a selected/offer outcome. The page
+  // splits these by status rather than issuing two near-identical queries.
+  const { rows: openings } = await tenantQuery(
+    tenant,
+    `SELECT o.*, p.name AS program_name,
+            (SELECT count(*)::int FROM job_applications a
+              WHERE a.opening_id = o.id) AS applicant_count,
+            (SELECT count(*)::int FROM job_applications a
+              WHERE a.opening_id = o.id AND a.status IN ('selected', 'offer')) AS selected_count
+       FROM job_openings o
+       LEFT JOIN programs p ON p.id = o.program_id
+      WHERE o.company_id = $1 AND o.deleted_at IS NULL
+      ORDER BY o.created_at DESC`,
+    [id],
+  );
+
+  const { rows: statRows } = await tenantQuery(
+    tenant,
+    `SELECT count(DISTINCT a.id)::int AS total_applicants,
+            count(DISTINCT a.id) FILTER (WHERE a.status IN ('selected', 'offer'))::int AS total_selected,
+            count(DISTINCT a.student_id)::int AS distinct_students
+       FROM job_applications a
+       JOIN job_openings o ON o.id = a.opening_id
+      WHERE o.company_id = $1 AND o.deleted_at IS NULL`,
+    [id],
+  );
+
+  return {
+    ...company,
+    current_openings: openings.filter((o) => o.status === 'open'),
+    past_openings: openings.filter((o) => o.status !== 'open'),
+    stats: {
+      ...statRows[0],
+      open_count: openings.filter((o) => o.status === 'open').length,
+      closed_count: openings.filter((o) => o.status !== 'open').length,
+    },
+  };
 };
 
 export const createCompany = async (tenant, c, actorId) => {
