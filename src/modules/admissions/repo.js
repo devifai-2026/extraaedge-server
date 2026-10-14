@@ -89,6 +89,17 @@ const ADMISSION_JOINS = `
   LEFT JOIN users           u1  ON u1.id  = a.guided_by_counsellor_id
   LEFT JOIN users           u2  ON u2.id  = a.guided_by_manager_id
   LEFT JOIN payment_accounts pa ON pa.id  = a.payment_account_id
+  -- LATERAL + LIMIT 1, not a plain LEFT JOIN: students.admission_id is
+  -- indexed but NOT unique, so two rows pointing at one admission would
+  -- duplicate that admission in every listing built on these joins. Taking
+  -- the earliest row keeps the count honest whatever the data does.
+  LEFT JOIN LATERAL (
+    SELECT s.created_at, s.status, s.last_login_at
+      FROM students s
+     WHERE s.admission_id = a.id AND s.deleted_at IS NULL
+     ORDER BY s.created_at ASC
+     LIMIT 1
+  ) st ON TRUE
 `;
 
 const ADMISSION_NAMED_COLS = `
@@ -100,7 +111,26 @@ const ADMISSION_NAMED_COLS = `
   pa.bank_name AS payment_account_bank,
   pa.account_number AS payment_account_number,
   pa.ifsc AS payment_account_ifsc,
-  pa.upi_id AS payment_account_upi
+  pa.upi_id AS payment_account_upi,
+  -- Onboarding state of the LMS account behind this admission.
+  --
+  -- The three are deliberately distinct, because "the student has a login"
+  -- and "the student is actually using the platform" are different facts and
+  -- the Attendings screen was showing neither:
+  --   student_account_created_at — staff ran course-confirm (students row).
+  --   student_status             — 'active' the instant a temp password is
+  --                                set, i.e. BEFORE the student has ever
+  --                                signed in. On its own it overstates
+  --                                onboarding, which is why the LMS funnel's
+  --                                "Portal activated" count reads high.
+  --   student_last_login_at      — NULL until the student actually logs in.
+  --                                Stamped only by the real password login
+  --                                (student-auth touchLogin), never by sudo
+  --                                or a read-only view-as, so it is the one
+  --                                trustworthy "really onboarded" signal.
+  st.created_at   AS student_account_created_at,
+  st.status       AS student_status,
+  st.last_login_at AS student_last_login_at
 `;
 
 export const list = async (tenant, q = {}) => {
@@ -114,6 +144,13 @@ export const list = async (tenant, q = {}) => {
   if (q.center_id) { params.push(q.center_id); conds.push(`a.center_id = $${params.length}`); }
   if (q.date_from) { params.push(q.date_from); conds.push(`a.admission_date >= $${params.length}`); }
   if (q.date_to) { params.push(q.date_to); conds.push(`a.admission_date <= $${params.length}`); }
+  // LMS onboarding state of the student behind this admission. `st` is the
+  // LATERAL students join in ADMISSION_JOINS, so no extra join is needed —
+  // but the count query MUST also carry ADMISSION_JOINS for `st` to resolve
+  // (see below), otherwise this filter would throw on the count half.
+  if (q.onboarding === 'no_account') conds.push('st.created_at IS NULL');
+  else if (q.onboarding === 'never_used') conds.push('st.created_at IS NOT NULL AND st.last_login_at IS NULL');
+  else if (q.onboarding === 'using') conds.push('st.last_login_at IS NOT NULL');
   if (q.month) {
     // YYYY-MM → first day of month, < first day of next month
     const [y, m] = q.month.split('-').map(Number);
@@ -149,7 +186,11 @@ export const list = async (tenant, q = {}) => {
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     ),
-    tenantQuery(tenant, `SELECT count(*)::int AS total FROM admissions a ${scopeJoin} ${where}`, params.slice(0, -2)),
+    // ADMISSION_JOINS is included here ONLY so the onboarding filter's `st`
+    // alias resolves on the count half too. The joins are all LEFT (and the
+    // students one is LATERAL ... LIMIT 1), so they add no rows and the total
+    // is unchanged for every other query shape.
+    tenantQuery(tenant, `SELECT count(*)::int AS total FROM admissions a ${ADMISSION_JOINS} ${scopeJoin} ${where}`, params.slice(0, -2)),
   ]);
   return { rows, total: countRows[0].total };
 };

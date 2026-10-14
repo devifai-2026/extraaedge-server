@@ -7,7 +7,7 @@ import { requireClockIn } from '../../middleware/requireClockIn.js';
 import { validate } from '../../middleware/validate.js';
 import { optimisticLock } from '../../middleware/optimisticLock.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
-import { notFound, forbidden, validationError } from '../../lib/errors.js';
+import { notFound, forbidden, validationError, conflict } from '../../lib/errors.js';
 import { isValidRRule } from '../../lib/rrule.js';
 import { publish } from '../../lib/queue.js';
 import { EVENT_TYPES, QUEUE_NAMES, SYSTEM_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES } from '../../config/constants.js';
@@ -365,18 +365,58 @@ router.post('/', validate({ body: createSchema }), async (req, res, next) => {
     if (req.body.recurrence_rule && !isValidRRule(req.body.recurrence_rule)) {
       throw validationError([{ path: 'recurrence_rule', message: 'invalid RRULE string' }]);
     }
-    const { rows } = await tenantQuery(
+    // Idempotent against a double-submit. `lead_followups_no_dup_open` is a
+    // partial unique index over (lead, next_action_datetime, comment) for live
+    // PLANNED rows; this lookup MUST key on exactly those same columns, or the
+    // fallback could fail to find the row that won the race and 409 a request
+    // that actually succeeded;
+    // a double click or a retried request therefore hits the conflict instead
+    // of writing a second identical follow-up.
+    //
+    // DO NOTHING rather than an error: from the user's side the second click
+    // is the same intent as the first, and the follow-up they asked for does
+    // exist. Erroring would surface a scary failure for an action that in
+    // fact succeeded, so we fall through and return the row that won the race
+    // — the request stays 201 and the client gets the canonical follow-up.
+    let { rows } = await tenantQuery(
       req.tenant,
       `INSERT INTO lead_followups (lead_id, next_action_datetime, comment, stage_id, sub_stage_id, created_by, recurrence_rule, recurrence_end, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'planned') RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'planned')
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
       [req.body.lead_id, req.body.next_action_datetime, req.body.comment ?? null, req.body.stage_id ?? null, req.body.sub_stage_id ?? null, req.user.id, req.body.recurrence_rule ?? null, req.body.recurrence_end ?? null],
     );
-    await tenantQuery(
-      req.tenant,
-      `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
-       VALUES ($1,$2,'follow_up_scheduled',$3,$4::jsonb)`,
-      [req.body.lead_id, req.user.id, 'Follow-up scheduled', JSON.stringify({ at: req.body.next_action_datetime })],
-    );
+
+    const deduped = rows.length === 0;
+    if (deduped) {
+      // The identical open follow-up already exists — hand back that row.
+      const existing = await tenantQuery(
+        req.tenant,
+        `SELECT * FROM lead_followups
+          WHERE lead_id = $1 AND status = 'planned' AND deleted_at IS NULL
+            AND next_action_datetime = $2::timestamptz
+            AND COALESCE(comment, '') = COALESCE($3, '')
+          ORDER BY created_at ASC
+          LIMIT 1`,
+        [req.body.lead_id, req.body.next_action_datetime, req.body.comment ?? null],
+      );
+      rows = existing.rows;
+      // Nothing inserted and nothing found means the conflict came from a
+      // different constraint; surface it rather than silently returning null.
+      if (!rows.length) throw conflict('Could not create follow-up');
+    }
+    // Side effects below are keyed to an actual new follow-up. On the deduped
+    // path the first request already logged the activity and moved the stage,
+    // so repeating them would put two identical 'Follow-up scheduled' entries
+    // on the timeline — the same visual duplication this guard exists to stop.
+    if (!deduped) {
+      await tenantQuery(
+        req.tenant,
+        `INSERT INTO lead_activities (lead_id, user_id, type, summary, metadata_json)
+         VALUES ($1,$2,'follow_up_scheduled',$3,$4::jsonb)`,
+        [req.body.lead_id, req.user.id, 'Follow-up scheduled', JSON.stringify({ at: req.body.next_action_datetime })],
+      );
+    }
 
     // Auto-move stage on first-touch.
     //
@@ -403,7 +443,10 @@ router.post('/', validate({ body: createSchema }), async (req, res, next) => {
     // We log a stage_changed activity so the timeline tells the full story:
     // follow_up_scheduled + stage_changed appear together with matching
     // timestamps, making the cause obvious to anyone reading the history.
-    try {
+    //
+    // Skipped on the deduped path for the same reason as the activity above:
+    // the winning request already performed any stage move.
+    if (!deduped) try {
       const { rows: leadRows } = await tenantQuery(
         req.tenant,
         `SELECT l.id, l.stage_id
@@ -481,7 +524,9 @@ router.post('/', validate({ body: createSchema }), async (req, res, next) => {
       // eslint-disable-next-line no-console
       console.warn('[follow-ups] stage auto-move failed:', err.message);
     }
-    await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.FOLLOWUP_SCHEDULED, {
+    // Only announce a follow-up that this request actually created, so a
+    // double-submit doesn't fan out duplicate notifications downstream.
+    if (!deduped) await publish(QUEUE_NAMES.EVENTS, EVENT_TYPES.FOLLOWUP_SCHEDULED, {
       type: EVENT_TYPES.FOLLOWUP_SCHEDULED,
       tenantId: req.tenant.id,
       occurredAt: new Date().toISOString(),

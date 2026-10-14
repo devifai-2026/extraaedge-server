@@ -5,6 +5,8 @@ import { tenantRequired } from '../../middleware/tenant.js';
 import { requireRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
+import { forbidden } from '../../lib/errors.js';
+import { writeAuditLog } from '../../lib/auditLog.js';
 import * as repo from './repo.js';
 import * as usersRepo from '../users/repo.js';
 import * as studentAuth from '../student-auth/service.js';
@@ -60,6 +62,43 @@ router.post('/students/:id/sudo-login',
   validate({ params: z.object({ id: z.string().uuid() }) }),
   async (req, res, next) => {
     try { res.json({ data: await studentAuth.sudoLoginAsStudent(req.tenant, req.params.id), meta: { requestId: req.id } }); } catch (e) { next(e); }
+  });
+
+// READ-ONLY student view-as — branch manager (and head_trainer, who already
+// sees this branch's LMS numbers).
+//
+// Separate from the super_admin sudo-login above, and deliberately so: that
+// one mints a full student session, this one mints a token carrying
+// readOnly:true which studentReadOnly turns into a deny on every write. The
+// BM sees exactly what the student sees and cannot submit a test, post to a
+// forum or change a profile in their name.
+//
+// The target is re-checked against the actor's branch HERE rather than
+// trusting the picker — the student id arrives from the client, and a
+// branch-scoped list is a convenience, not a gate. super_admin skips the
+// check because branchForActor returns null for them (tenant-wide by design).
+router.post('/students/:id/view-as',
+  adminOrBranch,
+  validate({ params: z.object({ id: z.string().uuid() }) }),
+  async (req, res, next) => {
+    try {
+      const branchId = await branchForActor(req);
+      if (branchId && !(await repo.isStudentInBranch(req.tenant, req.params.id, branchId))) {
+        throw forbidden('Student is outside your branch');
+      }
+      const data = await studentAuth.viewAsStudent(req.tenant, req.params.id);
+      // Audited like any other look at someone else's screens. Attributed to
+      // the actor, never to the student.
+      await writeAuditLog(req.tenant, {
+        userId: req.user.id,
+        action: 'student.view_as',
+        entityType: 'student',
+        entityId: req.params.id,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+      res.json({ data, meta: { requestId: req.id } });
+    } catch (e) { next(e); }
   });
 
 export default router;

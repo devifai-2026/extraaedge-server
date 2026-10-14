@@ -21,14 +21,20 @@ const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // set-password / reset links vali
 
 // Build the student JWT. type:'student' keeps it strictly distinct from staff
 // access tokens — staff middleware rejects it and vice-versa.
-const issueStudentToken = (tenant, student) => signAccessToken({
+const issueStudentToken = (tenant, student, extraClaims = {}, opts = undefined) => signAccessToken({
   sub: student.id,
   tenantId: tenant.id,
   tenantSlug: tenant.slug,
   role: 'student',
   type: 'student',
   email: student.email,
-});
+  ...extraClaims,
+}, opts);
+
+// A branch manager looking at a student's LMS gets 30 minutes, not a normal
+// session. Long enough to see what the student sees, short enough that the
+// window closes on its own.
+const STUDENT_VIEW_AS_TTL_SECONDS = 30 * 60;
 
 // Mint a one-time token, persist its hash, and return the RAW token (for the
 // link). Reused by course-confirm (initial set-password) and password reset.
@@ -73,6 +79,78 @@ export const emailSetPasswordLink = async (tenant, student, rawToken) => {
     footer: 'This link expires in 7 days. If you didn’t expect this email, you can ignore it.',
   });
   const r = await sendEmail({ to: { email: student.email, name: student.name }, subject: 'Set your student portal password', html });
+  return { url, emailed: r.sent };
+};
+
+// The student portal's login URL for this tenant.
+export const studentLoginUrl = (tenantSlug) => {
+  const base = env.APP_WEB_URL.replace(/\/+$/, '');
+  return `${base}/student/login?t=${encodeURIComponent(tenantSlug)}`;
+};
+
+// Welcome + onboarding email, sent at course-confirm when the credentials are
+// actually minted.
+//
+// WHY HERE AND NOWHERE ELSE: the temp password is never stored in plaintext —
+// confirmCourse returns it once and it is gone. So this is the only moment the
+// student can be told their password; a nightly job or a "resend" button
+// cannot reconstruct it (a re-confirm issues a NEW one).
+//
+// Best-effort by design: sendEmail never throws, and the caller still returns
+// the credentials on screen for Accounts to share by WhatsApp/call. Email
+// failing must never fail course-confirm or lose the credentials.
+export const emailWelcomeCredentials = async (tenant, student, tempPassword, { programName } = {}) => {
+  const url = studentLoginUrl(tenant.slug);
+  const brand = tenant.company_name || tenant.brand_name || tenant.name;
+  const row = (label, value) => `
+    <tr>
+      <td style="padding:6px 12px 6px 0;font-size:13px;color:#64748b;white-space:nowrap">${label}</td>
+      <td style="padding:6px 0;font-size:13px;color:#0f172a;font-weight:600">${value}</td>
+    </tr>`;
+  const html = `
+  <div style="font-family:'Segoe UI',system-ui,Arial,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">
+    <h2 style="font-size:18px;margin:0 0 12px">Welcome to ${brand}, ${student.name}</h2>
+    <p style="font-size:14px;line-height:1.6;color:#334155;margin:0 0 18px">
+      Your enrolment${programName ? ` for <strong>${programName}</strong>` : ''} is confirmed and your
+      student portal is ready. Here is everything you need to get started.
+    </p>
+
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin:0 0 20px">
+      <div style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px">Your login</div>
+      <table style="border-collapse:collapse">
+        ${row('Email', student.email)}
+        ${row('Temporary password', `<code style="background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:2px 6px">${tempPassword}</code>`)}
+      </table>
+      <p style="font-size:12px;color:#64748b;margin:12px 0 0">
+        Please change this password after your first sign-in.
+      </p>
+    </div>
+
+    <p style="margin:0 0 22px">
+      <a href="${url}" style="display:inline-block;background:#E53935;color:#fff;text-decoration:none;
+         padding:11px 22px;border-radius:8px;font-size:14px;font-weight:600">Sign in to your portal</a>
+    </p>
+
+    <div style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin:0 0 8px">What you can do there</div>
+    <ul style="font-size:13.5px;line-height:1.75;color:#334155;margin:0 0 20px;padding-left:18px">
+      <li><strong>Classes</strong> — your schedule, join links and class recordings</li>
+      <li><strong>Materials</strong> — notes and resources shared by your trainer</li>
+      <li><strong>Tests &amp; projects</strong> — assignments to attempt and submit</li>
+      <li><strong>Doubt forum</strong> — ask your trainer a question any time</li>
+      <li><strong>Certificate</strong> — available once you complete the course</li>
+    </ul>
+
+    <p style="font-size:12px;color:#64748b;margin:0 0 6px">Or paste this link into your browser:</p>
+    <p style="font-size:12px;color:#2563eb;word-break:break-all;margin:0 0 20px">${url}</p>
+    <p style="font-size:11px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:12px">
+      Didn't expect this email? Please contact the ${brand} team.
+    </p>
+  </div>`;
+  const r = await sendEmail({
+    to: { email: student.email, name: student.name },
+    subject: `Welcome to ${brand} — your student portal login`,
+    html,
+  });
   return { url, emailed: r.sent };
 };
 
@@ -146,6 +224,36 @@ export const sudoLoginAsStudent = async (tenant, targetStudentId) => {
   if (!student) throw notFound('Student not found');
   return {
     access_token: issueStudentToken(tenant, student),
+    student: { id: student.id, name: student.name, email: student.email, program_id: student.program_id },
+    tenantSlug: tenant.slug,
+  };
+};
+
+// READ-ONLY student sudo, for a branch manager.
+//
+// Distinct from sudoLoginAsStudent above, which is the super_admin's full
+// session. The difference is one claim, `readOnly: true`, which
+// studentReadOnly (middleware/studentReadOnly.js) turns into a deny on every
+// write method. It matters because a student account is not a queue of work
+// like a counsellor's — it is one person's grades, submissions and forum
+// posts. A BM needs to SEE that to support them; nothing about supporting
+// them requires submitting a test in their name, and an action taken through
+// a full student token would be indistinguishable from the student's own.
+//
+// The token is also short-lived and carries no refresh, matching the staff
+// view-as: a look, not a login.
+export const viewAsStudent = async (tenant, targetStudentId) => {
+  const student = await repo.findById(tenant, targetStudentId);
+  if (!student) throw notFound('Student not found');
+  return {
+    access_token: issueStudentToken(
+      tenant,
+      student,
+      { readOnly: true },
+      { ttlSeconds: STUDENT_VIEW_AS_TTL_SECONDS },
+    ),
+    read_only: true,
+    expires_in: STUDENT_VIEW_AS_TTL_SECONDS,
     student: { id: student.id, name: student.name, email: student.email, program_id: student.program_id },
     tenantSlug: tenant.slug,
   };

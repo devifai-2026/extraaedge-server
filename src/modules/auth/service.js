@@ -46,7 +46,11 @@ const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, par
 // as an allowlist silently dropped real surfaces (Discount Approvals and Lead
 // Report, both 'lead_transfer_report', went missing exactly this way). The
 // explicit list below is the grant; the row may only subtract from it.
-const buildAllowedTabs = (tab_permissions, role) => {
+// Exported so view-as can resolve the TARGET's tabs through exactly this
+// logic. A second copy of the rules would be free to drift from the one that
+// actually governs login, which is how a role quietly gains a surface nobody
+// granted it.
+export const buildAllowedTabs = (tab_permissions, role) => {
   if (role === 'super_admin') return ['*'];
   if (role === 'branch_manager') {
     if (!tab_permissions) return [...BRANCH_MANAGER_TAB_KEYS];

@@ -3,6 +3,7 @@ import { signAccessToken } from '../../lib/jwt.js';
 import { forbidden, notFound } from '../../lib/errors.js';
 import { SYSTEM_TENANT_ROLES, BRANCH_MANAGER_TAB_KEYS } from '../../config/constants.js';
 import { teamHierarchy } from '../users/repo.js';
+import { buildAllowedTabs } from '../auth/service.js';
 import * as repo from './repo.js';
 
 // "View as" — a branch manager looking at a staff member's screens.
@@ -30,6 +31,43 @@ import * as repo from './repo.js';
 // This module deliberately does not add a second one.)
 const VIEW_AS_TTL_SECONDS = 30 * 60;
 
+// Surfaces never lent to a branch manager by a view-as session, whatever the
+// target holds. BRANCH_MANAGER_TAB_KEYS omits these deliberately — payroll and
+// the Accounts module are real money, and sudo/impersonation is the admin
+// escalation path — so borrowing a target's tab list must not re-grant them
+// through the back door. Prefix match, so 'payroll' covers 'payroll.runs'.
+//
+// Everything else the target can see IS lent: the point of the feature is to
+// look at the person's actual screens, and the read-only gate (role stays
+// branch_manager) is what keeps that look harmless.
+const VIEW_AS_NEVER_LEND = Object.freeze([
+  'payroll',
+  'accounts',
+  'payments',
+  'impersonation',
+  'advanced.users_roles',
+]);
+
+// The tabs a view-as token carries: the branch manager's own grant UNION the
+// target's, minus the never-lend set above.
+//
+// UNION rather than the target's alone so the BM keeps their bearings — the
+// shell still renders for them — while gaining the target's screens.
+const viewAsTabs = (target) => {
+  const targetTabs = buildAllowedTabs(target.tab_permissions, target.role) ?? [];
+  // A target holding the super_admin wildcard would otherwise expand to
+  // everything. loadTargetInBranch already rejects super_admin, so this is a
+  // belt-and-braces guard against a custom role seeded with '*'.
+  const lendable = (targetTabs.includes('*') ? [] : targetTabs).filter(
+    (t) => !VIEW_AS_NEVER_LEND.some((p) => t === p || t.startsWith(`${p}.`)),
+  );
+  // The never-lend filter applies to BORROWED tabs only. The branch manager's
+  // own grant passes through untouched — 'advanced.users_roles' is in
+  // BRANCH_MANAGER_TAB_KEYS, and filtering the union would have stripped a
+  // surface the role legitimately holds, turning a view-as into a downgrade.
+  return [...new Set([...BRANCH_MANAGER_TAB_KEYS, ...lendable])];
+};
+
 // Resolve the target and prove they are inside the actor's branch subtree.
 //
 // teamHierarchy is the same subtree used by listUsers and
@@ -38,9 +76,10 @@ const VIEW_AS_TTL_SECONDS = 30 * 60;
 const loadTargetInBranch = async (tenant, actor, target_user_id) => {
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT id, email, name, role, is_active
-       FROM users
-      WHERE id = $1 AND deleted_at IS NULL`,
+    `SELECT u.id, u.email, u.name, u.role, u.is_active, r.tab_permissions
+       FROM users u
+       LEFT JOIN custom_roles r ON r.id = u.role_id
+      WHERE u.id = $1 AND u.deleted_at IS NULL`,
     [target_user_id],
   );
   const target = rows[0];
@@ -80,10 +119,23 @@ export const startViewAs = async ({ tenant, actor, input, ip, user_agent }) => {
   //                person who actually did it, never to the person being
   //                viewed.
   //   role       — still branch_manager, so branchManagerReadOnly applies.
-  //   allowedTabs— the branch manager's own tab list, NOT the target's. A
-  //                counsellor holds tabs a branch manager is deliberately
-  //                denied (admissions.my_students carries fee offers), and
-  //                borrowing the target's list would hand those over.
+  //   allowedTabs— the BM's own tabs UNION the target's, minus the surfaces a
+  //                branch manager is deliberately denied (see viewAsTabs).
+  //
+  //                Originally this was the BM's list alone. That made viewing
+  //                a trainer or an HR user useless: BRANCH_MANAGER_TAB_KEYS
+  //                contains no trainer.* key at all, so the BM got an empty
+  //                shell — the target's data scope rendered through screens
+  //                that do not exist for them.
+  //
+  //                Lending tabs is safe HERE and only here because `role`
+  //                below stays branch_manager: a tab controls which screen
+  //                renders, branchManagerReadOnly controls whether anything
+  //                can be written. The BM sees the trainer's classes and the
+  //                HR user's dashboard; every write still returns 403. What
+  //                is NOT lent is the money/admin set, because those carry
+  //                data the role is denied for a reason, not merely screens
+  //                it lacks.
   //   viewAsUserId / viewAsSessionId — the narrowing, and the audit trail.
   const access_token = signAccessToken({
     sub: actor.id,
@@ -91,7 +143,7 @@ export const startViewAs = async ({ tenant, actor, input, ip, user_agent }) => {
     tenantSlug: tenant.slug,
     email: actor.email,
     role: SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
-    allowedTabs: [...BRANCH_MANAGER_TAB_KEYS],
+    allowedTabs: viewAsTabs(target),
     viewAsUserId: target.id,
     viewAsSessionId: session.id,
     // Time spent looking at someone else's queue is not the viewer's own work.

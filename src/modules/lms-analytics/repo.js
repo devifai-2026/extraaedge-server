@@ -96,6 +96,21 @@ export const funnel = async (tenant, branchId = null) => {
 };
 
 // Students for the sudo-login picker (admin). Branch-scoped for a branch_manager.
+// Is this student inside this branch? Used to re-check at view-as time rather
+// than trusting that the id came from the branch-scoped picker — the picker is
+// a UI convenience, not an authorisation boundary, and the id arrives from the
+// client either way.
+export const isStudentInBranch = async (tenant, studentId, branchId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT 1 FROM students s
+      WHERE s.id = $1 AND s.deleted_at IS NULL AND ${studentInBranch('s', 2)}
+      LIMIT 1`,
+    [studentId, branchId],
+  );
+  return rows.length > 0;
+};
+
 export const studentsForPicker = async (tenant, branchId = null) => {
   const p = branchId ? [branchId] : [];
   const sBranch = branchId ? ` AND ${studentInBranch('s', 1)}` : '';

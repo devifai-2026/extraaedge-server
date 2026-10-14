@@ -81,6 +81,12 @@ export const listQuery = z.object({
   date_to: z.string().optional(),
   // Convenience date scopes
   month: z.string().regex(/^\d{4}-\d{2}$/).optional(), // "YYYY-MM"
+  // LMS onboarding state of the student behind the admission. Lets Accounts
+  // isolate the two groups that need chasing:
+  //   no_account    — course-confirm never run, so no credentials exist
+  //   never_used    — credentials issued but the student has never signed in
+  //   using         — has actually logged in at least once
+  onboarding: z.enum(['no_account', 'never_used', 'using']).optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });

@@ -57,6 +57,10 @@ export const studentAuthRequired = (req, _res, next) => {
       tenantSlug: claims.tenantSlug ?? null,
       role: 'student',
       type: 'student',
+      // Set only by a branch manager's read-only student view-as. Copied onto
+      // the principal because studentReadOnly enforces it — an unread flag is
+      // a comment, not a control.
+      readOnly: claims.readOnly === true,
     };
     next();
   } catch (err) {

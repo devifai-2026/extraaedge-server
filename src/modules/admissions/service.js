@@ -145,6 +145,7 @@ const assertReceiptInScope = async (tenant, actor, receiptId) => {
 import { tenantQuery } from '../../db/tenant.js';
 import { notifyUser } from '../../lib/socket.js';
 import { pushNotification } from '../notifications/service.js';
+import { pushStudentNotification } from '../student-notifications/service.js';
 import { logger } from '../../lib/logger.js';
 import * as events from './events-repo.js';
 
@@ -439,11 +440,40 @@ export const confirmCourse = async (tenant, actor, id) => {
     }).catch(() => {})));
   } catch { /* best-effort */ }
 
+  // Welcome + onboarding email to the STUDENT: their login, and what the
+  // portal is for. This is the only point at which it can be sent — the temp
+  // password is never stored in plaintext, so no later job or "resend" button
+  // could reconstruct it (a re-confirm mints a fresh one and re-sends).
+  //
+  // Best-effort: sendEmail swallows its own failures, and the credentials are
+  // still returned below for Accounts to pass on by WhatsApp/call. `emailed`
+  // tells the UI which happened, so staff know when they must share manually
+  // rather than assuming the student was told.
+  let emailed = false;
+  try {
+    const r = await studentAuth.emailWelcomeCredentials(tenant, student, tempPassword, {
+      programName: adm.program_name ?? null,
+    });
+    emailed = r.emailed;
+  } catch { /* never block course-confirm on the email */ }
+
+  // In-portal welcome note, so the guidance is waiting the first time they
+  // sign in even if the email bounced or went to spam.
+  try {
+    await pushStudentNotification(tenant, student.id, {
+      type: 'announcement',
+      message: `Welcome! Your portal is ready — your classes, materials, tests and doubt forum are all here.`,
+      link: '/student/home',
+      metadata: { program_id: adm.program_id },
+    });
+  } catch { /* best-effort */ }
+
   // Credentials returned ONCE for Accounts to copy + share. The temp password
   // is not stored in plaintext, so it can't be shown again — a re-confirm
   // reissues a new one.
   return {
     student: { id: student.id, name: student.name, email: student.email, status: 'active' },
+    welcome_emailed: emailed,
     credentials: {
       login_url: '/student/login',
       tenant_slug: tenant.slug,

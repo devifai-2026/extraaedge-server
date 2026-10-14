@@ -1,5 +1,6 @@
 import express from 'express';
 import { branchManagerReadOnly } from './middleware/branchManagerReadOnly.js';
+import { studentReadOnly } from './middleware/studentReadOnly.js';
 
 // ---- Built modules (Passes 1-6 complete) ----
 import authRouter from './modules/auth/routes.js';
@@ -127,6 +128,12 @@ export const mountRoutes = (app) => {
   // at the edge is the only version of this that stays true over time.
   // No-op for every other role.
   api.use(branchManagerReadOnly);
+
+  // Same default-deny shape for the STUDENT principal, which the gate above
+  // never sees (it keys off req.user; a student token populates req.student).
+  // No-op unless the token carries readOnly:true, i.e. a branch manager's
+  // read-only student view-as.
+  api.use(studentReadOnly);
 
   // Auth
   api.use('/auth', authRouter);
