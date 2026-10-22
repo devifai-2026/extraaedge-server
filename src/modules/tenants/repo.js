@@ -11,6 +11,23 @@ const SELECT_COLUMNS = `
   provisioned_by_platform_user_id, created_at, updated_at
 `;
 
+// Same row as findById PLUS the encrypted DB password, for callers that need
+// to open a connection to the tenant database (impersonation's
+// loadTenantSuperAdmin, for one).
+//
+// Deliberately a SEPARATE function rather than adding the column to
+// SELECT_COLUMNS: findById's result is returned straight to the product-owner
+// API by tenants/service.getTenant, so putting the secret in that list would
+// publish every tenant's encrypted DB password over HTTP. Callers that need
+// the credential ask for it explicitly, and it never reaches a response body.
+export const findByIdWithSecrets = async (id) => {
+  const { rows } = await sysQuery(
+    `SELECT ${SELECT_COLUMNS}, db_password_encrypted FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+    [id],
+  );
+  return rows[0] ?? null;
+};
+
 export const existsBySlug = async (slug) => {
   const { rows } = await sysQuery('SELECT 1 FROM tenants WHERE slug = $1 LIMIT 1', [slug]);
   return rows.length > 0;

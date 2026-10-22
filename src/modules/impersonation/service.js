@@ -1,5 +1,10 @@
 import * as repo from './repo.js';
-import { findById as findTenant } from '../tenants/repo.js';
+// findByIdWithSecrets, not findById: this module opens a POOL against the
+// tenant database, which needs db_password_encrypted. findById deliberately
+// omits it (its rows are returned over HTTP), so using it here handed
+// getTenantPool an undefined password and every "Login as admin" died with
+// "SASL: client password must be a string" — a 500 for every tenant.
+import { findByIdWithSecrets as findTenant } from '../tenants/repo.js';
 import { getTenantPool } from '../../db/tenant.js';
 import { signAccessToken, signRefreshToken } from '../../lib/jwt.js';
 import { forbidden, notFound, validationError } from '../../lib/errors.js';
