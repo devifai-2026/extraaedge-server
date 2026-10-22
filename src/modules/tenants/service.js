@@ -115,6 +115,109 @@ export const deleteTenant = async (id, platform_user_id, ip, user_agent) => {
 // Per the product spec, each node carries only `id`, `name`, and `role` —
 // no email or other internal data. The product owner sees structure, not
 // internals.
+// Same argon2 profile as tenant creation and users/service.resetPassword —
+// one profile across the product, so a hash written here verifies anywhere.
+const HASH_OPTS = { type: argon2.argon2id, memoryCost: 1 << 16, timeCost: 3, parallelism: 1 };
+
+// Human-friendly temporary password: easy to read out over a call or paste
+// into chat, with the ambiguous characters (0/O, 1/l/I) removed. Mirrors
+// student-auth's generateTempPassword for the same reason.
+const generateTempPassword = () => {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const raw = randomToken(32);
+  let out = '';
+  for (let i = 0; i < 14; i += 1) out += chars[raw.charCodeAt(i) % chars.length];
+  return `${out.slice(0, 5)}-${out.slice(5, 10)}-${out.slice(10)}`;
+};
+
+// Switch how this tenant's users sign in. Audited, and the tenant cache is
+// invalidated so the change applies to the very next login rather than after
+// the cached row expires.
+export const setAuthMode = async (id, auth_mode, { platform_user_id, ip, user_agent } = {}) => {
+  const before = await repo.findById(id);
+  if (!before) throw notFound('Tenant not found');
+  const row = await repo.updateById(id, { auth_mode });
+  invalidateTenantCache(row.slug);
+  await recordPlatformAudit({
+    platform_user_id,
+    action: 'tenant.auth_mode_changed',
+    entity_type: 'tenant',
+    entity_id: id,
+    tenant_id: id,
+    ip,
+    user_agent,
+    before_json: { auth_mode: before.auth_mode ?? null },
+    after_json: { auth_mode },
+  });
+  return row;
+};
+
+// The tenant's super admin, for the password panel. Returns the account's
+// identity and whether it currently HAS a password — never the hash itself.
+export const getTenantAdmin = async (id, user_id = null) => {
+  const tenant = await resolveTenantById(id);
+  if (!tenant) throw notFound('Tenant not found');
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id, name, email, phone, is_active, last_login_at, created_at,
+            (password_hash IS NOT NULL) AS has_password
+       FROM users
+      WHERE deleted_at IS NULL AND role = 'super_admin'
+        ${user_id ? 'AND id = $1' : ''}
+      ORDER BY created_at ASC
+      LIMIT 1`,
+    user_id ? [user_id] : [],
+  );
+  const admin = rows[0];
+  if (!admin) throw notFound('This tenant has no super admin account');
+  return admin;
+};
+
+// Set or rotate the tenant super admin's password.
+//
+// Returns the plaintext ONCE, because it is the only moment it exists: argon2
+// is one-way, so a later "show me the password" is impossible by construction
+// — a rotate is the only way to learn it again. The product owner hands this
+// to the customer; there is no email on this path, deliberately, since the
+// whole point is an out-of-band handover for an account that often cannot yet
+// receive mail.
+//
+// The hash is never returned or logged, and the audit row records that a
+// rotation happened, never the value.
+export const setTenantAdminPassword = async (id, { password, user_id } = {}, { platform_user_id, ip, user_agent } = {}) => {
+  const tenant = await resolveTenantById(id);
+  if (!tenant) throw notFound('Tenant not found');
+  const admin = await getTenantAdmin(id, user_id ?? null);
+
+  const plaintext = password || generateTempPassword();
+  const hash = await argon2.hash(plaintext, HASH_OPTS);
+  await tenantQuery(
+    tenant,
+    `UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2`,
+    [hash, admin.id],
+  );
+
+  await recordPlatformAudit({
+    platform_user_id,
+    action: admin.has_password ? 'tenant.admin_password_rotated' : 'tenant.admin_password_set',
+    entity_type: 'user',
+    entity_id: admin.id,
+    tenant_id: id,
+    ip,
+    user_agent,
+    // Records THAT it changed and for whom — never the password.
+    after_json: { email: admin.email, generated: !password },
+  });
+
+  return {
+    user: { id: admin.id, name: admin.name, email: admin.email },
+    password: plaintext,
+    generated: !password,
+    login_url: `/login?t=${tenant.slug}`,
+    tenant_slug: tenant.slug,
+  };
+};
+
 export const getOrgTree = async (id) => {
   const tenant = await resolveTenantById(id);
   if (!tenant) throw notFound('Tenant not found');

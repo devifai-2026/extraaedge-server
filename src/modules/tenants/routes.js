@@ -4,7 +4,10 @@ import { requirePlatformRole } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { PLATFORM_ROLES } from '../../config/constants.js';
 import * as controller from './controller.js';
-import { tenantCreateSchema, tenantUpdateSchema, tenantListQuery, tenantIdParam } from './schema.js';
+import {
+  tenantCreateSchema, tenantUpdateSchema, tenantListQuery, tenantIdParam,
+  authModeSchema, tenantAdminPasswordSchema,
+} from './schema.js';
 
 const router = express.Router();
 
@@ -55,5 +58,27 @@ router.delete('/:id',
   requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER),
   validate({ params: tenantIdParam }),
   controller.remove);
+
+// ---- Login mode + the tenant admin's password -------------------------
+// PRODUCT_OWNER only (not SUPPORT_ADMIN): both change who can get into a
+// customer's account, which is a different class of action from reading a
+// tenant's details.
+
+router.put('/:id/auth-mode',
+  requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER),
+  validate({ params: tenantIdParam, body: authModeSchema }),
+  controller.setAuthMode);
+
+router.get('/:id/admin',
+  requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER),
+  validate({ params: tenantIdParam }),
+  controller.getAdmin);
+
+// POST, not PUT: each call MINTS a new password rather than putting a known
+// value, so it is not idempotent — repeating it gives a different result.
+router.post('/:id/admin/password',
+  requirePlatformRole(PLATFORM_ROLES.PRODUCT_OWNER),
+  validate({ params: tenantIdParam, body: tenantAdminPasswordSchema }),
+  controller.setAdminPassword);
 
 export default router;

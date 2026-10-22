@@ -31,6 +31,8 @@ export const tenantCreateSchema = z.object({
   default_language: z.string().optional(),
   plan_id: z.string().uuid().optional(),
   billing_email: z.string().email().optional(),
+  // 'otp' | 'password' | 'both'. Omitted on create = DB default ('both').
+  auth_mode: z.enum(['otp', 'password', 'both']).optional(),
   trial_ends_at: z.coerce.date().optional(),
   subscription_ends_at: z.coerce.date().optional(),
   first_admin: z.object({
@@ -53,6 +55,24 @@ export const tenantBrandingSchema = z.object({
 });
 
 export const tenantIdParam = z.object({ id: z.string().uuid() });
+
+// How this tenant's users sign in. Mirrors the tenants.auth_mode CHECK.
+export const authModeSchema = z.object({
+  auth_mode: z.enum(['otp', 'password', 'both']),
+});
+
+// Set or rotate the tenant super admin's password.
+//
+// `password` is optional: omitted, the server generates a strong temporary one
+// and returns it once. That is the normal path — it means the product owner
+// never has to invent a password, and the value shown is the value stored.
+// A supplied password must clear the same 10-char floor as tenant creation.
+export const tenantAdminPasswordSchema = z.object({
+  password: z.string().min(10).max(200).optional(),
+  // Which admin, when a tenant somehow has more than one super_admin. Omitted
+  // = the tenant's only/earliest super_admin.
+  user_id: z.string().uuid().optional(),
+});
 
 export const tenantListQuery = z.object({
   q: z.string().optional(),

@@ -56,3 +56,33 @@ export const orgTree = async (req, res, next) => {
     res.json({ data: tree, meta: { requestId: req.id } });
   } catch (err) { next(err); }
 };
+
+// Switch how this tenant's users sign in: otp | password | both.
+export const setAuthMode = async (req, res, next) => {
+  try {
+    const row = await service.setAuthMode(req.params.id, req.body.auth_mode, {
+      platform_user_id: req.user.id, ip: req.ip, user_agent: req.headers['user-agent'],
+    });
+    res.json({ data: row, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// The tenant's super admin + whether a password is currently set. Never
+// returns the hash — there is nothing to "view" but the account itself.
+export const getAdmin = async (req, res, next) => {
+  try {
+    const row = await service.getTenantAdmin(req.params.id);
+    res.json({ data: row, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};
+
+// Set or rotate the super admin's password. The plaintext comes back once —
+// see service.setTenantAdminPassword for why it cannot be re-read later.
+export const setAdminPassword = async (req, res, next) => {
+  try {
+    const out = await service.setTenantAdminPassword(req.params.id, req.body ?? {}, {
+      platform_user_id: req.user.id, ip: req.ip, user_agent: req.headers['user-agent'],
+    });
+    res.json({ data: out, meta: { requestId: req.id } });
+  } catch (err) { next(err); }
+};

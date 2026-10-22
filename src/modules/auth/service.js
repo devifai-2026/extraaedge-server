@@ -206,7 +206,7 @@ const loginTenantUser = async ({ email, password, tenant_slug, ip, user_agent })
   // slugs (the demo tenant) may still post a password. Everyone else is sent
   // to the WhatsApp OTP flow. Kept as a server-side check so an old cached
   // build of the login page can't bypass it.
-  if (!tenantUsesPassword(tenant.slug)) {
+  if (!tenantUsesPassword(tenant)) {
     throw forbidden('This institute signs in with a WhatsApp OTP — password login is disabled');
   }
 
@@ -320,6 +320,7 @@ const findMobileLoginUser = async (tenant, phone) => {
 export const requestMobileLoginOtp = async ({ tenant_slug, phone }) => {
   const tenant = await resolveTenantBySlug(tenant_slug);
   if (tenant.status !== 'active') throw tenantSuspended();
+  assertOtpAllowed(tenant);
   const { user, digits } = await findMobileLoginUser(tenant, phone);
 
   const code = env.MOBILE_OTP_DEMO ? '1234' : generateOtp(6);
@@ -348,6 +349,7 @@ export const requestMobileLoginOtp = async ({ tenant_slug, phone }) => {
 export const verifyMobileLoginOtp = async ({ tenant_slug, phone, otp, ip, user_agent }) => {
   const tenant = await resolveTenantBySlug(tenant_slug);
   if (tenant.status !== 'active') throw tenantSuspended();
+  assertOtpAllowed(tenant);
   const { user, digits } = await findMobileLoginUser(tenant, phone);
 
   const { rows } = await tenantQuery(
@@ -397,25 +399,54 @@ const passwordLoginSlugs = () => new Set(
     .filter(Boolean),
 );
 
-export const tenantUsesPassword = (slug) => !env.OTP_LOGIN_ENFORCED || passwordLoginSlugs().has(String(slug || '').toLowerCase());
+// Per-tenant login mode. tenants.auth_mode is the source of truth (set by the
+// product owner); PASSWORD_LOGIN_SLUGS / OTP_LOGIN_ENFORCED remain as a global
+// clamp so the env break-glass still works for tenants whose mode was never
+// set deliberately.
+//
+// Takes the TENANT ROW, not a slug: the mode lives on the row, and every
+// caller already has it. A slug-only signature would mean a second lookup and
+// would silently fall back to env for a tenant that has an explicit mode.
+const AUTH_MODES = Object.freeze({ OTP: 'otp', PASSWORD: 'password', BOTH: 'both' });
+
+export const tenantAuthMode = (tenant) => {
+  const mode = String(tenant?.auth_mode || '').toLowerCase();
+  if (mode === AUTH_MODES.OTP || mode === AUTH_MODES.PASSWORD || mode === AUTH_MODES.BOTH) return mode;
+  // No explicit mode (or an unexpected value): fall back to the env behaviour.
+  return env.OTP_LOGIN_ENFORCED && !passwordLoginSlugs().has(String(tenant?.slug || '').toLowerCase())
+    ? AUTH_MODES.OTP
+    : AUTH_MODES.BOTH;
+};
+
+export const tenantUsesPassword = (tenant) => tenantAuthMode(tenant) !== AUTH_MODES.OTP;
+export const tenantUsesOtp = (tenant) => tenantAuthMode(tenant) !== AUTH_MODES.PASSWORD;
+
+// Refuse an OTP flow for a password-only tenant. Server-side, for the same
+// reason the password gate is: an old cached build of the login page must not
+// be able to request an OTP the tenant has deliberately turned off.
+const assertOtpAllowed = (tenant) => {
+  if (!tenantUsesOtp(tenant)) {
+    throw forbidden('This institute signs in with a password — OTP login is disabled');
+  }
+};
 
 // What the login screen should render for a tenant.
 export const loginMethods = async ({ tenant_slug }) => {
   const tenant = await resolveTenantBySlug(tenant_slug);
   if (tenant.status !== 'active') throw tenantSuspended();
-  const allowlisted = passwordLoginSlugs().has(tenant.slug.toLowerCase());
   return {
     tenant_slug: tenant.slug,
     tenant_name: tenant.brand_name ?? tenant.name,
     // Whether the server will still ACCEPT a password. Stays true for
     // everyone while OTP_LOGIN_ENFORCED is off — the break-glass that keeps
     // logins possible if WhatsApp delivery turns out to be broken.
-    password: tenantUsesPassword(tenant.slug),
-    // Whether the login screen should OFFER a password box. Only the
-    // allowlisted tenants (demo), so every other institute sees the OTP form
-    // immediately, before enforcement is switched on.
-    password_ui: allowlisted,
-    otp: true,
+    password: tenantUsesPassword(tenant),
+    // Whether the login screen should OFFER a password box. Driven by the
+    // tenant's own auth_mode, so a tenant set to 'password' shows the password
+    // form rather than an OTP box its users can't use.
+    password_ui: tenantUsesPassword(tenant),
+    otp: tenantUsesOtp(tenant),
+    auth_mode: tenantAuthMode(tenant),
   };
 };
 
@@ -518,6 +549,7 @@ const issueWebOtp = async (tenant, user, digits, { binding }) => {
 export const requestWebLoginOtp = async ({ tenant_slug, email, phone }) => {
   const tenant = await resolveTenantBySlug(tenant_slug);
   if (tenant.status !== 'active') throw tenantSuspended();
+  assertOtpAllowed(tenant);
   const user = await findWebLoginUser(tenant, email);
 
   const onFile = last10Digits(user.phone ?? '');
@@ -550,6 +582,7 @@ export const requestWebLoginOtp = async ({ tenant_slug, email, phone }) => {
 export const verifyWebLoginOtp = async ({ tenant_slug, email, otp, ip, user_agent }) => {
   const tenant = await resolveTenantBySlug(tenant_slug);
   if (tenant.status !== 'active') throw tenantSuspended();
+  assertOtpAllowed(tenant);
   const user = await findWebLoginUser(tenant, email);
 
   // Find the live code first so we know which number it went to — that's the
