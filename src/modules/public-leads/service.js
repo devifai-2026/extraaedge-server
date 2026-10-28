@@ -1,4 +1,4 @@
-import { resolveTenantBySlug } from '../../db/tenant.js';
+import { resolveTenantBySlug, tenantQuery } from '../../db/tenant.js';
 import { createLead } from '../leads/service.js';
 import * as leadsRepo from '../leads/repo.js';
 import { RESPONSE_CODES } from '../../config/constants.js';
@@ -52,6 +52,51 @@ export const submitFreeDemoLead = async ({ name, phone, interest }) => {
     return { deduped: true };
   }
 
+  return createWebsiteLead(tenant, {
+    name,
+    phone,
+    program_id,
+    remarks,
+    first_touch_source: 'speedupinfotech.com',
+  });
+};
+
+// speedupinfotech.com/hr — the HR program's lead form. Its leads belong to
+// the separate SI HR tenant and must never land in speedup-infotech, so the
+// tenant is fixed here exactly like TENANT_SLUG above.
+const HR_TENANT_SLUG = 'si-hr';
+const HR_REMARKS = 'Website lead — HR program enquiry (speedupinfotech.com/hr)';
+
+// The SI HR tenant runs a single program, so there's no dropdown to map
+// from. Link the lead to it when exactly one active program exists; with
+// none (or several, where the right one is ambiguous) the lead is still
+// saved, program-less, rather than rejecting a real enquiry.
+const resolveHrProgramId = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT id FROM programs WHERE deleted_at IS NULL AND is_active = true LIMIT 2`,
+  );
+  return rows.length === 1 ? rows[0].id : null;
+};
+
+export const submitHrLead = async ({ name, phone }) => {
+  const tenant = await resolveTenantBySlug(HR_TENANT_SLUG);
+  if (!tenant) throw notFound('Tenant not configured');
+
+  // A repeat enquiry from the same phone is already in the pipeline.
+  const existing = await leadsRepo.findDuplicates(tenant, { phone, whatsapp_number: phone });
+  if (existing.length) return { deduped: true };
+
+  return createWebsiteLead(tenant, {
+    name,
+    phone,
+    program_id: await resolveHrProgramId(tenant),
+    remarks: HR_REMARKS,
+    first_touch_source: 'speedupinfotech.com/hr',
+  });
+};
+
+const createWebsiteLead = async (tenant, { name, phone, program_id, remarks, first_touch_source }) => {
   try {
     return await createLead(
       tenant,
@@ -63,14 +108,14 @@ export const submitFreeDemoLead = async ({ name, phone, interest }) => {
         program_id,
         remarks,
         first_touch_channel: 'Website',
-        first_touch_source: 'speedupinfotech.com',
+        first_touch_source,
         first_touch_medium: 'organic',
       },
       { on_duplicate: 'block' },
     );
   } catch (err) {
-    // A concurrent step-1 submission with the same phone (race with the
-    // findDuplicates check above) is normal, not an error — treat it as a
+    // A concurrent submission with the same phone (race with the callers'
+    // findDuplicates check) is normal, not an error — treat it as a
     // successful, idempotent enquiry rather than exposing "you're already
     // a lead" to an anonymous visitor.
     if (err?.code === RESPONSE_CODES.DUPLICATE_DETECTED) return { deduped: true };

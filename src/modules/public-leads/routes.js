@@ -22,4 +22,18 @@ router.post(
   },
 );
 
+// POST /api/v1/public/leads/si-hr
+//   201 → { ok: true }
+// speedupinfotech.com/hr form. Writes to the SI HR tenant only.
+router.post(
+  '/si-hr',
+  validate({ body: publicLeadCreateSchema }),
+  async (req, res, next) => {
+    try {
+      await service.submitHrLead(req.body);
+      res.status(201).json({ data: { ok: true }, meta: { requestId: req.id } });
+    } catch (err) { next(err); }
+  },
+);
+
 export default router;
