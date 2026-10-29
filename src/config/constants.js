@@ -104,6 +104,19 @@ export const MANAGER_TIER_ROLES = Object.freeze([
 // Declared as data so the check generalises: add a pair here and the warning,
 // the count and the copy all follow. Nothing about telecalling is special-cased
 // in the detector itself.
+//
+// `supervisor` may be a single role or an ARRAY of acceptable roles. An array
+// means "any of these satisfies the rule", which matters because the tiers are
+// optional in practice: a sales_manager is not mandatory, and plenty of
+// branches are run directly by the branch_manager with counsellors reporting
+// straight to them. Insisting on the exact tier blocked a real, valid org
+// shape — so the rule asks for adequate supervision, not one specific job
+// title. The FIRST entry is the one named in the "please add a …" copy, since
+// it is the conventional answer.
+//
+// Supervision also still satisfies the reason the rule exists: stale-lead
+// reassignment needs somebody above the front line to route an abandoned lead
+// to, and a branch_manager is that person just as much as a sales_manager.
 export const EXPECTED_SUPERVISOR = Object.freeze([
   // The three MoM roles. Safe to declare because they have ZERO users on day
   // one — assertSupervisorExists is a hard write block, so adding a pair for an
@@ -128,17 +141,33 @@ export const EXPECTED_SUPERVISOR = Object.freeze([
   },
   {
     role: SYSTEM_TENANT_ROLES.TELECALLER,
-    supervisor: SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+    // Same reasoning as counsellor: a telecaller_lead is a tier a tenant may
+    // simply not staff, and a telecaller reporting to a sales_manager or the
+    // branch_manager is supervised.
+    supervisor: [
+      SYSTEM_TENANT_ROLES.TELECALLER_LEAD,
+      SYSTEM_TENANT_ROLES.SALES_MANAGER,
+      SYSTEM_TENANT_ROLES.BRANCH_MANAGER,
+    ],
     label: 'telecaller',
-    supervisorLabel: 'telecaller lead',
+    supervisorLabel: 'telecaller lead, sales manager or branch manager',
   },
   {
     role: SYSTEM_TENANT_ROLES.COUNSELLOR,
-    supervisor: SYSTEM_TENANT_ROLES.SALES_MANAGER,
+    // A sales_manager is OPTIONAL. Branches that run without one have their
+    // counsellors reporting to the branch_manager, which is a supervised
+    // front line by any reasonable reading.
+    supervisor: [SYSTEM_TENANT_ROLES.SALES_MANAGER, SYSTEM_TENANT_ROLES.BRANCH_MANAGER],
     label: 'counsellor',
-    supervisorLabel: 'sales manager',
+    supervisorLabel: 'sales manager or branch manager',
   },
 ]);
+
+// Acceptable supervisor roles for a rule, always as an array — so callers
+// never have to care whether the pair declared one role or several.
+export const supervisorRolesFor = (rule) => (
+  Array.isArray(rule?.supervisor) ? rule.supervisor : [rule?.supervisor].filter(Boolean)
+);
 
 export const TENANT_STATUS = Object.freeze({
   ACTIVE: 'active',

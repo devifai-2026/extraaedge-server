@@ -3,7 +3,7 @@ import * as repo from './repo.js';
 import * as roleRepo from '../custom-roles/repo.js';
 import * as phoneDirectory from './phone-directory.js';
 import { appError, conflict, forbidden, notFound, validationError } from '../../lib/errors.js';
-import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR, RESPONSE_CODES } from '../../config/constants.js';
+import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES, TEAM_SCOPED_MANAGER_ROLES, LEAD_OWNER_ROLES, EXPECTED_SUPERVISOR, supervisorRolesFor, RESPONSE_CODES } from '../../config/constants.js';
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { generateOtp, hashOtp, otpExpiryDate } from '../../lib/otp.js';
@@ -233,18 +233,21 @@ const assertSupervisorExists = async (tenant, { role, managerIds }) => {
   const rule = EXPECTED_SUPERVISOR.find((r) => r.role === role);
   if (!rule) return;
 
+  // Any of the rule's acceptable supervisor roles will do — see
+  // EXPECTED_SUPERVISOR for why a tier like sales_manager is optional.
+  const supervisorRoles = supervisorRolesFor(rule);
   const { rows: supervisors } = await tenantQuery(
     tenant,
     `SELECT id FROM users
-      WHERE role = $1 AND is_active = true AND deleted_at IS NULL`,
-    [rule.supervisor],
+      WHERE role = ANY($1::text[]) AND is_active = true AND deleted_at IS NULL`,
+    [supervisorRoles],
   );
   if (!supervisors.length) {
     throw appError({
       status: 400,
       code: RESPONSE_CODES.VALIDATION_FAILED,
       message: `No active ${rule.supervisorLabel} exists yet. Please contact your admin to add a ${rule.supervisorLabel} before adding ${rule.label}s.`,
-      details: { code: 'missing_supervisor', role, supervisor_role: rule.supervisor },
+      details: { code: 'missing_supervisor', role, supervisor_roles: supervisorRoles },
     });
   }
 
@@ -254,7 +257,7 @@ const assertSupervisorExists = async (tenant, { role, managerIds }) => {
       status: 400,
       code: RESPONSE_CODES.VALIDATION_FAILED,
       message: `A ${rule.label} needs a reporting manager. Please contact your admin to add your reporting manager.`,
-      details: { code: 'missing_manager', role, supervisor_role: rule.supervisor },
+      details: { code: 'missing_manager', role, supervisor_roles: supervisorRoles },
     });
   }
 
@@ -273,15 +276,15 @@ const assertSupervisorExists = async (tenant, { role, managerIds }) => {
          JOIN users up ON up.id = c.manager_id OR up.id = um.manager_id
         WHERE up.deleted_at IS NULL
      )
-     SELECT 1 FROM chain WHERE role = $2 LIMIT 1`,
-    [ids, rule.supervisor],
+     SELECT 1 FROM chain WHERE role = ANY($2::text[]) LIMIT 1`,
+    [ids, supervisorRoles],
   );
   if (!reach.length) {
     throw appError({
       status: 400,
       code: RESPONSE_CODES.VALIDATION_FAILED,
       message: `A ${rule.label} must report to a ${rule.supervisorLabel} (directly or above). Please contact your admin to add your reporting manager.`,
-      details: { code: 'supervisor_not_in_chain', role, supervisor_role: rule.supervisor },
+      details: { code: 'supervisor_not_in_chain', role, supervisor_roles: supervisorRoles },
     });
   }
 };
@@ -1022,14 +1025,15 @@ const detectOrgGaps = (nodes, edges) => {
 
   // Does any ancestor of `id` hold `role`? Walks up every manager path,
   // guarding against cycles so a mis-set manager_id can't hang the request.
-  const hasAncestorWithRole = (id, role) => {
+  const hasAncestorWithRole = (id, roles) => {
+    const want = new Set(roles);
     const seen = new Set([id]);
     const queue = [...(parents.get(id) || [])];
     while (queue.length) {
       const pid = queue.shift();
       if (!pid || seen.has(pid)) continue;
       seen.add(pid);
-      if (byId.get(pid)?.role === role) return true;
+      if (want.has(byId.get(pid)?.role)) return true;
       queue.push(...(parents.get(pid) || []));
     }
     return false;
@@ -1039,13 +1043,16 @@ const detectOrgGaps = (nodes, edges) => {
   for (const rule of EXPECTED_SUPERVISOR) {
     const members = nodes.filter((n) => n.role === rule.role && n.is_active !== false);
     if (!members.length) continue;
-    const supervisors = nodes.filter((n) => n.role === rule.supervisor && n.is_active !== false);
+    // Any acceptable supervisor role counts, so the warning never reports a
+    // hole the write path would happily allow.
+    const supervisorRoles = supervisorRolesFor(rule);
+    const supervisors = nodes.filter((n) => supervisorRoles.includes(n.role) && n.is_active !== false);
 
     if (!supervisors.length) {
       gaps.push({
         code: 'missing_supervisor',
         role: rule.role,
-        supervisor_role: rule.supervisor,
+        supervisor_roles: supervisorRoles,
         count: members.length,
         // Names so the UI can show who is affected without another request.
         members: members.slice(0, 10).map((m) => m.name),
@@ -1054,12 +1061,12 @@ const detectOrgGaps = (nodes, edges) => {
       continue;
     }
 
-    const orphans = members.filter((m) => !hasAncestorWithRole(m.id, rule.supervisor));
+    const orphans = members.filter((m) => !hasAncestorWithRole(m.id, supervisorRoles));
     if (orphans.length) {
       gaps.push({
         code: 'unsupervised',
         role: rule.role,
-        supervisor_role: rule.supervisor,
+        supervisor_roles: supervisorRoles,
         count: orphans.length,
         members: orphans.slice(0, 10).map((m) => m.name),
         message: `${orphans.length} ${rule.label}${orphans.length === 1 ? '' : 's'} not reporting to a ${rule.supervisorLabel}`,
