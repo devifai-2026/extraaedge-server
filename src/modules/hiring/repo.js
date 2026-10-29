@@ -348,14 +348,27 @@ export const listInterviews = async (tenant, q = {}) => {
   if (q.from) { params.push(q.from); conds.push(`i.scheduled_at >= $${params.length}`); }
   if (q.to) { params.push(q.to); conds.push(`i.scheduled_at <= $${params.length}`); }
   if (q.status_id) { params.push(q.status_id); conds.push(`i.status_id = $${params.length}`); }
+  if (q.round_id) { params.push(q.round_id); conds.push(`i.round_id = $${params.length}`); }
+  if (q.candidate_id) { params.push(q.candidate_id); conds.push(`i.candidate_id = $${params.length}`); }
   const { rows } = await tenantQuery(
     tenant,
     `SELECT i.*, c.name AS candidate_name, c.phone AS candidate_phone,
-            p.title AS position_title, s.name AS status_name, u.name AS interviewer_name
+            p.title AS position_title, s.name AS status_name, u.name AS interviewer_name,
+            r.name AS round_name, r.order_index AS round_order,
+            (SELECT count(*)::int FROM hiring_interview_panel pn
+              WHERE pn.interview_id = i.id) AS panel_count,
+            (SELECT count(*)::int FROM hiring_interview_feedback fb
+              WHERE fb.interview_id = i.id) AS feedback_count,
+            -- The pre-panel remarks. Kept in the payload because they have no
+            -- author to attach to (interviewer_id was never populated on the
+            -- historic rows), so the new per-panellist view would otherwise
+            -- make real feedback disappear from the UI.
+            nullif(btrim(concat_ws(E'\n\n', nullif(btrim(i.remark_1), ''), nullif(btrim(i.remark_2), ''))), '') AS legacy_remark
        FROM hiring_interviews i
        JOIN hiring_candidates c ON c.id = i.candidate_id
        LEFT JOIN hiring_positions p ON p.id = c.position_id
        LEFT JOIN hiring_statuses s ON s.id = i.status_id
+       LEFT JOIN hiring_rounds r ON r.id = i.round_id
        LEFT JOIN users u ON u.id = i.interviewer_id
       WHERE ${conds.join(' AND ')}
       ORDER BY i.scheduled_at DESC NULLS LAST
@@ -368,10 +381,11 @@ export const listInterviews = async (tenant, q = {}) => {
 export const createInterview = async (tenant, b, userId) => {
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO hiring_interviews (candidate_id, scheduled_at, mode, status_id, interviewer_id, remark_1, remark_2, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    `INSERT INTO hiring_interviews (candidate_id, scheduled_at, mode, status_id, interviewer_id, remark_1, remark_2, created_by, round_id, meeting_link)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
     [b.candidate_id, b.scheduled_at ?? null, b.mode ?? null, b.status_id ?? null,
-      b.interviewer_id ?? null, b.remark_1 ?? null, b.remark_2 ?? null, userId ?? null],
+      b.interviewer_id ?? null, b.remark_1 ?? null, b.remark_2 ?? null, userId ?? null,
+      b.round_id ?? null, b.meeting_link ?? null],
   );
   return rows[0];
 };
@@ -382,10 +396,163 @@ export const updateInterview = async (tenant, id, b) => {
     `UPDATE hiring_interviews
         SET scheduled_at = COALESCE($2, scheduled_at), mode = COALESCE($3, mode),
             status_id = COALESCE($4, status_id), interviewer_id = COALESCE($5, interviewer_id),
-            remark_1 = COALESCE($6, remark_1), remark_2 = COALESCE($7, remark_2)
+            remark_1 = COALESCE($6, remark_1), remark_2 = COALESCE($7, remark_2),
+            round_id = COALESCE($8, round_id),
+            -- Empty string clears the link; COALESCE alone could never unset it.
+            meeting_link = CASE WHEN $9::text IS NULL THEN meeting_link
+                                WHEN btrim($9) = '' THEN NULL ELSE $9 END
       WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
     [id, b.scheduled_at ?? null, b.mode ?? null, b.status_id ?? null,
-      b.interviewer_id ?? null, b.remark_1 ?? null, b.remark_2 ?? null],
+      b.interviewer_id ?? null, b.remark_1 ?? null, b.remark_2 ?? null,
+      b.round_id ?? null, b.meeting_link ?? null],
+  );
+  return rows[0] ?? null;
+};
+
+// ---------- Rounds (L1 / L2 / HR / ...) ----------
+
+export const listRounds = async (tenant) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT * FROM hiring_rounds WHERE is_active = true ORDER BY order_index, name`,
+  );
+  return rows;
+};
+
+// ---------- Panel ----------
+
+export const listPanel = async (tenant, interviewId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT pn.*, u.name AS user_name, u.email AS user_email, u.role AS user_role,
+            (fb.id IS NOT NULL) AS has_feedback
+       FROM hiring_interview_panel pn
+       JOIN users u ON u.id = pn.user_id
+       LEFT JOIN hiring_interview_feedback fb
+         ON fb.interview_id = pn.interview_id AND fb.user_id = pn.user_id
+      WHERE pn.interview_id = $1
+      ORDER BY u.name`,
+    [interviewId],
+  );
+  return rows;
+};
+
+// Replace the whole panel in one call — the form edits it as a set, so a
+// diffing API would just push that work onto every caller. Inviting someone
+// already on the panel keeps their original invited_at (and so their feedback,
+// which is keyed on user not on the panel row).
+export const setPanel = async (tenant, interviewId, userIds, invitedBy) => tenantTx(tenant, async (client) => {
+  const ids = [...new Set((userIds || []).filter(Boolean))];
+  await client.query(
+    `DELETE FROM hiring_interview_panel
+      WHERE interview_id = $1 AND NOT (user_id = ANY($2::uuid[]))`,
+    [interviewId, ids],
+  );
+  for (const uid of ids) {
+    await client.query(
+      `INSERT INTO hiring_interview_panel (interview_id, user_id, invited_by)
+       VALUES ($1,$2,$3) ON CONFLICT (interview_id, user_id) DO NOTHING`,
+      [interviewId, uid, invitedBy ?? null],
+    );
+  }
+  return { count: ids.length };
+});
+
+// ---------- Feedback ----------
+
+export const listFeedback = async (tenant, interviewId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT fb.*, u.name AS user_name, u.role AS user_role
+       FROM hiring_interview_feedback fb
+       JOIN users u ON u.id = fb.user_id
+      WHERE fb.interview_id = $1
+      ORDER BY fb.submitted_at`,
+    [interviewId],
+  );
+  return rows;
+};
+
+// A panellist writes their OWN verdict. Upsert, so re-submitting edits theirs
+// and can never overwrite somebody else's — the unique index is on
+// (interview_id, user_id), and user_id comes from the token, not the body.
+export const upsertFeedback = async (tenant, interviewId, userId, { remark, recommendation }) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `INSERT INTO hiring_interview_feedback (interview_id, user_id, remark, recommendation)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (interview_id, user_id) DO UPDATE
+       SET remark = EXCLUDED.remark,
+           recommendation = EXCLUDED.recommendation,
+           updated_at = now()
+     RETURNING *`,
+    [interviewId, userId, remark ?? null, recommendation ?? null],
+  );
+  return rows[0];
+};
+
+// Is this user on the panel (or the organiser)? Gates feedback submission so
+// an arbitrary user cannot post a verdict on an interview they were not in.
+export const isOnPanel = async (tenant, interviewId, userId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT 1
+       FROM hiring_interviews i
+       LEFT JOIN hiring_interview_panel pn
+         ON pn.interview_id = i.id AND pn.user_id = $2
+      WHERE i.id = $1 AND i.deleted_at IS NULL
+        AND (pn.user_id IS NOT NULL OR i.interviewer_id = $2)
+      LIMIT 1`,
+    [interviewId, userId],
+  );
+  return rows.length > 0;
+};
+
+// ---------- "My interviews" ----------
+
+// Every interview this user sits on, with their own feedback inlined so the
+// page can show "you still owe a verdict" without a second request.
+//
+// Deliberately NOT the full hiring list: it returns only the rows the caller
+// is on the panel for, so it can be granted to people who must never see the
+// whole candidate pipeline (salaries, HR remarks).
+export const listMyInterviews = async (tenant, userId, { from, to } = {}) => {
+  const params = [userId];
+  const conds = ['i.deleted_at IS NULL', '(pn.user_id IS NOT NULL OR i.interviewer_id = $1)'];
+  if (from) { params.push(from); conds.push(`i.scheduled_at >= $${params.length}`); }
+  if (to) { params.push(to); conds.push(`i.scheduled_at <= $${params.length}`); }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT i.id, i.scheduled_at, i.mode, i.meeting_link, i.status_id,
+            c.name AS candidate_name, c.phone AS candidate_phone,
+            p.title AS position_title, s.name AS status_name,
+            r.name AS round_name, r.order_index AS round_order,
+            org.name AS organiser_name,
+            fb.remark AS my_remark, fb.recommendation AS my_recommendation,
+            fb.submitted_at AS my_submitted_at
+       FROM hiring_interviews i
+       JOIN hiring_candidates c ON c.id = i.candidate_id
+       LEFT JOIN hiring_interview_panel pn
+         ON pn.interview_id = i.id AND pn.user_id = $1
+       LEFT JOIN hiring_positions p ON p.id = c.position_id
+       LEFT JOIN hiring_statuses s ON s.id = i.status_id
+       LEFT JOIN hiring_rounds r ON r.id = i.round_id
+       LEFT JOIN users org ON org.id = i.interviewer_id
+       LEFT JOIN hiring_interview_feedback fb
+         ON fb.interview_id = i.id AND fb.user_id = $1
+      WHERE ${conds.join(' AND ')}
+      ORDER BY i.scheduled_at DESC NULLS LAST
+      LIMIT 500`,
+    params,
+  );
+  return rows;
+};
+
+export const getInterview = async (tenant, id) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT * FROM hiring_interviews WHERE id = $1 AND deleted_at IS NULL`,
+    [id],
   );
   return rows[0] ?? null;
 };

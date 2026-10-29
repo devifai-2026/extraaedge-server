@@ -88,13 +88,23 @@ export const listInterviews = async (req, res, next) => {
   try { ok(res, req, await service.listInterviews(req.tenant, req.query)); } catch (e) { next(e); }
 };
 export const createInterview = async (req, res, next) => {
-  try { ok(res, req, await service.createInterview(req.tenant, req.body, req.user?.id)); } catch (e) { next(e); }
+  try {
+    const { panel_user_ids: panel, ...body } = req.body;
+    const row = await service.createInterview(req.tenant, body, req.user?.id);
+    // The form edits the panel alongside the interview, so accept it on the
+    // same request rather than making the UI fire a second call it could fail
+    // to send — leaving an interview with nobody on it.
+    if (Array.isArray(panel)) await service.setPanel(req.tenant, row.id, panel, req.user?.id);
+    ok(res, req, { ...row, panel: await service.listPanel(req.tenant, row.id) });
+  } catch (e) { next(e); }
 };
 export const updateInterview = async (req, res, next) => {
   try {
-    const r = await service.updateInterview(req.tenant, req.params.id, req.body);
+    const { panel_user_ids: panel, ...body } = req.body;
+    const r = await service.updateInterview(req.tenant, req.params.id, body);
     if (!r) throw notFound('Interview not found');
-    ok(res, req, r);
+    if (Array.isArray(panel)) await service.setPanel(req.tenant, r.id, panel, req.user?.id);
+    ok(res, req, { ...r, panel: await service.listPanel(req.tenant, r.id) });
   } catch (e) { next(e); }
 };
 export const deleteInterview = async (req, res, next) => {
@@ -152,4 +162,37 @@ export const importRows = async (req, res, next) => {
 // ---------- dashboard ----------
 export const dashboard = async (req, res, next) => {
   try { ok(res, req, await service.dashboard(req.tenant)); } catch (e) { next(e); }
+};
+
+// ---------- rounds / panel / feedback ----------
+
+export const listRounds = async (req, res, next) => {
+  try { ok(res, req, await service.listRounds(req.tenant)); } catch (e) { next(e); }
+};
+
+export const listPanel = async (req, res, next) => {
+  try { ok(res, req, await service.listPanel(req.tenant, req.params.id)); } catch (e) { next(e); }
+};
+
+export const setPanel = async (req, res, next) => {
+  try {
+    await service.setPanel(req.tenant, req.params.id, req.body.user_ids, req.user?.id);
+    ok(res, req, await service.listPanel(req.tenant, req.params.id));
+  } catch (e) { next(e); }
+};
+
+// Interviews the CALLER sits on. Scoped to req.user.id, never a query param,
+// so this cannot be turned into "show me someone else's schedule".
+export const listMyInterviews = async (req, res, next) => {
+  try { ok(res, req, await service.listMyInterviews(req.tenant, req.user.id, req.query)); } catch (e) { next(e); }
+};
+
+export const listFeedback = async (req, res, next) => {
+  try { ok(res, req, await service.listFeedback(req.tenant, req.params.id, req.user)); } catch (e) { next(e); }
+};
+
+// A panellist writes their OWN verdict: the author is req.user.id, so one
+// panellist can never post or overwrite another's.
+export const submitFeedback = async (req, res, next) => {
+  try { ok(res, req, await service.submitFeedback(req.tenant, req.params.id, req.user, req.body)); } catch (e) { next(e); }
 };

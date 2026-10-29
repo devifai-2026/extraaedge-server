@@ -14,18 +14,43 @@ import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js
 import * as controller from './controller.js';
 
 const router = express.Router();
+const uuid = z.string().uuid();
+const idParam = z.object({ id: uuid });
+
+// ---------- panellist surface (NOT HR-only) ----------
+//
+// Mounted ABOVE the requireRole gate below on purpose. Anyone in the tenant
+// can be invited onto an interview panel — a sales manager, a trainer, the
+// super admin — and they must be able to see the interviews they are on and
+// leave their own feedback. Putting these behind the HR gate would 403 the
+// very people the invite exists for.
+//
+// They are still safe to expose, because each one is scoped to the CALLER:
+//   /interviews/mine  returns only rows the caller sits on;
+//   the feedback routes check isOnPanel first and write feedback keyed to
+//   req.user.id, never a user id from the body.
+// None of them expose the candidate pipeline (salary, HR remarks) that the
+// HR-gated routes below do.
+router.use(authRequired, tenantRequired);
+
+router.get('/interviews/mine', controller.listMyInterviews);
+router.get('/interviews/:id/feedback', validate({ params: idParam }), controller.listFeedback);
+router.put('/interviews/:id/feedback', validate({
+  params: idParam,
+  body: z.object({
+    remark: z.string().max(4000).optional().nullable(),
+    recommendation: z.enum(['strong_yes', 'yes', 'no', 'strong_no', 'on_hold']).optional().nullable(),
+  }),
+}), controller.submitFeedback);
+
+// ---------- everything below is HR-only ----------
 router.use(
-  authRequired,
-  tenantRequired,
   requireRole(
     SYSTEM_TENANT_ROLES.SUPER_ADMIN,
     LMS_TENANT_ROLES.HR_RECRUITER,
     LMS_TENANT_ROLES.HR_TEAM_LEAD,
   ),
 );
-
-const uuid = z.string().uuid();
-const idParam = z.object({ id: uuid });
 
 // ---------- dashboard ----------
 router.get('/dashboard', controller.dashboard);
@@ -149,8 +174,19 @@ const interviewBody = z.object({
   interviewer_id: uuid.optional().nullable(),
   remark_1: z.string().max(4000).optional().nullable(),
   remark_2: z.string().max(4000).optional().nullable(),
+  round_id: uuid.optional().nullable(),
+  // Optional by product decision: an interview is often booked before the
+  // Meet/Teams link exists, and an in-person round never needs one.
+  meeting_link: z.string().max(1000).optional().nullable(),
+  // Who sits on the panel. Replaces the panel wholesale (see repo.setPanel).
+  panel_user_ids: z.array(uuid).optional(),
 });
+router.get('/rounds', controller.listRounds);
 router.get('/interviews', controller.listInterviews);
+router.get('/interviews/:id/panel', validate({ params: idParam }), controller.listPanel);
+router.put('/interviews/:id/panel', validate({
+  params: idParam, body: z.object({ user_ids: z.array(uuid) }),
+}), controller.setPanel);
 router.post('/interviews', validate({ body: interviewBody }), controller.createInterview);
 router.put('/interviews/:id', validate({
   params: idParam, body: interviewBody.partial().omit({ candidate_id: true }),

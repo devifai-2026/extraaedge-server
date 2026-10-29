@@ -1,6 +1,7 @@
 // Speedup Hiring — business rules. Internal staff recruitment.
 import * as repo from './repo.js';
-import { notFound, validationError } from '../../lib/errors.js';
+import { notFound, validationError, forbidden } from '../../lib/errors.js';
+import { SYSTEM_TENANT_ROLES, LMS_TENANT_ROLES } from '../../config/constants.js';
 import { listXlsxSheets } from '../../lib/csv.js';
 import { getDownloadSignedUrl } from '../../lib/r2.js';
 import { publish } from '../../lib/queue.js';
@@ -328,4 +329,52 @@ export const queueImport = async (tenant, actor, body) => {
     tenantId: tenant.id, import_id: job.id,
   });
   return job;
+};
+
+// ---------- Interview panel + per-panellist feedback ----------
+//
+// `export * from './repo.js'` already re-exports the plain CRUD, so only the
+// functions that need an AUTHORISATION decision are written out here. The
+// rule in all of them: a verdict belongs to the person who gave it.
+
+// Reading the panel's feedback. Anyone who sat on the interview can see what
+// their fellow panellists said — that is the point of a panel — and HR/admin
+// can see it because they own the hiring decision. Everyone else is refused,
+// so interview feedback about a named person is not tenant-wide reading.
+export const listFeedback = async (tenant, interviewId, actor) => {
+  const privileged = actor?.role === SYSTEM_TENANT_ROLES.SUPER_ADMIN
+    || actor?.role === LMS_TENANT_ROLES.HR_RECRUITER
+    || actor?.role === LMS_TENANT_ROLES.HR_TEAM_LEAD;
+  if (!privileged && !(await repo.isOnPanel(tenant, interviewId, actor?.id))) {
+    throw forbidden('You were not on this interview panel');
+  }
+  return repo.listFeedback(tenant, interviewId);
+};
+
+// Submit (or revise) the CALLER's own feedback.
+//
+// Two gates, for different reasons:
+//   - on the panel: you cannot leave a verdict on an interview you were not
+//     invited to. HR is NOT exempted here — an HR user who did not sit in the
+//     room has no first-hand verdict to give, and letting them post one would
+//     put words in a panellist's column.
+//   - after the fact: feedback written before the interview has happened is
+//     not feedback. Allowed once the scheduled time has passed; an unscheduled
+//     interview is let through since there is no time to be early of.
+export const submitFeedback = async (tenant, interviewId, actor, { remark, recommendation }) => {
+  if (!(await repo.isOnPanel(tenant, interviewId, actor?.id))) {
+    throw forbidden('Only people on this interview panel can leave feedback');
+  }
+  const iv = await repo.getInterview(tenant, interviewId);
+  if (!iv) throw notFound('Interview not found');
+  if (iv.scheduled_at && new Date(iv.scheduled_at).getTime() > Date.now()) {
+    throw validationError([{
+      path: 'remark',
+      message: 'This interview has not happened yet — feedback can be added once it is done.',
+    }]);
+  }
+  if (!remark && !recommendation) {
+    throw validationError([{ path: 'remark', message: 'Add a remark or a recommendation.' }]);
+  }
+  return repo.upsertFeedback(tenant, interviewId, actor.id, { remark, recommendation });
 };
