@@ -123,6 +123,7 @@ exports.up = (pgm) => {
        AND (nullif(btrim(i.remark_1), '') IS NOT NULL OR nullif(btrim(i.remark_2), '') IS NOT NULL)
     ON CONFLICT DO NOTHING
   `);
+
 };
 
 exports.down = (pgm) => {
