@@ -116,7 +116,13 @@ const candidateBody = z.object({
   experience_level: z.enum(['fresher', 'experienced']).optional().nullable(),
   current_area: z.string().max(200).optional().nullable(),
   current_salary: z.number().optional().nullable(),
+  // Legacy single figure. Still accepted so older clients and the bulk
+  // importer keep working; the service mirrors it into both ends of the range.
   expected_salary: z.number().optional().nullable(),
+  // The range candidates actually quote ("20k to 25k"). Either end may be
+  // null for an open-ended expectation.
+  expected_salary_min: z.number().optional().nullable(),
+  expected_salary_max: z.number().optional().nullable(),
   notice_period: z.string().max(120).optional().nullable(),
   status_id: uuid.optional().nullable(),
   remark: z.string().max(4000).optional().nullable(),

@@ -1,5 +1,6 @@
 // Speedup Hiring — data access. Internal staff recruitment.
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
+import { validationError } from '../../lib/errors.js';
 
 // Digits-only, last 10. The dedup key and the join between the candidate sheet
 // and the interview sheet, because email is blank on most real rows. Anything
@@ -226,11 +227,44 @@ export const getCandidate = async (tenant, id) => {
 const CANDIDATE_FIELDS = [
   'position_id', 'contacted_on', 'name', 'phone', 'email', 'location',
   'highest_qualification', 'stream', 'experience_level', 'current_area',
-  'current_salary', 'expected_salary', 'notice_period', 'status_id',
+  'current_salary', 'expected_salary', 'expected_salary_min', 'expected_salary_max',
+  'notice_period', 'status_id',
   'remark', 'remark_2', 'posting_id', 'owner_id',
 ];
 
-export const createCandidate = async (tenant, b, userId) => {
+// Reconcile the legacy single `expected_salary` with the min/max range.
+//
+// Callers come in three shapes and all three must keep working:
+//   - range only (the form, now)      -> mirror into expected_salary so the
+//                                        old column and any report reading it
+//                                        stay truthful;
+//   - single only (bulk import, API)  -> fan out to both ends, a point range;
+//   - neither                         -> untouched.
+//
+// A caller that sends BOTH is taken at its word on the range, since that is
+// the richer statement.
+const normaliseExpectedSalary = (b) => {
+  const has = (k) => b[k] !== undefined && b[k] !== null && b[k] !== '';
+  const out = { ...b };
+  if (has('expected_salary_min') || has('expected_salary_max')) {
+    const lo = has('expected_salary_min') ? Number(b.expected_salary_min) : null;
+    const hi = has('expected_salary_max') ? Number(b.expected_salary_max) : null;
+    if (lo !== null && hi !== null && lo > hi) {
+      throw validationError([{ path: 'expected_salary_min', message: 'Minimum expected salary cannot be greater than the maximum' }]);
+    }
+    // Keep the single column meaningful: the low end is what a "from" figure
+    // means, and it is what the old column held for a point range.
+    out.expected_salary = lo ?? hi;
+  } else if (has('expected_salary')) {
+    const v = Number(b.expected_salary);
+    out.expected_salary_min = v;
+    out.expected_salary_max = v;
+  }
+  return out;
+};
+
+export const createCandidate = async (tenant, input, userId) => {
+  const b = normaliseExpectedSalary(input);
   const cols = ['person_key', 'created_by'];
   const vals = [personKey(b.phone), userId ?? null];
   for (const f of CANDIDATE_FIELDS) {
@@ -245,7 +279,8 @@ export const createCandidate = async (tenant, b, userId) => {
   return rows[0];
 };
 
-export const updateCandidate = async (tenant, id, b) => {
+export const updateCandidate = async (tenant, id, input) => {
+  const b = normaliseExpectedSalary(input);
   const sets = [];
   const vals = [id];
   for (const f of CANDIDATE_FIELDS) {
