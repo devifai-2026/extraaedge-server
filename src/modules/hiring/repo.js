@@ -1,6 +1,6 @@
 // Speedup Hiring — data access. Internal staff recruitment.
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
-import { validationError } from '../../lib/errors.js';
+import { validationError, conflict } from '../../lib/errors.js';
 
 // Digits-only, last 10. The dedup key and the join between the candidate sheet
 // and the interview sheet, because email is blank on most real rows. Anything
@@ -271,12 +271,44 @@ export const createCandidate = async (tenant, input, userId) => {
     if (b[f] !== undefined) { cols.push(f); vals.push(b[f]); }
   }
   const ph = vals.map((_, i) => `$${i + 1}`).join(',');
+  try {
+    const { rows } = await tenantQuery(
+      tenant,
+      `INSERT INTO hiring_candidates (${cols.join(',')}) VALUES (${ph}) RETURNING *`,
+      vals,
+    );
+    return rows[0];
+  } catch (err) {
+    // hiring_candidates_person_position_uq enforces one live application per
+    // person per position. Hitting it is an ordinary thing a recruiter does —
+    // re-adding someone already in the list — so it must read as a clear
+    // message, not the opaque 500 a bare 23505 produces.
+    if (err?.code === '23505' && String(err.constraint || '').includes('person_position')) {
+      const existing = await findCandidateByPersonPosition(tenant, personKey(b.phone), b.position_id);
+      throw conflict(
+        existing
+          ? `${existing.name} is already in the list for this position (added ${new Date(existing.created_at).toLocaleDateString('en-IN')}). Open that record instead of adding a second one.`
+          : 'This candidate is already in the list for this position.',
+        { candidate_id: existing?.id ?? null },
+      );
+    }
+    throw err;
+  }
+};
+
+// The live row that owns a (person, position) pair — used to turn a unique
+// violation into a message naming WHO already exists and WHEN they were added,
+// so the recruiter can go to that record rather than guessing.
+const findCandidateByPersonPosition = async (tenant, key, positionId) => {
+  if (!key || !positionId) return null;
   const { rows } = await tenantQuery(
     tenant,
-    `INSERT INTO hiring_candidates (${cols.join(',')}) VALUES (${ph}) RETURNING *`,
-    vals,
+    `SELECT id, name, created_at FROM hiring_candidates
+      WHERE person_key = $1 AND position_id = $2 AND deleted_at IS NULL
+      LIMIT 1`,
+    [key, positionId],
   );
-  return rows[0];
+  return rows[0] ?? null;
 };
 
 export const updateCandidate = async (tenant, id, input) => {
