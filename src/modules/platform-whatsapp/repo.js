@@ -13,7 +13,20 @@ const requireTenant = async (tenantId) => {
   return tenant;
 };
 
-const webhookUrl = (tenant) => `${env.BASE_URL}/api/v1/whatsapp/webhook/${tenant.slug}`;
+// The URL a tenant pastes into ITS OWN WABridge portal.
+//
+// The ?token= is part of the credential, not decoration: the webhook route
+// rejects a POST without it (see whatsapp-inbox/webhook-routes.js — the token
+// is what stops one tenant posting into another's inbox). Emitting the bare
+// path made this box a trap: it looked like a paste-ready URL and produced a
+// silently rejected webhook.
+//
+// Each tenant has its own token, generated at provisioning, so two tenants
+// never share a URL even on the same WABridge account.
+const webhookUrl = (tenant, token) => {
+  const base = `${env.BASE_URL}/api/v1/whatsapp/webhook/${tenant.slug}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+};
 
 export const getSettings = async (tenantId) => {
   const tenant = await requireTenant(tenantId);
@@ -27,7 +40,7 @@ export const getSettings = async (tenantId) => {
     // Login-OTP template on THIS tenant's WABridge account. Blank = fall back
     // to the platform default; a template only works on the account owning it.
     template_otp: s.templateOtp,
-    webhook_url: webhookUrl(tenant),
+    webhook_url: webhookUrl(tenant, s.webhookToken),
     configured: !!(s.appKey && s.authKey && s.deviceId),
   };
 };
@@ -42,7 +55,7 @@ export const saveSettings = async (tenantId, input) => {
     businessPhone: input.business_phone,
     templateOtp: input.template_otp,
   });
-  return { webhook_url: webhookUrl(tenant), configured: !!(saved.appKey && saved.authKey && saved.deviceId) };
+  return { webhook_url: webhookUrl(tenant, saved.webhookToken), configured: !!(saved.appKey && saved.authKey && saved.deviceId) };
 };
 
 // PO: delete a tenant's WhatsApp config. Clears keys + disables the
@@ -50,7 +63,7 @@ export const saveSettings = async (tenantId, input) => {
 export const clearSettings = async (tenantId) => {
   const tenant = await requireTenant(tenantId);
   const s = await inbox.clearSettings(tenant);
-  return { enabled: s.enabled, configured: !!(s.appKey && s.authKey && s.deviceId), webhook_url: webhookUrl(tenant) };
+  return { enabled: s.enabled, configured: !!(s.appKey && s.authKey && s.deviceId), webhook_url: webhookUrl(tenant, s.webhookToken) };
 };
 
 // The PO is cross-tenant all-access → view every chat (super_admin-equivalent).
