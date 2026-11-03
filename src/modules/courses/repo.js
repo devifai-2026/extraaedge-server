@@ -430,6 +430,55 @@ export const listBatchStudents = async (tenant, batchId) => {
 // placed. The write path has supported moves all along
 // (placeStudentInBatch soft-removes the prior membership first); the gap was
 // purely that nothing could list them.
+// The attendance book: students down, classes across, marks in between.
+//
+// attendanceHistory (below) aggregates to present/absent TOTALS, which answers
+// "how is this student doing" but not "who was here on 23 Sep". Same joins,
+// pivoted by date instead of summed.
+//
+// Returns three flat lists rather than a nested {student: {class: status}}
+// map. Flat is smaller — a nested object repeats every uuid as a 36-char key
+// at both levels, and sends nothing for cells that were never marked — and it
+// can carry per-mark metadata (pre_notified_absent, reason) that a bare
+// 'present'|'absent' string cannot.
+export const attendanceRegister = async (tenant, { programId, batchId, from, to }) => {
+  const [classes, students, marks] = await Promise.all([
+    tenantQuery(
+      tenant,
+      `SELECT c.id, c.title, c.kind, c.starts_at, c.ends_at, c.ended_at,
+              c.completion_status, m.name AS module_name, u.name AS trainer_name
+         FROM classes c
+         LEFT JOIN course_modules m ON m.id = c.module_id
+         LEFT JOIN users u ON u.id = c.trainer_id
+        WHERE c.deleted_at IS NULL AND c.program_id = $1 AND c.batch_id = $2
+          AND c.starts_at >= $3::date AND c.starts_at < ($4::date + 1)
+        -- ASC: a register reads forwards, unlike the history list.
+        ORDER BY c.starts_at ASC`,
+      [programId, batchId, from, to],
+    ),
+    tenantQuery(
+      tenant,
+      `SELECT s.id AS student_id, s.name, s.email, s.status, bs.recordings_from
+         FROM batch_students bs
+         JOIN students s ON s.id = bs.student_id AND s.deleted_at IS NULL
+        WHERE bs.batch_id = $1 AND bs.deleted_at IS NULL
+        ORDER BY s.name`,
+      [batchId],
+    ),
+    tenantQuery(
+      tenant,
+      `SELECT a.class_id, a.student_id, a.status, a.join_mode,
+              a.pre_notified_absent, a.reason
+         FROM attendance a
+         JOIN classes c ON c.id = a.class_id
+        WHERE c.deleted_at IS NULL AND c.program_id = $1 AND c.batch_id = $2
+          AND c.starts_at >= $3::date AND c.starts_at < ($4::date + 1)`,
+      [programId, batchId, from, to],
+    ),
+  ]);
+  return { classes: classes.rows, students: students.rows, marks: marks.rows };
+};
+
 export const listStudentsWithBatch = async (tenant, programId) => {
   const { rows } = await tenantQuery(
     tenant,

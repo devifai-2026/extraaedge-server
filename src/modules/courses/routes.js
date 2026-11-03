@@ -116,6 +116,19 @@ router.get('/:programId/unassigned-students', validate({ params: programParam })
 // Supersedes unassigned-students: same list, plus everyone already in a batch,
 // so the UI can move students as well as place them.
 router.get('/:programId/students-with-batch', validate({ params: programParam }), controller.listStudentsWithBatch);
+// The attendance book. Window is required and capped at a year so a register
+// request can never become an unbounded scan of a long-running course.
+router.get('/:programId/attendance-register', validate({
+  params: programParam,
+  query: z.object({
+    batch_id: uuid,
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  }).refine(
+    (q) => (new Date(q.to) - new Date(q.from)) <= 366 * 24 * 3600 * 1000,
+    { message: 'Range cannot exceed a year', path: ['to'] },
+  ),
+}), controller.attendanceRegister);
 router.post('/:programId/batches/place', validate({ params: programParam, body: z.object({
   batch_id: uuid, student_id: uuid.optional(), student_ids: z.array(uuid).optional(), share_recordings: z.boolean().optional(),
 }) }), controller.placeStudent);

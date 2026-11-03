@@ -202,6 +202,15 @@ export const listUnassignedStudents = async (tenant, actor, programId) => {
 
 // Same read guard as the roster — this is the course's student list, just
 // annotated with each student's batch so one surface can both add and move.
+// batch_id is REQUIRED, deliberately. A register without a batch is not an
+// attendance book, it is a report — and attendance-history already answers
+// that. It also bounds the payload: one batch over a capped window.
+export const attendanceRegister = async (tenant, actor, programId, { batchId, from, to }) => {
+  await assertCanRead(tenant, programId, actor);
+  if (!batchId) throw validationError({ batch_id: 'Pick a batch to see its register' });
+  return repo.attendanceRegister(tenant, { programId, batchId, from, to });
+};
+
 export const listStudentsWithBatch = async (tenant, actor, programId) => {
   await assertCanRead(tenant, programId, actor);
   return repo.listStudentsWithBatch(tenant, programId);
