@@ -81,6 +81,23 @@ export const resolveApprovalChain = async (tenant, applicant) => {
       steps.push({ approver_role: 'admin', approver_id: admin.id });
     }
   }
+  // Resolve each approver's NAME. Without this the UI has only
+  // `approver_role` to show, and those values are internal enums — 'lead'
+  // means "your reporting manager", but printed raw it reads as a sales lead,
+  // which is nonsense on a leave screen (and alarming for a trainer, who has
+  // no leads at all). Every step already carries an approver_id, so this is
+  // one lookup, not a per-step query.
+  const ids = steps.map((x) => x.approver_id).filter(Boolean);
+  if (ids.length) {
+    const { rows } = await tenantQuery(
+      tenant,
+      `SELECT id, name FROM users WHERE id = ANY($1::uuid[])`,
+      [ids],
+    );
+    const nameById = new Map(rows.map((r) => [r.id, r.name]));
+    for (const step of steps) step.approver_name = nameById.get(step.approver_id) ?? null;
+  }
+
   return { mode, steps };
 };
 

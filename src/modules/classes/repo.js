@@ -1,10 +1,13 @@
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 
 // ---------- Classes ----------
-export const listClasses = async (tenant, { programId, batchId } = {}) => {
+export const listClasses = async (tenant, { programId, batchId, programIds } = {}) => {
   const params = [];
   const conds = ['c.deleted_at IS NULL'];
   if (programId) { params.push(programId); conds.push(`c.program_id = $${params.length}`); }
+  // The caller has already resolved which courses this actor may see (see
+  // service.listClasses). Uses the existing classes_program_id_starts_at_idx.
+  if (programIds?.length) { params.push(programIds); conds.push(`c.program_id = ANY($${params.length}::uuid[])`); }
   if (batchId) { params.push(batchId); conds.push(`c.batch_id = $${params.length}`); }
   const { rows } = await tenantQuery(
     tenant,

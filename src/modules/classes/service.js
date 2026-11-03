@@ -29,9 +29,27 @@ const assertClassAccess = async (tenant, classId, actor) => {
 };
 
 // ---------- Classes (trainer) ----------
+//
+// SCOPING. With a programId the roster check applies as before. WITHOUT one
+// this used to fall straight through to the repo, so `GET /classes` with no
+// params returned every class in the tenant to any trainer. Nothing exploited
+// it only because every caller happened to send a programId — which is not a
+// security boundary, it is a coincidence.
+//
+// An unscoped call is now narrowed to the courses the actor actually teaches.
+// That matters beyond the hole itself: the cross-course surfaces (My Day, the
+// roster) query without a programId by design, so they would have widened it.
 export const listClasses = async (tenant, actor, query) => {
-  if (query.programId) await assertCourseTrainer(tenant, query.programId, actor);
-  return repo.listClasses(tenant, query);
+  if (query.programId) {
+    await assertCourseTrainer(tenant, query.programId, actor);
+    return repo.listClasses(tenant, query);
+  }
+  // Admins see the tenant; everyone else sees their own roster, and an empty
+  // roster means no classes rather than all of them.
+  if (isSuperAdmin(actor)) return repo.listClasses(tenant, query);
+  const programIds = await coursesRepo.courseIdsForTrainer(tenant, actor?.id);
+  if (!programIds.length) return [];
+  return repo.listClasses(tenant, { ...query, programIds });
 };
 
 export const createClass = async (tenant, actor, input) => {
