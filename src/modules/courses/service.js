@@ -200,6 +200,13 @@ export const listUnassignedStudents = async (tenant, actor, programId) => {
   return repo.listUnassignedStudents(tenant, programId);
 };
 
+// Same read guard as the roster — this is the course's student list, just
+// annotated with each student's batch so one surface can both add and move.
+export const listStudentsWithBatch = async (tenant, actor, programId) => {
+  await assertCanRead(tenant, programId, actor);
+  return repo.listStudentsWithBatch(tenant, programId);
+};
+
 export const placeStudent = async (tenant, actor, programId, input) => {
   await assertCanManage(tenant, programId, actor);
   const batch = await repo.getBatch(tenant, input.batch_id);

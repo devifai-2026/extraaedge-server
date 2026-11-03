@@ -113,6 +113,9 @@ router.put('/:programId/batches/:batchId', validate({
 }), controller.updateBatch);
 router.get('/:programId/batches/:batchId/students', validate({ params: z.object({ programId: uuid, batchId: uuid }) }), controller.listBatchStudents);
 router.get('/:programId/unassigned-students', validate({ params: programParam }), controller.listUnassignedStudents);
+// Supersedes unassigned-students: same list, plus everyone already in a batch,
+// so the UI can move students as well as place them.
+router.get('/:programId/students-with-batch', validate({ params: programParam }), controller.listStudentsWithBatch);
 router.post('/:programId/batches/place', validate({ params: programParam, body: z.object({
   batch_id: uuid, student_id: uuid.optional(), student_ids: z.array(uuid).optional(), share_recordings: z.boolean().optional(),
 }) }), controller.placeStudent);

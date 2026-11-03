@@ -84,6 +84,10 @@ export const createBatch = async (req, res, next) => {
 export const listBatchStudents = async (req, res, next) => {
   try { ok(res, req, await service.listBatchStudents(req.tenant, req.user, req.params.programId, req.params.batchId)); } catch (e) { next(e); }
 };
+export const listStudentsWithBatch = async (req, res, next) => {
+  try { ok(res, req, await service.listStudentsWithBatch(req.tenant, req.user, req.params.programId)); } catch (e) { next(e); }
+};
+
 export const listUnassignedStudents = async (req, res, next) => {
   try { ok(res, req, await service.listUnassignedStudents(req.tenant, req.user, req.params.programId)); } catch (e) { next(e); }
 };

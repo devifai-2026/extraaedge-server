@@ -421,6 +421,33 @@ export const listBatchStudents = async (tenant, batchId) => {
 
 // The course's "Unassigned pool": confirmed students of this program not in any
 // active batch yet.
+// Every student on the course WITH their current batch, unassigned ones
+// included (batch_id comes back null).
+//
+// listUnassignedStudents below uses NOT EXISTS, so it can only ever show
+// students who have no batch. That made bulk placement a one-way door: you
+// could add the unassigned, but never see — let alone move — anyone already
+// placed. The write path has supported moves all along
+// (placeStudentInBatch soft-removes the prior membership first); the gap was
+// purely that nothing could list them.
+export const listStudentsWithBatch = async (tenant, programId) => {
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT s.id AS student_id, s.name, s.email, s.status,
+            bs.batch_id, bs.recordings_from, bs.created_at AS joined_batch_at,
+            b.name AS batch_name, b.status AS batch_status
+       FROM students s
+       LEFT JOIN batch_students bs
+              ON bs.student_id = s.id AND bs.deleted_at IS NULL
+       LEFT JOIN batches b
+              ON b.id = bs.batch_id AND b.deleted_at IS NULL
+      WHERE s.program_id = $1 AND s.deleted_at IS NULL
+      ORDER BY s.name`,
+    [programId],
+  );
+  return rows;
+};
+
 export const listUnassignedStudents = async (tenant, programId) => {
   const { rows } = await tenantQuery(
     tenant,
