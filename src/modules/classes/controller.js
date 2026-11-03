@@ -3,6 +3,16 @@ import * as service from './service.js';
 const ok = (res, req, data, status = 200) => res.status(status).json({ data, meta: { requestId: req.id } });
 
 // ---- Trainer: classes ----
+export const roster = async (req, res, next) => {
+  try {
+    ok(res, req, await service.roster(req.tenant, req.user, {
+      from: req.query.from,
+      to: req.query.to,
+      trainerId: req.query.trainer_id,
+    }));
+  } catch (e) { next(e); }
+};
+
 export const listClasses = async (req, res, next) => {
   try {
     ok(res, req, await service.listClasses(req.tenant, req.user, {

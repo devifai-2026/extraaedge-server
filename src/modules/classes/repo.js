@@ -40,6 +40,82 @@ export const listClasses = async (tenant, { programId, batchId, programIds, from
   return rows;
 };
 
+// Roster: every class in a window, with a clash flag and a leave flag.
+//
+// Both flags are computed HERE rather than in the client, because each can
+// involve a row the client never received — a clash with a class that starts
+// outside the requested window, or a leave the roster does not render. A
+// client-side check would quietly miss exactly the cases worth catching.
+export const rosterClasses = async (tenant, { from, to, programIds, trainerId } = {}) => {
+  const params = [from, to];
+  const conds = [
+    'c.deleted_at IS NULL',
+    // Overlap, so an evening class spanning midnight appears on both days.
+    'c.ends_at >= $1', 'c.starts_at < $2',
+  ];
+  if (programIds?.length) { params.push(programIds); conds.push(`c.program_id = ANY($${params.length}::uuid[])`); }
+  if (trainerId) { params.push(trainerId); conds.push(`c.trainer_id = $${params.length}`); }
+
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT c.id, c.title, c.kind, c.mode, c.meeting_url,
+            c.starts_at, c.ends_at, c.started_at, c.ended_at,
+            c.completion_status, c.trainer_id, c.program_id, c.batch_id,
+            u.name AS trainer_name,
+            b.name AS batch_name,
+            p.name AS program_name,
+            m.name AS module_name,
+            (SELECT count(*)::int FROM batch_students bs
+              WHERE bs.batch_id = c.batch_id AND bs.deleted_at IS NULL) AS student_count,
+            EXISTS (
+              SELECT 1 FROM classes c2
+               WHERE c2.deleted_at IS NULL AND c2.id <> c.id
+                 AND c.trainer_id IS NOT NULL AND c2.trainer_id = c.trainer_id
+                 AND c2.starts_at < c.ends_at AND c2.ends_at > c.starts_at
+            ) AS has_clash,
+            EXISTS (
+              SELECT 1 FROM staff_leave sl
+               WHERE sl.deleted_at IS NULL AND sl.status = 'approved'
+                 AND sl.user_id = c.trainer_id
+                 AND c.starts_at::date BETWEEN sl.from_date AND sl.to_date
+            ) AS on_leave
+       FROM classes c
+       JOIN batches b ON b.id = c.batch_id
+       JOIN programs p ON p.id = c.program_id
+       LEFT JOIN users u ON u.id = c.trainer_id
+       LEFT JOIN course_modules m ON m.id = c.module_id
+      WHERE ${conds.join(' AND ')}
+      ORDER BY c.starts_at ASC`,
+    params,
+  );
+  return rows;
+};
+
+// Approved AND pending leave in the window. Pending is returned separately
+// flagged, not filtered out: a pending request is not yet a reason to
+// reassign a class, but it IS a reason not to schedule a new one.
+export const rosterLeaves = async (tenant, { from, to, userIds } = {}) => {
+  const params = [from, to];
+  const conds = [
+    'l.deleted_at IS NULL',
+    "l.status IN ('pending','approved')",
+    'l.from_date <= $2::date', 'l.to_date >= $1::date',
+  ];
+  if (userIds?.length) { params.push(userIds); conds.push(`l.user_id = ANY($${params.length}::uuid[])`); }
+  const { rows } = await tenantQuery(
+    tenant,
+    `SELECT l.id, l.user_id, u.name AS user_name, l.from_date, l.to_date,
+            l.reason, l.status, lt.name AS leave_name
+       FROM staff_leave l
+       JOIN users u ON u.id = l.user_id
+       LEFT JOIN leave_types lt ON lt.id = l.leave_type_id
+      WHERE ${conds.join(' AND ')}
+      ORDER BY l.from_date`,
+    params,
+  );
+  return rows;
+};
+
 export const getClass = async (tenant, id) => {
   const { rows } = await tenantQuery(
     tenant,

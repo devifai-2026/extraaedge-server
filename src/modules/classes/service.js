@@ -58,6 +58,50 @@ export const listClasses = async (tenant, actor, query) => {
   return repo.listClasses(tenant, { ...q, programIds });
 };
 
+// Roster — "who is teaching what, when".
+//
+// Scope mirrors trainer-performance: admins and head trainers see the team,
+// a plain trainer sees only their own lane. The clamp is applied to the QUERY
+// (program ids / trainer id), never checked per class, so this stays one
+// round trip regardless of how many classes come back.
+const ROSTER_SEES_EVERYONE = [...ADMIN_TIER_ROLES, LMS_TENANT_ROLES.HEAD_TRAINER];
+
+export const roster = async (tenant, actor, { from, to, trainerId } = {}) => {
+  const seesEveryone = ROSTER_SEES_EVERYONE.includes(actor?.role);
+
+  // A head trainer sees their own courses' team, not the whole tenant's.
+  let programIds;
+  if (!isSuperAdmin(actor)) {
+    programIds = await coursesRepo.courseIdsForTrainer(tenant, actor?.id);
+    // No roster membership means nothing to show — returning early beats
+    // sending an empty ANY() and hoping it matches nothing.
+    if (!programIds.length) {
+      return { from, to, can_see_everyone: seesEveryone, trainers: [], classes: [], leaves: [] };
+    }
+  }
+
+  // A plain trainer cannot widen this by passing someone else's id.
+  const effectiveTrainerId = seesEveryone ? (trainerId || null) : actor?.id;
+
+  const [classes, staff] = await Promise.all([
+    repo.rosterClasses(tenant, { from, to, programIds, trainerId: effectiveTrainerId }),
+    seesEveryone ? coursesRepo.assignableStaff(tenant) : Promise.resolve([]),
+  ]);
+
+  // Lanes come from the STAFF list, not from the classes — a trainer with no
+  // classes this week is precisely who a head trainer is looking for when
+  // they ask "who is free?". Deriving lanes from classes would hide them.
+  const trainers = seesEveryone
+    ? staff
+    : [{ id: actor?.id, name: actor?.name ?? 'Me', role: actor?.role }];
+
+  const leaves = await repo.rosterLeaves(tenant, {
+    from, to, userIds: trainers.map((t) => t.id).filter(Boolean),
+  });
+
+  return { from, to, can_see_everyone: seesEveryone, trainers, classes, leaves };
+};
+
 export const createClass = async (tenant, actor, input) => {
   await assertCourseTrainer(tenant, input.program_id, actor);
   if (new Date(input.ends_at) <= new Date(input.starts_at)) throw validationError({ ends_at: 'End must be after start' });

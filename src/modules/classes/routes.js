@@ -64,6 +64,18 @@ router.get('/', validate({
   ),
 }), controller.listClasses);
 // Literal path, declared before any ':id' route so it is not matched as an id.
+// Literal path, declared with the other literals so it is never matched as
+// an ':id'. Window is required and capped — a roster is always a window.
+router.get('/roster', validate({
+  query: z.object({
+    from: z.string().datetime(),
+    to: z.string().datetime(),
+    trainer_id: uuid.optional(),
+  }).refine(
+    (q) => (new Date(q.to) - new Date(q.from)) <= 62 * 24 * 3600 * 1000,
+    { message: 'Date range cannot exceed 62 days', path: ['to'] },
+  ),
+}), controller.roster);
 router.get('/pending-completions', controller.pendingCompletions);
 // Started but never ended, past their finish time — drives the nag modal.
 router.get('/unended', controller.unendedClasses);
