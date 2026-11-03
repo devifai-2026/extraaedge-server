@@ -1,5 +1,5 @@
 import argon2 from 'argon2';
-import { env, isDevelopment } from '../../config/env.js';
+import { env } from '../../config/env.js';
 import * as repo from './repo.js';
 import * as platformSvc from '../platform-users/service.js';
 import * as branchesRepo from '../branches/repo.js';
@@ -213,17 +213,21 @@ const loginTenantUser = async ({ email, password, tenant_slug, ip, user_agent })
   const user = await repo.findUserByEmail(tenant, email);
   if (!user || !user.is_active) throw unauthenticated('Invalid credentials');
 
-  // TEMP DEV BYPASS — password check disabled to debug a tenant login.
-  // Revert before deploy: uncomment the two lines below and remove this block.
-  // const ok = await argon2.verify(user.password_hash, password);
-  // if (!ok) throw unauthenticated('Invalid credentials');
-  if (!isDevelopment()) {
-    const ok = await argon2.verify(user.password_hash, password);
-    if (!ok) throw unauthenticated('Invalid credentials');
-  } else {
-    // eslint-disable-next-line no-console
-    console.warn(`[AUTH BYPASS] password check skipped for tenant=${tenant.slug} user=${user.email}`);
-  }
+  // The password is ALWAYS verified. There was previously a block here that
+  // skipped argon2.verify whenever NODE_ENV === 'development', labelled "TEMP
+  // DEV BYPASS — revert before deploy". It was never reverted, and the
+  // production host runs with NODE_ENV=development, so the bypass was live:
+  // any non-empty password logged in as any user on any tenant, super_admin
+  // included. Knowing an email address was enough to take over the account.
+  //
+  // Verified against production before removing it — a deliberately wrong
+  // password returned 200 with a valid access token.
+  //
+  // Never reintroduce an auth branch keyed on an environment variable. The
+  // one thing that must not depend on how a host happens to be configured is
+  // whether the password is checked.
+  const ok = await argon2.verify(user.password_hash, password);
+  if (!ok) throw unauthenticated('Invalid credentials');
 
   return mintTenantSession(tenant, user, { ip, user_agent });
 };
