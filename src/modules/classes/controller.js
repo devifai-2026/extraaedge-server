@@ -4,7 +4,15 @@ const ok = (res, req, data, status = 200) => res.status(status).json({ data, met
 
 // ---- Trainer: classes ----
 export const listClasses = async (req, res, next) => {
-  try { ok(res, req, await service.listClasses(req.tenant, req.user, { programId: req.query.programId, batchId: req.query.batchId })); } catch (e) { next(e); }
+  try {
+    ok(res, req, await service.listClasses(req.tenant, req.user, {
+      programId: req.query.programId,
+      batchId: req.query.batchId,
+      from: req.query.from,
+      to: req.query.to,
+      mine: req.query.mine === 'true',
+    }));
+  } catch (e) { next(e); }
 };
 export const createClass = async (req, res, next) => {
   try { ok(res, req, await service.createClass(req.tenant, req.user, req.body), 201); } catch (e) { next(e); }

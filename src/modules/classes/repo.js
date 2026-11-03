@@ -1,7 +1,7 @@
 import { tenantQuery, tenantTx } from '../../db/tenant.js';
 
 // ---------- Classes ----------
-export const listClasses = async (tenant, { programId, batchId, programIds } = {}) => {
+export const listClasses = async (tenant, { programId, batchId, programIds, from, to, trainerId } = {}) => {
   const params = [];
   const conds = ['c.deleted_at IS NULL'];
   if (programId) { params.push(programId); conds.push(`c.program_id = $${params.length}`); }
@@ -9,16 +9,32 @@ export const listClasses = async (tenant, { programId, batchId, programIds } = {
   // service.listClasses). Uses the existing classes_program_id_starts_at_idx.
   if (programIds?.length) { params.push(programIds); conds.push(`c.program_id = ANY($${params.length}::uuid[])`); }
   if (batchId) { params.push(batchId); conds.push(`c.batch_id = $${params.length}`); }
+  // OVERLAP, not `starts_at BETWEEN`: a class running 23:30–00:30 belongs to
+  // both days, and a BETWEEN on starts_at silently drops it from the later
+  // one. Evening batches are exactly where that bites.
+  if (from) { params.push(from); conds.push(`c.ends_at >= $${params.length}`); }
+  if (to) { params.push(to); conds.push(`c.starts_at < $${params.length}`); }
+  if (trainerId) { params.push(trainerId); conds.push(`c.trainer_id = $${params.length}`); }
+
+  // A day view reads forwards; the history table reads backwards. Asking for a
+  // window is the signal that this is a schedule, not an archive.
+  const order = from ? 'ASC' : 'DESC';
+
   const { rows } = await tenantQuery(
     tenant,
-    `SELECT c.*, b.name AS batch_name, m.name AS module_name,
+    `SELECT c.*, b.name AS batch_name, m.name AS module_name, p.name AS program_name,
             (SELECT u.name FROM users u WHERE u.id = c.trainer_id) AS trainer_name,
-            (SELECT count(*)::int FROM class_recordings r WHERE r.class_id = c.id AND r.deleted_at IS NULL) AS recording_count
+            (SELECT count(*)::int FROM class_recordings r WHERE r.class_id = c.id AND r.deleted_at IS NULL) AS recording_count,
+            (SELECT count(*)::int FROM batch_students bs
+              WHERE bs.batch_id = c.batch_id AND bs.deleted_at IS NULL) AS student_count,
+            (SELECT count(*)::int FROM attendance a
+              WHERE a.class_id = c.id AND a.status = 'present') AS present_count
        FROM classes c
        JOIN batches b ON b.id = c.batch_id
+       JOIN programs p ON p.id = c.program_id
        LEFT JOIN course_modules m ON m.id = c.module_id
       WHERE ${conds.join(' AND ')}
-      ORDER BY c.starts_at DESC`,
+      ORDER BY c.starts_at ${order}`,
     params,
   );
   return rows;

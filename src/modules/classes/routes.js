@@ -49,7 +49,20 @@ router.use(authRequired, tenantRequired, requireRole(
   LMS_TENANT_ROLES.HEAD_TRAINER, LMS_TENANT_ROLES.TRAINER,
 ));
 
-router.get('/', controller.listClasses);
+// from/to are an OVERLAP window (see repo.listClasses), capped so an
+// unbounded `from=2000-01-01` cannot turn the day view into a table scan.
+router.get('/', validate({
+  query: z.object({
+    programId: uuid.optional(),
+    batchId: uuid.optional(),
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+    mine: z.enum(['true', 'false']).optional(),
+  }).refine(
+    (q) => !(q.from && q.to) || (new Date(q.to) - new Date(q.from)) <= 62 * 24 * 3600 * 1000,
+    { message: 'Date range cannot exceed 62 days', path: ['to'] },
+  ),
+}), controller.listClasses);
 // Literal path, declared before any ':id' route so it is not matched as an id.
 router.get('/pending-completions', controller.pendingCompletions);
 // Started but never ended, past their finish time — drives the nag modal.

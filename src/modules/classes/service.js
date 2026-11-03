@@ -40,16 +40,22 @@ const assertClassAccess = async (tenant, classId, actor) => {
 // That matters beyond the hole itself: the cross-course surfaces (My Day, the
 // roster) query without a programId by design, so they would have widened it.
 export const listClasses = async (tenant, actor, query) => {
-  if (query.programId) {
-    await assertCourseTrainer(tenant, query.programId, actor);
-    return repo.listClasses(tenant, query);
+  // `mine` is a USER filter layered on top of the security scope below — a
+  // head trainer legitimately wants mine=false to see the whole course's day.
+  // It can never widen access, only narrow it.
+  const q = { ...query };
+  if (q.mine) { q.trainerId = actor?.id; delete q.mine; }
+
+  if (q.programId) {
+    await assertCourseTrainer(tenant, q.programId, actor);
+    return repo.listClasses(tenant, q);
   }
   // Admins see the tenant; everyone else sees their own roster, and an empty
   // roster means no classes rather than all of them.
-  if (isSuperAdmin(actor)) return repo.listClasses(tenant, query);
+  if (isSuperAdmin(actor)) return repo.listClasses(tenant, q);
   const programIds = await coursesRepo.courseIdsForTrainer(tenant, actor?.id);
   if (!programIds.length) return [];
-  return repo.listClasses(tenant, { ...query, programIds });
+  return repo.listClasses(tenant, { ...q, programIds });
 };
 
 export const createClass = async (tenant, actor, input) => {
