@@ -3,6 +3,7 @@ import { createLead } from '../leads/service.js';
 import * as leadsRepo from '../leads/repo.js';
 import { RESPONSE_CODES } from '../../config/constants.js';
 import { notFound } from '../../lib/errors.js';
+import { resolveDictId } from '../integrations/facebook-leads.js';
 
 // This module exists for exactly one caller: the speedupinfotech.com
 // marketing site's "Free Demo" form. There's no tenant subdomain or JWT on
@@ -94,6 +95,99 @@ export const submitHrLead = async ({ name, phone }) => {
     remarks: HR_REMARKS,
     first_touch_source: 'speedupinfotech.com/hr',
   });
+};
+
+// ── SI HR Meta Lead Ads sheet ────────────────────────────────────────────
+// Meta's "export leads to Google Sheets" rows, pushed one at a time by the
+// sheet's Apps Script. Returns { status: 'created' | 'duplicate', lead_id }
+// synchronously so the script can stamp the row and never resend it.
+
+// Meta prefixes ids/phones in the export: "l:123", "p:+9190...", "ag:...".
+const stripMetaPrefix = (v) => String(v ?? '').trim().replace(/^[a-z]{1,3}:/i, '');
+const normKey = (k) => String(k).trim().toLowerCase().replace(/[\s-]+/g, '_');
+
+// Meta's fixed export columns — everything else is a custom form question.
+const META_COLUMNS = new Set([
+  'id', 'created_time', 'ad_id', 'ad_name', 'adset_id', 'adset_name',
+  'campaign_id', 'campaign_name', 'form_id', 'form_name', 'is_organic',
+  'platform', 'full_name', 'phone_number', 'phone', 'email', 'city',
+  'lead_status', 'whatsapp_number', 'synced',
+]);
+
+const titleCase = (s) => s.toLowerCase().replace(/\b\p{L}/gu, (c) => c.toUpperCase());
+
+export const submitHrSheetLead = async (rawRow) => {
+  const tenant = await resolveTenantBySlug(HR_TENANT_SLUG);
+  if (!tenant) throw notFound('Tenant not configured');
+
+  const row = {};
+  for (const [k, v] of Object.entries(rawRow)) row[normKey(k)] = v == null ? '' : String(v).trim();
+
+  const digits = stripMetaPrefix(row.phone_number || row.phone).replace(/\D/g, '');
+  const email = row.email && /\S+@\S+\.\S+/.test(row.email) ? row.email.toLowerCase() : undefined;
+  if (digits.length < 10 && !email) {
+    return { status: 'invalid', reason: 'no usable phone or email' };
+  }
+  const phone = digits.length >= 10 ? digits : undefined;
+  const whatsapp = phone ? (phone.length === 10 ? `91${phone}` : phone) : undefined;
+
+  // Duplicate = same phone (last 10 digits, any of phone/whatsapp) or email.
+  // The leads table's unique indexes back this up if two rows race.
+  const existing = await leadsRepo.findDuplicates(tenant, { phone, whatsapp_number: whatsapp, email });
+  if (existing.length) return { status: 'duplicate', lead_id: existing[0].id };
+
+  // Attribution mirrors the native FB leadgen handler (facebook-leads.js) so
+  // these leads land in the same Facebook/Instagram routing pools.
+  const isInstagram = ['ig', 'instagram'].includes(row.platform?.toLowerCase());
+  const channelName = isInstagram ? 'Instagram' : 'Facebook';
+  const sourceName = isInstagram ? 'Instagram Lead Ads' : 'Facebook Lead Ads';
+  const channelId = await resolveDictId(tenant, 'lead_channels', channelName);
+  const sourceId = await resolveDictId(tenant, 'lead_sources_dict', sourceName);
+  const campaignId = row.campaign_name
+    ? await resolveDictId(tenant, 'lead_campaigns_dict', row.campaign_name)
+    : null;
+
+  // Custom form answers ("currently_studying", ...) → remarks, so the
+  // counsellor sees what the lead actually told us.
+  const answers = Object.entries(row)
+    .filter(([k, v]) => v && !META_COLUMNS.has(k))
+    // Meta often repeats the phone in a second column — don't echo it.
+    .filter(([, v]) => !(phone && v.replace(/\D/g, '').endsWith(phone.slice(-10))))
+    .map(([k, v]) => `${k.replace(/_/g, ' ').replace(/\?$/, '')}: ${v.replace(/_/g, ' ')}`);
+  const remarks = [
+    `Meta lead ad${row.form_name ? ` — form "${row.form_name}"` : ''}${row.ad_name ? `, ad "${row.ad_name}"` : ''}${row.id ? ` (lead ${stripMetaPrefix(row.id)})` : ''}`,
+    ...answers,
+  ].join('\n').slice(0, 2000);
+
+  const rawName = (row.full_name || '').replace(/\s+/g, ' ').trim();
+  try {
+    const lead = await createLead(
+      tenant,
+      null,
+      {
+        name: rawName ? titleCase(rawName) : `Meta Lead ${phone || email}`,
+        phone,
+        whatsapp_number: whatsapp,
+        email,
+        city: row.city ? titleCase(row.city) : undefined,
+        program_id: (await resolveHrProgramId(tenant)) ?? undefined,
+        remarks,
+        first_touch_channel: channelName,
+        first_touch_source: sourceName,
+        first_touch_medium: 'paid',
+        ...(campaignId ? { first_touch_campaign_id: campaignId } : {}),
+        sources: [{ channel_id: channelId, source_id: sourceId, campaign_id: campaignId, is_primary: true }],
+      },
+      { on_duplicate: 'block' },
+    );
+    return { status: 'created', lead_id: lead?.id ?? null };
+  } catch (err) {
+    if (err?.code === RESPONSE_CODES.DUPLICATE_DETECTED) {
+      const again = await leadsRepo.findDuplicates(tenant, { phone, whatsapp_number: whatsapp, email });
+      return { status: 'duplicate', lead_id: again[0]?.id ?? null };
+    }
+    throw err;
+  }
 };
 
 const createWebsiteLead = async (tenant, { name, phone, program_id, remarks, first_touch_source }) => {

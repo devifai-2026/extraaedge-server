@@ -19,7 +19,7 @@ export const pageTokenFromIntegration = (integration) => {
 };
 
 // Resolve (or auto-create) a dictionary row id by name.
-const resolveDictId = async (tenant, table, name) => {
+export const resolveDictId = async (tenant, table, name) => {
   if (!name) return null;
   const { rows: found } = await tenantQuery(tenant, `SELECT id FROM ${table} WHERE lower(name) = lower($1) AND deleted_at IS NULL LIMIT 1`, [String(name).trim()]);
   if (found[0]) return found[0].id;
